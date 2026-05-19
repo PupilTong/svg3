@@ -27,8 +27,8 @@ This repository supports LLM-based assistants. The working language is English.
 
 ## Repository structure
 
-- `svg3-dom/`: SVG3 XML parsing and the mutable element tree (the 3D element model: `<scene>`, `<cube>`, `<ellipsoid>`, …). Pure Rust, no GPU dependencies.
-- `svg3-style/`: Style resolution via [Stylo](https://crates.io/crates/stylo). The planned integration implements Stylo's `TElement`/`TNode`/`TDocument` traits over `svg3-dom`; **[Blitz (`blitz-dom`)](https://github.com/DioxusLabs/blitz) is the canonical reference** for driving Stylo over a custom DOM. Currently a skeleton.
+- `svg3-dom/`: runtime SVG3 XML parsing (`quick-xml`) and the mutable element tree (the 3D element model: `<scene>`, `<cube>`, `<ellipsoid>`, …). Pure Rust, no GPU dependencies.
+- `svg3-style/`: runtime CSS parsing + style resolution via [Stylo](https://crates.io/crates/stylo). The planned integration implements Stylo's `TElement`/`TNode`/`TDocument` traits over `svg3-dom`; **[Blitz (`blitz-dom`)](https://github.com/DioxusLabs/blitz) is the canonical reference** for driving Stylo over a custom DOM. Currently a skeleton.
 - `svg3-render/`: Turns a styled scene into GPU draw calls with [wgpu](https://crates.io/crates/wgpu). Currently a skeleton.
 - `svg3/`: Umbrella crate. Re-exports the layers and exposes the public `parse → render` facade.
 - `app-macos/`: Desktop demo binary (`winit` + `wgpu`), macOS first. Currently a stub `main` (no window loop yet).
@@ -36,6 +36,7 @@ This repository supports LLM-based assistants. The working language is English.
 ## Project design overview
 
 - A document-driven 3D renderer: SVG/XML extended with 3D elements.
+- **Runtime parsing.** Documents are parsed at runtime: XML via `quick-xml` (in `svg3-dom`), CSS via Stylo's parser (`cssparser`/`selectors`, in `svg3-style`). svg3 deliberately does **not** replicate the Paws template's compile-time style preprocessor (`view-macros`' `css!()` macro + `paws-style-ir`). There is no proc-macro / preprocessor crate; do not add one.
 - **Stylo** provides web-standard CSS behavior and computed-style resolution.
 - **wgpu** provides cross-platform GPU rendering (Metal/Vulkan/DX12/WebGPU).
 - The core (`svg3-dom`/`svg3-style`/`svg3-render`/`svg3`) is platform-agnostic; platform glue lives in app crates (`app-macos`, future `app-*`).
