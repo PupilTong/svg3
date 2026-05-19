@@ -1,0 +1,11 @@
+[package]
+name = "svg3"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+svg3-dom.workspace = true
+svg3-style.workspace = true
+svg3-render.workspace = true
+thiserror.workspace = true

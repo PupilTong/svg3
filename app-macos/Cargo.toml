@@ -1,0 +1,15 @@
+[package]
+name = "app-macos"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "svg3-macos"
+path = "src/main.rs"
+
+[dependencies]
+svg3.workspace = true
+anyhow.workspace = true
+env_logger.workspace = true
+log.workspace = true

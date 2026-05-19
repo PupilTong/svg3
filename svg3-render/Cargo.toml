@@ -1,0 +1,15 @@
+[package]
+name = "svg3-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+svg3-dom.workspace = true
+svg3-style.workspace = true
+wgpu.workspace = true
+bytemuck = { workspace = true, features = ["derive"] }
+glam.workspace = true
+raw-window-handle.workspace = true
+thiserror.workspace = true
+log.workspace = true

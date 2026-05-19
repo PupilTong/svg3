@@ -1,0 +1,37 @@
+[workspace]
+resolver = "2"
+members = ["svg3-dom", "svg3-style", "svg3-render", "svg3", "app-macos"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MPL-2.0"
+
+[workspace.dependencies]
+# Internal crates
+svg3-dom = { path = "svg3-dom" }
+svg3-style = { path = "svg3-style" }
+svg3-render = { path = "svg3-render" }
+svg3 = { path = "svg3" }
+
+# Graphics + windowing
+wgpu = "29"
+winit = "0.30"            # 0.30 = latest stable line; 0.31 is a beta — avoid for scaffold
+raw-window-handle = "0.6"
+bytemuck = "1"
+pollster = "0.4"
+
+# Style resolution
+stylo = "0.17"            # latest Stylo (Paws referenced 0.13; this repo tracks latest)
+
+# Math
+glam = "0.32"
+
+# Parsing
+quick-xml = "0.40"
+
+# Diagnostics
+log = "0.4"
+env_logger = "0.11"
+thiserror = "2"
+anyhow = "1"
