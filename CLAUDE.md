@@ -38,7 +38,8 @@ This repository supports LLM-based assistants. The working language is English.
 - A document-driven 3D renderer: SVG/XML extended with 3D elements.
 - **Runtime parsing.** Documents are parsed at runtime: XML via `quick-xml` (in `svg3-dom`), CSS via Stylo's parser (`cssparser`/`selectors`, in `svg3-style`). svg3 deliberately does **not** replicate the Paws template's compile-time style preprocessor (`view-macros`' `css!()` macro + `paws-style-ir`). There is no proc-macro / preprocessor crate; do not add one.
 - **Stylo** provides web-standard CSS behavior and computed-style resolution.
-- **wgpu** provides cross-platform GPU rendering (Metal/Vulkan/DX12/WebGPU).
+- **wgpu** provides cross-platform native GPU rendering (Metal/Vulkan/DX12).
+- **Native only — no WASM.** Targets native platforms (macOS first, then Windows/Linux). There is no WASM engine, `wasm32` target, or browser/WebGPU path planned. Deliberate divergence from the Paws template's `wasmtime-engine` — do not add one.
 - The core (`svg3-dom`/`svg3-style`/`svg3-render`/`svg3`) is platform-agnostic; platform glue lives in app crates (`app-macos`, future `app-*`).
 
 ## How to run

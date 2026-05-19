@@ -53,7 +53,7 @@ cargo run -p app-macos           # scaffold: logs and exits (no window yet)
 2. SVG3 XML parsing → element tree (`<scene>`, `<cube>`, `<ellipsoid>`).
 3. 3D primitive mesh generation; render a single `<cube>`.
 4. Real Stylo integration (computed styles drive material/transform).
-5. Multi-platform demos (Windows, Linux, web) + Linux/Windows CI.
+5. Multi-platform native demos (Windows, Linux) + Linux/Windows CI.
 6. Native macOS `.app` bundling.
 
 ## License
