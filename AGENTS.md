@@ -2,6 +2,8 @@
 
 This repository supports LLM-based assistants. The working language is English.
 
+`AGENTS.md` is the single canonical agent-instructions file, shared across tools (Claude Code and GPT/Codex both read it). There is no `CLAUDE.md` — edit this file instead.
+
 ## General guidelines
 
 - **Rebase onto `origin/main` before starting any work** to avoid merge conflicts and stale base commits.
@@ -52,4 +54,4 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 ## Maintaining this file
 
-On every change, assess whether `CLAUDE.md` needs an update and update it when needed. After finishing work, verify it is still accurate.
+On every change, assess whether `AGENTS.md` needs an update and update it when needed. After finishing work, verify it is still accurate.
