@@ -10,6 +10,5 @@ svg3-style.workspace = true
 wgpu.workspace = true
 bytemuck = { workspace = true, features = ["derive"] }
 glam.workspace = true
-raw-window-handle.workspace = true
 thiserror.workspace = true
 log.workspace = true

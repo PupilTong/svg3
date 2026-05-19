@@ -26,7 +26,6 @@ SVG3 XML  ──►  svg3-dom    ──►  svg3-style   ──►  svg3-render 
 | `svg3-style`  | Resolve computed styles for the element tree via Stylo.              |
 | `svg3-render` | Turn a styled scene into GPU draw calls with wgpu.                    |
 | `svg3`        | Umbrella crate: public API tying DOM + style + render together.      |
-| `app-macos`   | Desktop demo binary (winit + wgpu), macOS first.                     |
 
 > **Status: scaffolding.** Crates currently provide skeletons and compile
 > green. Rendering, parsing and the Stylo cascade are not implemented yet —
@@ -44,12 +43,11 @@ cargo build --workspace          # first build is slow (stylo + wgpu)
 cargo test  --workspace
 cargo fmt --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo run -p app-macos           # scaffold: logs and exits (no window yet)
 ```
 
 ## Roadmap
 
-1. winit event loop + wgpu surface (a window that clears to a color).
+1. winit event loop + wgpu surface — a window that clears to a colour (introduces the first demo app crate).
 2. SVG3 XML parsing → element tree (`<scene>`, `<cube>`, `<ellipsoid>`).
 3. 3D primitive mesh generation; render a single `<cube>`.
 4. Real Stylo integration (computed styles drive material/transform).
