@@ -29,9 +29,10 @@ SVG3 XML  ──►  svg3-dom    ──►  svg3-style   ──►  svg3-render 
 | `app-macos`   | Native macOS demo: a winit window with a wgpu (Metal) surface.       |
 
 > **Status: early scaffolding.** `app-macos` opens a real Metal-backed Cocoa
-> window and clears it to a solid colour each frame (roadmap item 1). The
-> core crates are still skeletons: SVG3 parsing, the Stylo cascade and scene
-> rendering are not implemented yet — see the roadmap below.
+> window and clears it to a solid colour each frame (roadmap item 1).
+> `svg3-dom` now parses svg3 XML into an element tree with raw attributes
+> (roadmap item 2). The Stylo cascade and the scene renderer are still
+> skeletons — see the roadmap below.
 
 ## Toolchain
 
@@ -53,7 +54,7 @@ bash scripts/bundle-macos.sh                 # build a .app: target/release/bund
 ## Roadmap
 
 1. **(done)** winit event loop + wgpu surface — a window that clears to a colour (the `app-macos` crate).
-2. SVG3 XML parsing → element tree (`<scene>`, `<cube>`, `<ellipsoid>`).
+2. **(done)** SVG3 XML parsing → element tree (`<scene>`, `<cube>`, `<ellipsoid>`).
 3. 3D primitive mesh generation; render a single `<cube>`.
 4. Real Stylo integration (computed styles drive material/transform).
 5. Multi-platform native demos (Windows, Linux) + Linux/Windows CI.
