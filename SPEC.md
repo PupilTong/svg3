@@ -1,652 +1,555 @@
-# svg3 Specification — Draft 0
+# svg3
+## A 3D Extension to Scalable Vector Graphics (SVG) 1.1
 
-**Status:** working draft. The svg3 implementation is at an early scaffold (see
-[README.md](README.md) roadmap). This document is **descriptive of intent and
-normative for what already ships**, marked per section. It will firm up as the
-pipeline (parse → style → render) reaches feature parity with the spec.
+**Editor's draft.** This document defines `svg3`, an extension to
+[Scalable Vector Graphics (SVG) 1.1](https://www.w3.org/TR/SVG11/)
+that adds three-dimensional graphics elements, additional transform
+functions, and the rendering model for them. It is not a W3C
+publication. Issues are tracked at <https://github.com/PupilTong/svg3>.
 
-**Scope:** the on-the-wire document language and the rendering model. Public
-Rust API surface, build/run instructions, and contributor conventions live in
-[README.md](README.md) and [AGENTS.md](AGENTS.md).
+## Table of contents
 
-svg3 is a **superset of SVG 1.1**: the root is the SVG 1.1 `<svg>` element,
-SVG 1.1's 2D drawing model is inherited wholesale, and svg3 adds 3D
-primitives (`<cube>`, `<ellipsoid>`, …) plus CSS Transforms 2's 3D transform
-functions alongside it. There is no separate 3D-context element; 3D
-primitives are siblings of 2D SVG 1.1 content and share a single coordinate
-system (SVG 1.1's user space extended with a Z axis). The host renderer
-owns the camera that frames 3D content; the document does not. A 2D-only
-SVG 1.1 renderer skips 3D primitives as unknown elements — useful graceful
-degradation. See [§10. Relationship to SVG 1.1](#10-relationship-to-svg-11)
-for the full mapping. Canonical references:
-
-- [SVG 1.1 (W3C)](https://www.w3.org/TR/SVG11/) — inherited wholesale; this
-  spec does not re-specify SVG 1.1 features.
-- [CSS Transforms Module Level 2](https://www.w3.org/TR/css-transforms-2/) —
-  3D transform function syntax and composition rules.
-- [CSS Color Module Level 4](https://www.w3.org/TR/css-color-4/) — paint
-  values.
-- The host CSS engine for everything else: svg3 resolves styles through
-  [Stylo](https://crates.io/crates/stylo) and inherits its CSS semantics
-  directly (see [§8. Styling](#8-styling)).
+1. [Introduction](#1-introduction)
+2. [Conformance](#2-conformance)
+3. [Coordinate system and units](#3-coordinate-system-and-units)
+4. [Transforms](#4-transforms)
+5. [Three-dimensional graphics elements](#5-three-dimensional-graphics-elements)
+6. [Painting and visibility](#6-painting-and-visibility)
+7. [Rendering model](#7-rendering-model)
+8. [References](#8-references)
 
 ---
 
 ## 1. Introduction
 
-svg3 is an **XML-based document language that extends SVG 1.1 with
-three-dimensional primitives**. The root is the SVG 1.1 `<svg>`
-element. 3D primitives (`<cube>`, `<ellipsoid>`, …) appear as children
-of `<svg>` (or of any SVG 1.1 grouping element), as siblings of 2D
-content. SVG 1.1's 2D drawing model — paths, basic shapes, text — is
-inherited wholesale and applies normally; an svg3 implementation will
-eventually be a conforming SVG 1.1 renderer too.
-
-A document describes geometry only. The host application supplies the
-rendering surface and the camera that frames the 3D content (see
-[§7. Camera and viewport](#7-camera-and-viewport)); the document does
-not embed a camera and does not schedule animation in v0.
-
-### 1.1 Why extend SVG instead of forking
-
-SVG 1.1 already provides what a 3D scene description needs as
-infrastructure: an XML tree, a mature attribute / styling vocabulary,
-CSS cascade semantics, and authoring ergonomics designers know.
-Rather than fork a new format, svg3 keeps `<svg>` as the root, keeps
-SVG 1.1's coordinate system, and adds 3D primitives + 3D transform
-functions alongside the existing 2D ones.
-
-There is no separate "3D context" element. One coordinate system, one
-cascade, one transform-composition rule. Authors put 2D and 3D side
-by side in the same tree; a 2D-only SVG 1.1 renderer ignores the 3D
-primitives as unknown elements (graceful degradation).
-
-svg3 is **not** a submission to the SVG WG and is not intended to
-render inside a browser's native SVG engine; the native svg3 renderer
-is the conformance target. Compatibility with SVG 1.1 is about
-authoring intuition and ecosystem tooling, not browser support.
-
-### 1.2 Reading this document
-
-Each non-trivial section opens with a status line of the form
-`**Status:** [Foo]` directly under the heading:
-
-- **\[Implemented\]** — the current scaffold meets this section.
-- **\[Partial\]** — parts shipped, parts pending; the section notes which.
-- **\[Roadmap\]** — design recorded here, no code yet.
-- **\[Out of scope (v0)\]** — explicitly not in v0; may return in a future
-  draft.
-
-The tag sits outside the heading so anchor slugs (`#8-styling` etc.)
-stay stable as status moves from Roadmap → Partial → Implemented.
-
----
-
-## 2. Status and conformance
-
-**Status:** \[Roadmap\]
-
-svg3 conformance has two layered targets:
-
-- **SVG 1.1 conformance.** A conforming svg3 implementation also
-  conforms to SVG 1.1 for the SVG 1.1 surface. svg3 inherits SVG 1.1's
-  semantics by reference and does not re-specify them. The v0
-  implementation does **not** meet this yet; the v0 parser only knows
-  the 3D-specific elements and `<g>`. Coverage of the rest of SVG 1.1
-  is on the roadmap ([§10.3](#103-svg-11-implementation-status)).
-- **3D-extension conformance** — defined below for the svg3-only surface.
-
-There is no conformance suite yet. When v0.1 of the implementation
-ships (roadmap items 3–4 in [README.md](README.md): mesh generation,
-render a single cube, real Stylo cascade), 3D-extension conformance
-will be defined as:
-
-1. **Parser conformance** — accept every well-formed document this spec
-   describes, reject documents this spec disallows, surface typed errors
-   as listed in [`svg3_dom::ParseError`](svg3-dom/src/lib.rs).
-2. **Style conformance** — produce the same computed-style values for a
-   document as Stylo produces for the equivalent CSS rules against the
-   same element tree.
-3. **Render conformance** — produce a frame whose visible content matches
-   a reference image within a perceptual tolerance, for a fixed corpus of
-   test documents. The corpus does not exist yet.
-
-This document does not yet define error-recovery behavior beyond the
-typed errors in `svg3-dom`; the reference parser is fail-fast. SVG 1.1
-is **not** fail-fast, so error-recovery alignment is a known open
-question — see [§11](#11-open-questions-and-future-drafts).
-
-> **Implementation note (Draft 0).** [`svg3_dom::parse`](svg3-dom/src/lib.rs)
-> currently hard-codes `<scene>` as the required root and recognises
-> `<scene>` as an element kind. Neither aligns with this draft: the
-> root is `<svg>`, and `<scene>` is not part of the language. The
-> realignment is tracked as item 1 in
-> [§11](#11-open-questions-and-future-drafts).
-
----
-
-## 3. Document syntax
-
-**Status:** \[Implemented (with the root mismatch noted in §2)\]
-
-### 3.1 Wire format
-
-A svg3 document is an XML 1.0 text document. The reference parser is
-[`svg3_dom::parse`](svg3-dom/src/lib.rs) (built on
-[`quick-xml`](https://crates.io/crates/quick-xml)). The following XML
-constructs are recognised:
-
-| Construct | Handling |
-|---|---|
-| Start tag (`<svg>`) | begins a new element |
-| Empty-element tag (`<cube/>`) | begins and ends an element |
-| End tag (`</svg>`) | closes the current element |
-| Attributes (`name="value"`) | stored verbatim after XML-unescape |
-| Text, CDATA, comments, PIs, DOCTYPE, XML decl | **ignored** in v0 (text is on the roadmap once SVG 1.1 `<text>` lands) |
-| Namespaces | **not handled** in v0 (prefixes are part of the tag name) |
-
-The mandatory root element is `<svg>` — same as SVG 1.1 ch. 5.
-
-### 3.2 Attribute values
-
-Attribute values are stored as raw `String`s on the owning element. The
-parser does **not** interpret them into typed forms; that responsibility
-sits with the layer that consumes the value (the style cascade for
-`class`/`id`/`style`, the renderer for geometry attributes like `size`).
-
-Rationale: the same string needs to flow into Stylo (which expects raw
-attribute text for selector matching) and into the renderer (which parses
-its own typed form). One canonical representation, parsed at the point of
-use, avoids double-conversion. The reference DOM has shipped exactly this
-shape since [`svg3-dom#4`](https://github.com/PupilTong/svg3/pull/4).
-
-### 3.3 Document model
-
-`svg3-dom` exposes a flat arena: nodes live in a `Vec<Node>` keyed by
-`NodeId`, each node owning a `Vec<NodeId>` of children. The root is
-always `NodeId(0)`. This shape (rather than `Rc<RefCell<…>>` or `Box`-ed
-trees) is chosen so the Stylo cascade — modelled on
-[Blitz's `blitz-dom`](https://github.com/DioxusLabs/blitz) — can walk the
-tree with cheap, stable identifiers and without fighting the borrow
-checker. See [`svg3-dom/src/lib.rs`](svg3-dom/src/lib.rs) for the public
-API.
-
-### 3.4 MIME type and file extension
-
-The conventional file extension is `.svg`. svg3 is a strict superset of
-SVG 1.1, so an svg3 document with no 3D primitives is also a valid SVG
-1.1 document and round-trips through SVG-aware tools. MIME-type
-registration is not in scope for this draft.
-
----
-
-## 4. Elements
-
-### 4.1 Element list (v0)
-
-| Tag | Kind | Status | Section |
-|---|---|---|---|
-| `<svg>` | root container (SVG 1.1) | implemented (parse only; root not yet enforced — see §2) | [§4.2](#42-svg) |
-| `<g>`, `<group>` | grouping / transform | implemented (parse only) | [§4.3](#43-g--group) |
-| `<cube>` | axis-aligned box primitive | implemented (parse only) | [§4.4](#44-cube) |
-| `<ellipsoid>` | ellipsoid primitive | implemented (parse only) | [§4.5](#45-ellipsoid) |
-
-The remaining SVG 1.1 elements (`<path>`, `<rect>`, `<circle>`,
-`<ellipse>`, `<line>`, `<polyline>`, `<polygon>`, `<text>`, `<defs>`,
-`<use>`, `<symbol>`, …) are part of svg3 by inheritance from SVG 1.1
-(see [§10](#10-relationship-to-svg-11)) but **not implemented in v0**.
-The parser preserves any tag it does not recognise as
-`ElementKind::Unknown` so SVG 1.1 markup round-trips through the DOM
-without losing information.
-
-Attributes named in this section are the v0 set. Any other attribute is
-preserved on the element (for the cascade's benefit — `id`, `class`,
-`style`, and any author-defined attribute can flow through), but only
-the listed attributes affect rendering.
-
-### 4.2 `<svg>`
-
-**Status:** \[Roadmap (full SVG 1.1 semantics); root parsing tracked in §2\]
-
-The document root, matching SVG 1.1 ch. 5. The full set of SVG 1.1
-attributes (`width`, `height`, `viewBox`, `preserveAspectRatio`, `x`,
-`y`, `version`, `baseProfile`, …) applies by inheritance from SVG 1.1.
-
-`<svg>` establishes the document's coordinate system (see
-[§5.1](#51-coordinate-system)). 3D primitives and 2D SVG 1.1 content
-both live as descendants of `<svg>` in the same coordinate system.
-
-### 4.3 `<g>` / `<group>`
-
-**Status:** \[Implemented (parse only)\]
-
-Grouping element. Equivalent to SVG 1.1's `<g>`. Both spellings are
-accepted; the canonical tag is `<g>`. Permitted attributes:
-
-- `transform` — see [§6. Transforms](#6-transforms). The function set
-  is the union of SVG 1.1's 2D functions and CSS Transforms 2's 3D
-  additions; both apply to any descendant (2D or 3D).
-- `id`, `class`, `style` — see [§8. Styling](#8-styling).
-
-A `<g>` is a transform/style boundary; it has no intrinsic geometry.
-
-### 4.4 `<cube>`
-
-**Status:** \[Roadmap (geometry)\]
-
-An axis-aligned box centered at the local origin. May appear anywhere
-a graphical SVG 1.1 element may (child of `<svg>`, `<g>`, `<defs>` +
-`<use>`, …).
-
-| Attribute | Type | Default | Meaning |
-|---|---|---|---|
-| `size` | length | `1` | uniform edge length (sets `width`/`height`/`depth`) |
-| `width` | length | from `size` | extent along local +X |
-| `height` | length | from `size` | extent along local +Y |
-| `depth` | length | from `size` | extent along local +Z |
-| `transform` | transform-list | identity | see [§6](#6-transforms) |
-| `id`, `class`, `style` | — | — | see [§8](#8-styling) |
-
-If `size` and any of `width`/`height`/`depth` are both present, the
-per-axis attribute wins.
-
-### 4.5 `<ellipsoid>`
-
-**Status:** \[Roadmap (geometry)\]
-
-An ellipsoid centered at the local origin. May appear anywhere a
-graphical SVG 1.1 element may.
-
-| Attribute | Type | Default | Meaning |
-|---|---|---|---|
-| `r` | length | `1` | uniform radius (sets `rx`/`ry`/`rz`) |
-| `rx` | length | from `r` | radius along local X |
-| `ry` | length | from `r` | radius along local Y |
-| `rz` | length | from `r` | radius along local Z |
-| `transform` | transform-list | identity | see [§6](#6-transforms) |
-| `id`, `class`, `style` | — | — | see [§8](#8-styling) |
-
-If `r` and any of `rx`/`ry`/`rz` are both present, the per-axis attribute
-wins. An `<ellipsoid>` with `rx=ry=rz` is a sphere.
-
----
-
-## 5. Coordinate system and units
-
-**Status:** \[Roadmap\]
-
-### 5.1 Coordinate system
-
-svg3 uses a **single coordinate system** inherited from
-[SVG 1.1 ch. 7](https://www.w3.org/TR/SVG11/coords.html) and extended
-with a Z axis per
-[CSS Transforms 2](https://www.w3.org/TR/css-transforms-2/#3d-transform-rendering):
-
-- **+X** to the right,
-- **+Y** down,
-- **+Z** toward the viewer (out of the screen).
-
-This is a **left-handed** coordinate system, matching CSS Transforms 2.
-SVG 1.1 2D content lies in the Z=0 plane; 3D primitives extend into Z.
-The origin and the 2D layout follow SVG 1.1: the document's outer
-viewport is established by the `<svg>` root's `viewBox` / `width` /
-`height` / `preserveAspectRatio` attributes.
-
-> **Implementation note.** [`svg3_render::Camera`](svg3-render/src/lib.rs)
-> currently uses glam's right-handed `look_at_rh` with `Vec3::Y` as
-> up. That is a renderer-internal convention; the renderer is free to
-> apply a coordinate-space flip on world coordinates before they hit
-> glam's math. The document space remains left-handed +Y down as
-> specified above.
-
-### 5.2 Spaces
-
-- **Object space.** Each primitive is defined relative to a local
-  origin (the centroid for `<cube>` and `<ellipsoid>`).
-- **Local space.** Object space with the element's `transform` applied.
-- **User space.** Local space with all ancestor `transform`s applied,
-  composing from `<svg>` down to leaf — the same composition SVG 1.1
-  uses for 2D, extended to 3D primitives.
-- **Viewport / screen space.** Owned by the camera and the
-  framebuffer (see [§7.2](#72-the-3d-camera)); not addressable from
-  the document.
-
-### 5.3 Units
-
-A "user unit" is the base length, defined by SVG 1.1 ch. 7. There are
-no CSS-style length unit qualifiers (`px`, `em`, `%`, …) on svg3 3D
-attributes in v0 — `size="2"` is interpreted as `2` user units, full
-stop. The camera projection and the framebuffer resolution determine
-how many pixels a user unit occupies on screen. SVG 1.1 elements
-follow SVG 1.1's full unit rules.
-
-Lengths on 3D primitives are parsed as IEEE-754 `f32`. Negative
-lengths are not allowed for radii or extents (`size`, `r`, `width`,
-`height`, `depth`, `rx`, `ry`, `rz`).
-
-### 5.4 Angles
-
-Angles in `transform` functions accept the following suffixes (matching
-[CSS Values 4](https://www.w3.org/TR/css-values-4/#angles)):
-
-- `deg` — degrees (default if the suffix is omitted)
-- `rad` — radians
-- `turn` — full turns (`1turn` = `360deg`)
-- `grad` — gradians
-
----
-
-## 6. Transforms
-
-**Status:** \[Roadmap\]
-
-### 6.1 The `transform` attribute
-
-The `transform` attribute is permitted on the same elements that take
-it in SVG 1.1 (`<g>`, all graphical elements) plus svg3's 3D
-primitives. The function set is the **union of SVG 1.1's 2D functions
-and CSS Transforms 2's 3D additions**; all functions apply to any
-element within the single coordinate system ([§5.1](#51-coordinate-system)).
-
-Functions compose **left to right**: `transform="A B"` is the matrix
-product `A · B`, applied to a column vector as `(A · B) · v`. This
-matches SVG 1.1 and CSS Transforms 2.
-
-### 6.2 Function set
-
-**SVG 1.1 functions** (inherited from
-[SVG 1.1 ch. 7](https://www.w3.org/TR/SVG11/coords.html), interpreted
-in the Z=0 plane):
-
-- `matrix(a, b, c, d, e, f)`
-- `translate(tx [, ty])`
-- `scale(sx [, sy])`
-- `rotate(angle [, cx, cy])`
-- `skewX(angle)`, `skewY(angle)`
-
-**3D additions** (from CSS Transforms 2):
-
-| Function | Effect |
-|---|---|
-| `translate3d(tx, ty, tz)` | translate by `(tx, ty, tz)` |
-| `translateZ(tz)` | translate by `(0, 0, tz)` |
-| `scale3d(sx, sy, sz)` | scale by `(sx, sy, sz)` |
-| `scaleZ(sz)` | scale by `(1, 1, sz)` |
-| `rotateX(angle)` | rotate `angle` about the X axis |
-| `rotateY(angle)` | rotate `angle` about the Y axis |
-| `rotateZ(angle)` | rotate `angle` about the Z axis |
-| `rotate3d(x, y, z, angle)` | rotate `angle` about the axis `(x, y, z)`; the zero vector is an error |
-| `matrix3d(m11, m12, …, m44)` | 4×4 matrix, **column-major** (16 numbers, same convention as CSS Transforms 2) |
-
-In this coordinate system, SVG 1.1's `rotate(angle)` is equivalent to
-`rotateZ(angle)`: both rotate clockwise as seen from the viewer
-(positive +Z looking toward origin). The two are interchangeable.
-
-`perspective(<length>)` is **not** defined in v0. The 3D camera
-supplies its own projection ([§7.2](#72-the-3d-camera)); document-level
-perspective transforms are not needed.
-
-### 6.3 Composition and inheritance
-
-Transforms on nested elements compose by matrix product, from
-ancestor to descendant — the same rule SVG 1.1 uses for 2D, extended
-into 3D. A primitive's user-space transform is:
-
-```
-M_user = M_svg · M_group_1 · … · M_group_n · M_self
+### 1.1 Overview
+
+`svg3` extends SVG 1.1 with the ability to describe three-dimensional
+graphics. An `svg3` document is a well-formed XML document with an
+`'svg'` root element ([SVG11], §5.1), that may use the additional
+elements and attribute values defined in this specification.
+Specifically, `svg3` adds:
+
+- A set of *three-dimensional graphics elements* (§5), namely
+  `'cube'` and `'ellipsoid'`, which describe geometry that extends
+  along all three coordinate axes.
+- A set of *additional transform functions* (§4) — `translate3d`,
+  `translateZ`, `scale3d`, `scaleZ`, `rotateX`, `rotateY`,
+  `rotateZ`, `rotate3d`, and `matrix3d` — that may appear in the
+  `'transform'` attribute alongside the SVG 1.1 transform functions.
+- An *extension of the user coordinate system* (§3) with a Z axis,
+  such that SVG 1.1's two-dimensional content lies in the plane
+  `z = 0`.
+- A *rendering model* (§7) for three-dimensional content, including
+  the role of the viewing transformation, which is supplied by the
+  user agent and is not addressable from the document.
+
+The following document fragment is a minimal example:
+
+```xml
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">
+  <cube cx="100" cy="100" cz="0" size="80"
+        transform="rotateY(30deg) rotateX(20deg)" fill="orange"/>
+</svg>
 ```
 
-where `M_self` is `transform` on the primitive, each `M_group_i` is
-`transform` on an ancestor `<g>`, and `M_svg` is identity (the
-`<svg>` root carries no `transform`).
+### 1.2 Relationship to SVG 1.1
 
-### 6.4 Reference vs. CSS Transforms
+`svg3` is an extension of SVG 1.1. Every conforming `svg3` document
+is also a well-formed SVG 1.1 document fragment. The elements and
+transform functions introduced here are foreign to SVG 1.1; in a
+user agent that implements only SVG 1.1, they are treated as
+unsupported elements or unrecognised transform functions and produce
+no visible rendering — see §2.4 ("Compatibility with SVG 1.1
+implementations").
 
-CSS Transforms 2 attaches a `transform-origin` to every transformed
-element (default `50% 50% 0` for an HTML element). svg3 v0 fixes the
-transform origin at the **local origin** of the primitive (the
-centroid for `<cube>` and `<ellipsoid>`) and does **not** support a
-separate `transform-origin` property. Rotating about a non-origin
-point is expressible by composing translations
-(`translate3d(cx,cy,cz) rotateZ(a) translate3d(-cx,-cy,-cz)`).
+This specification does **not** redefine, replace, or restrict any
+feature of SVG 1.1. All elements, attributes, properties, and
+processing rules of SVG 1.1 apply unchanged to an `svg3` document
+unless this specification explicitly states otherwise.
 
----
+### 1.3 Document conventions
 
-## 7. Camera and viewport
+The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+"SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this
+document are to be interpreted as described in [RFC 2119] and
+[RFC 8174] when, and only when, they appear in all capitals, as
+shown here.
 
-### 7.1 The 2D viewport (SVG 1.1)
+References of the form [SVG11], [CSS-TRANSFORMS-2], etc. resolve to
+the entries in §8.
 
-**Status:** \[Roadmap\]
-
-The document's 2D viewport is the `<svg>` root and is governed by SVG
-1.1's `width`, `height`, `viewBox`, and `preserveAspectRatio`
-attributes (see [SVG 1.1 ch. 7](https://www.w3.org/TR/SVG11/coords.html)).
-This is inherited from SVG 1.1 and not re-specified here; it is
-Roadmap in the v0 implementation.
-
-### 7.2 The 3D camera
-
-**Status:** \[Out of scope — camera is renderer-side, by design\]
-
-**The 3D camera is not part of the document.** The renderer host
-constructs a [`svg3_render::Camera`](svg3-render/src/lib.rs)
-(`eye` / `target` / `fov_y`) and a `RenderConfig` (format + dimensions),
-passes them in, and gets a frame. The svg3 spec defines **no** camera
-element and **no** camera attribute. This is a normative decision, not
-a "maybe later" item: the camera is the renderer's concern.
-
-Rationale: a document that ships its own camera couples scene
-authoring to a single framing decision, which doesn't match how 3D
-content is consumed (viewers want to orbit / fly / embed in AR/VR /
-re-frame for layout). Renderer-owned cameras keep documents portable
-across viewers and contexts.
-
-The renderer is free to pick a default camera based on the bounding
-box of the document's 3D primitives (e.g., orbit the centroid at a
-distance that fits the bounds). The exact default policy is
-renderer-defined; see open question 8 in [§11](#11-open-questions-and-future-drafts).
+Element names appear in single quotes when referred to in prose
+(e.g., the `'cube'` element). Attribute and property names appear in
+single quotes similarly.
 
 ---
 
-## 8. Styling
+## 2. Conformance
 
-**Status:** \[Roadmap\]
+### 2.1 Conformance criteria
 
-### 8.1 CSS via Stylo
+This specification defines two classes of products:
 
-svg3 resolves computed styles with [Stylo](https://crates.io/crates/stylo),
-Servo's CSS engine. The integration follows
-[Blitz (`blitz-dom`)](https://github.com/DioxusLabs/blitz) as the
-canonical reference for driving Stylo over a non-browser DOM. svg3
-inherits Stylo's behavior wholesale for everything CSS already covers:
-cascade order, specificity, inheritance, custom properties, media
-queries (when applicable), `!important`, etc. The svg3 spec only defines
-**which properties have rendering meaning** ([§9](#9-paint-and-material))
-and how presentation attributes map to them. SVG 1.1 elements use the
-SVG 1.1 property set (`fill`, `stroke`, …) per SVG 1.1 ch. 11.
+- a **conforming `svg3` document**, and
+- a **conforming `svg3` user agent** (also called an *implementation*).
 
-### 8.2 Where styles come from
+### 2.2 Document conformance
 
-In precedence order (matching SVG 1.1 and CSS):
+A document is a *conforming `svg3` document* if it satisfies all of
+the following:
 
-1. The `style` attribute on the element.
-2. CSS rules in author stylesheets (`<style>` element — *roadmap*, not
-   parsed in v0).
-3. **Presentation attributes** on the element (see [§8.3](#83-presentation-attributes)).
-4. Inherited values from ancestors.
-5. The property's initial value ([§9](#9-paint-and-material)).
+1. It is a conforming SVG 1.1 document fragment ([SVG11], §2.3).
+2. Every element from the set defined in §5 that appears in the
+   document complies with the syntax and attribute requirements of
+   the corresponding subsection.
+3. Every occurrence of the additional transform functions defined in
+   §4 within a `'transform'` attribute value complies with the
+   grammar in §4.1 and the function definitions in §4.2.
 
-### 8.3 Presentation attributes
+### 2.3 Implementation conformance
 
-A **presentation attribute** is an XML attribute whose name matches a CSS
-property and whose value is parsed as the property's CSS value. They
-participate in the cascade with the same specificity as SVG 1.1 grants
-them: a presentation attribute is treated as an author rule with the
-lowest specificity, so any matching CSS selector overrides it. v0
-defines presentation attributes on 3D primitives for:
+A user agent is a *conforming `svg3` user agent* if it satisfies all
+of the following:
 
-- `color`
-- `opacity`
+1. It is a conforming SVG 1.1 *dynamic interactive* or *static* user
+   agent ([SVG11], §2.4) — that is, it implements SVG 1.1 in full
+   for at least one of those profiles.
+2. It correctly processes every element defined in §5 according to
+   the rules in §§5–7.
+3. It correctly processes every additional transform function defined
+   in §4 according to §§4.2 and 4.3.
+4. It implements the rendering model in §7.
 
-SVG 1.1 presentation attributes (`fill`, `stroke`, `stroke-width`, …)
-apply to SVG 1.1 elements per SVG 1.1; they are not implemented in v0.
+The viewing transformation (camera) used to project three-dimensional
+content is implementation-defined (§7.1). A conforming user agent
+MUST provide some viewing transformation; it MUST NOT take that
+transformation from the document.
 
-### 8.4 Selectors and matching
+### 2.4 Compatibility with SVG 1.1 implementations
 
-Selectors are evaluated against the svg3 element tree exactly as Stylo
-evaluates them against an HTML tree. Tag-name selectors match svg3 tag
-names (`svg`, `g`, `cube`, `ellipsoid`, …); `.foo` matches elements
-with a `class` attribute containing `foo`; `#foo` matches elements
-with `id="foo"`. Pseudo-classes that depend on browser state
-(`:hover`, `:focus`, …) have no defined behavior in v0.
+A user agent that implements SVG 1.1 but not `svg3` is expected to
+process an `svg3` document as follows, by virtue of SVG 1.1's own
+processing rules:
 
----
+- Each three-dimensional graphics element (§5) is an unrecognised
+  element. Per [SVG11], §5.1, unrecognised elements produce no
+  rendering and their content is not processed for layout.
+- Each additional transform function (§4) is an unrecognised function
+  within a `'transform'` value. Per [SVG11], §7.6, a `'transform'`
+  value containing an unrecognised function is in error; the affected
+  attribute is ignored.
 
-## 9. Paint and material
-
-**Status:** \[Roadmap\]
-
-### 9.1 Property set for 3D primitives (v0)
-
-These properties apply to `<cube>`, `<ellipsoid>`, and any future 3D
-primitive:
-
-| Property | Type | Initial | Inherits | Effect |
-|---|---|---|---|---|
-| `color` | CSS color (sRGB) | `black` | yes | flat surface colour |
-| `opacity` | number `[0, 1]` | `1` | no | per-element alpha; multiplied into ancestor opacity |
-
-CSS color syntax follows [CSS Color 4](https://www.w3.org/TR/css-color-4/):
-named colors, `#rgb` / `#rrggbb` / `#rrggbbaa`, `rgb()` / `rgba()`,
-`hsl()` / `hsla()`. Values outside `[0,1]` for opacity clamp.
-
-### 9.2 Paint for SVG 1.1 elements
-
-SVG 1.1 elements use SVG 1.1's paint model — `fill`, `stroke`,
-`stroke-width`, paint servers (`url(#…)` referencing gradients /
-patterns), and the rest of
-[SVG 1.1 ch. 11](https://www.w3.org/TR/SVG11/painting.html). This
-surface is inherited by reference and not re-specified here; it is
-Roadmap in the v0 implementation.
-
-### 9.3 What 3D primitives do not define
-
-The following are **explicitly deferred** for 3D primitives. Documents
-may carry these attributes for future compatibility, but they have no
-effect in v0:
-
-- Lighting (directional / point / area lights, ambient term).
-- Material models beyond flat colour (PBR, metallic/roughness, IOR).
-- Textures, texture coordinates, normal maps.
-- Stroking / outlines on 3D primitives.
-- Gradients, patterns, and paint-server references (`url(#…)`) on 3D
-  primitives. (For 2D content, these come from SVG 1.1.)
-- Shadows, ambient occlusion, post-processing.
-
-### 9.4 Rendering model for 3D primitives (v0)
-
-Every 3D primitive is rendered as a triangle mesh with each vertex
-shaded by the element's computed `color`, modulated by computed
-`opacity` and ancestor opacities. There are no lights and no
-view-dependent shading in v0; appearance depends only on geometry,
-transform, color, and opacity. Backface culling, depth testing, and
-the compositing of 3D primitives with surrounding 2D content are
-renderer-side concerns and are not specified by the document.
+This degradation is not normative for SVG 1.1 implementations (which
+are out of scope of this specification); it describes the expected
+behaviour given SVG 1.1's existing rules.
 
 ---
 
-## 10. Relationship to SVG 1.1
+## 3. Coordinate system and units
 
-### 10.1 svg3 is a superset of SVG 1.1
+### 3.1 The user coordinate system
 
-svg3 adopts SVG 1.1 wholesale and adds 3D primitives plus 3D transform
-functions. By design:
+`svg3` extends the *initial user coordinate system* defined in
+[SVG11], §7.2, with a third axis. In an `svg3` document:
 
-- The root element is `<svg>` (SVG 1.1 ch. 5).
-- SVG 1.1 elements, attributes, and properties retain their SVG 1.1
-  semantics by reference; this spec does not re-define them.
-- svg3 adds the 3D primitives `<cube>` and `<ellipsoid>`
-  ([§4](#4-elements)) and CSS Transforms 2's 3D `transform` functions
-  ([§6.2](#62-function-set)).
-- The coordinate system is SVG 1.1's user space, extended into Z
-  ([§5.1](#51-coordinate-system)).
-- A document with only SVG 1.1 markup is a valid svg3 document and a
-  valid SVG 1.1 document — bidirectional compatibility.
-- A document with 3D primitives renders correctly in svg3; in a
-  2D-only SVG 1.1 renderer, the 3D primitives are unknown elements
-  and are skipped, leaving surrounding 2D content visible.
+- The X axis points to the right.
+- The Y axis points down.
+- The Z axis points toward the viewer (out of the screen).
 
-### 10.2 What svg3 adds to SVG 1.1
+This coordinate system is *left-handed*, consistent with
+[CSS-TRANSFORMS-2], §3 ("3D Transform Rendering Model").
 
-| Addition | Effect | Section |
-|---|---|---|
-| `<cube>`, `<ellipsoid>` | 3D primitives — may appear anywhere a 2D shape may. | [§4.4](#44-cube), [§4.5](#45-ellipsoid) |
-| 3D `transform` functions | `translate3d`, `translateZ`, `rotateX/Y/Z`, `rotate3d`, `scale3d`, `scaleZ`, `matrix3d` — alongside SVG 1.1's 2D transform functions. | [§6.2](#62-function-set) |
-| Z axis on the user-space coordinate system | The document's coordinate system extends to 3D; 2D content lies at Z=0. | [§5.1](#51-coordinate-system) |
-| Host-supplied 3D camera | The renderer (not the document) sets the camera that frames 3D content. | [§7.2](#72-the-3d-camera) |
+SVG 1.1 two-dimensional content lies in the plane `z = 0`. The
+position, scaling, and rotation of two-dimensional elements
+(including all SVG 1.1 graphics elements, the `'g'` element, and the
+`'svg'` element itself) is unaffected by this extension.
 
-### 10.3 SVG 1.1 implementation status
+The Z axis is referenced by:
 
-svg3 inherits the entirety of SVG 1.1 by reference. The v0
-implementation does not yet cover most of it — the table below tracks
-status by SVG 1.1 chapter, **not** a "drop list":
+- the `'cz'` and `'rz'`/`'depth'` attributes on three-dimensional
+  graphics elements (§5);
+- the transform functions defined in §4.
 
-| SVG 1.1 chapter | Status | Notes |
-|---|---|---|
-| Ch. 3 Rendering model | Roadmap | Painter's algorithm; 3D primitives composite via depth-aware rendering. |
-| Ch. 5 Document structure | Partial | `<g>` parsed in v0; `<svg>` root parsing tracked in §2; `<defs>`, `<symbol>`, `<use>` Roadmap. |
-| Ch. 6 Styling | Partial | Stylo cascade is the wiring; see [§8](#8-styling). |
-| Ch. 7 Coordinates / 2D `transform` | Roadmap | 2D `transform` functions parsed and applied alongside 3D ones. |
-| Ch. 8 Paths | Roadmap | `<path>` not parsed in v0. |
-| Ch. 9 Basic shapes | Roadmap | `<rect>`, `<circle>`, `<ellipse>`, `<line>`, `<polyline>`, `<polygon>`. |
-| Ch. 10 Text + Ch. 20 Fonts | Roadmap (later) | No text in v0; significant scope. |
-| Ch. 11 Painting (`fill`, `stroke`) | Roadmap | Applies to SVG 1.1 elements; 3D primitives use `color`/`opacity` ([§9.1](#91-property-set-for-3d-primitives-v0)). |
-| Ch. 12 Color | Inherited | CSS Color 4 supersedes; see [§9](#9-paint-and-material). |
-| Ch. 13 Gradients, patterns | Roadmap (later) | |
-| Ch. 14 Clipping, masking, compositing | Roadmap (later) | |
-| Ch. 15 Filter effects | Out of scope (v0) | May return. |
-| Ch. 16 Interactivity, Ch. 17 Linking | Out of scope (v0) | Native-only; no event/scripting model. |
-| Ch. 18 Scripting | Out of scope | Native-only, no JS engine. |
-| Ch. 19 Animation (SMIL) | Out of scope (v0) | No time model in v0 — see [§11](#11-open-questions-and-future-drafts). |
-| Ch. 21 Metadata, Ch. 22 Backwards compat | Inherited | No svg3-specific changes. |
-| Ch. 23 Extensibility (`<foreignObject>`) | Roadmap (later) | |
+### 3.2 Units
 
-"Inherited" means SVG 1.1's text applies unchanged. "Roadmap" means
-svg3 will support it; v0 does not. "Out of scope (v0)" means
-explicitly deferred, possibly forever.
+Lengths along all three axes use the same units, defined by SVG 1.1
+([SVG11], §7.10). One *user unit* is the same length regardless of
+axis. The mapping from user units to physical pixels is determined
+by the SVG 1.1 outermost `'svg'` element's `'viewBox'`, `'width'`,
+`'height'`, and `'preserveAspectRatio'` attributes (for the X and Y
+axes) and by the viewing transformation (for the Z axis; §7).
+
+The length-with-unit grammar of SVG 1.1 ([SVG11], §4.2) applies
+unchanged to the new attributes defined in §5 (`'cz'`, `'depth'`,
+`'rz'`, etc.).
 
 ---
 
-## 11. Open questions and future drafts
+## 4. Transforms
 
-Recorded here so they don't get lost between drafts, with the section
-they belong to:
+### 4.1 Extended transform-list grammar
 
-1. **Parser realignment (Draft 0 → Draft 1).** `svg3-dom` currently
-   enforces `<scene>` as root and recognises `<scene>` as a kind;
-   neither is in this spec. A follow-up PR
-   ([§2](#2-status-and-conformance)) accepts `<svg>` as the required
-   root, removes `Scene` from `ElementKind`, and updates the parser
-   tests and benches accordingly.
-2. **SVG 1.1 element coverage order** — likely basic shapes first,
-   then paths, then text — [§10.3](#103-svg-11-implementation-status).
-3. **More 3D primitives** (`<cylinder>`, `<plane>`, `<mesh>` with
-   vertex data) — [§4](#4-elements).
-4. **Lighting and a real material model** — directional light + diffuse
-   term as the minimum viable set, or jump to PBR — [§9](#9-paint-and-material).
-5. **External `<style>` parsing** — the cascade exists in Stylo; only
-   the wiring is missing — [§8.2](#82-where-styles-come-from).
-6. **Animation** — no time model in v0. Whether to grow one (CSS
-   Animations? SMIL? a discrete keyframe element?) is open.
-7. **Error recovery** — the parser is currently fail-fast; SVG 1.1 is
-   not. Conformance ([§2](#2-status-and-conformance)) will need a
-   decision here.
-8. **Default-camera policy** — the renderer owns the camera
-   ([§7.2](#72-the-3d-camera)), but the default it picks when the host
-   does not supply one (fit-bounds vs. fixed angle vs. require-host) is
-   not yet specified.
+`svg3` extends the grammar of the `'transform'` attribute defined in
+[SVG11], §7.6, by adding the function names listed in §4.2 to the
+set of permitted *transform commands*. The remainder of the grammar
+— whitespace, separators, the comma policy, and the left-to-right
+composition rule — is unchanged.
 
-Each item is a roadmap candidate, not a commitment. Per the project's
-no-speculative-scaffolding rule (see [AGENTS.md](AGENTS.md)), they will
-not appear in code or in the normative parts of this spec until a
-milestone needs them.
+Informally:
+
+```
+transform-list ::= transform ( comma-wsp* transform )*
+transform      ::= matrix  | translate  | scale  | rotate
+                 | skewX   | skewY                          // SVG 1.1
+                 | matrix3d | translate3d | translateZ
+                 | scale3d  | scaleZ
+                 | rotateX  | rotateY     | rotateZ
+                 | rotate3d                                 // svg3
+```
+
+A `'transform'` attribute value containing both SVG 1.1 functions and
+the functions defined here is well-formed. Functions of either kind
+MAY appear in any order, and MAY be mixed in a single attribute.
+
+### 4.2 Transform functions
+
+Each transform function defines a 4×4 transformation matrix that
+operates on column vectors `(x, y, z, 1)ᵀ` in homogeneous
+coordinates. Angles accept the suffixes defined in [CSS-VALUES-4],
+§7 (`deg`, `rad`, `turn`, `grad`); the default suffix is `deg`.
+
+#### 4.2.1 `translate3d(tx, ty, tz)`
+
+Translates by the vector `(tx, ty, tz)`. The corresponding matrix is:
+
+```
+| 1  0  0  tx |
+| 0  1  0  ty |
+| 0  0  1  tz |
+| 0  0  0  1  |
+```
+
+#### 4.2.2 `translateZ(tz)`
+
+Equivalent to `translate3d(0, 0, tz)`.
+
+#### 4.2.3 `scale3d(sx, sy, sz)`
+
+Scales by `(sx, sy, sz)`. The corresponding matrix is:
+
+```
+| sx 0  0  0 |
+| 0  sy 0  0 |
+| 0  0  sz 0 |
+| 0  0  0  1 |
+```
+
+#### 4.2.4 `scaleZ(sz)`
+
+Equivalent to `scale3d(1, 1, sz)`.
+
+#### 4.2.5 `rotateX(angle)`
+
+Rotates by `angle` about the X axis. With `c = cos(angle)` and
+`s = sin(angle)`, the corresponding matrix is:
+
+```
+| 1  0  0  0 |
+| 0  c  -s 0 |
+| 0  s  c  0 |
+| 0  0  0  1 |
+```
+
+#### 4.2.6 `rotateY(angle)`
+
+Rotates by `angle` about the Y axis. With `c = cos(angle)` and
+`s = sin(angle)`, the corresponding matrix is:
+
+```
+|  c  0  s  0 |
+|  0  1  0  0 |
+| -s  0  c  0 |
+|  0  0  0  1 |
+```
+
+#### 4.2.7 `rotateZ(angle)`
+
+Rotates by `angle` about the Z axis. With `c = cos(angle)` and
+`s = sin(angle)`, the corresponding matrix is:
+
+```
+| c  -s 0  0 |
+| s  c  0  0 |
+| 0  0  1  0 |
+| 0  0  0  1 |
+```
+
+`rotateZ(angle)` is equivalent to the SVG 1.1 function
+`rotate(angle)` (interpreted with the origin of rotation at
+`(0, 0)` and z-coordinate unchanged).
+
+#### 4.2.8 `rotate3d(x, y, z, angle)`
+
+Rotates by `angle` about the axis `(x, y, z)`. The axis is
+normalised; if `(x, y, z)` is the zero vector, the function is in
+error and the entire `'transform'` value is ignored. With
+`c = cos(angle)`, `s = sin(angle)`, and `t = 1 - c`, and with
+`(x, y, z)` having been normalised to unit length, the corresponding
+matrix is:
+
+```
+| txx + c    txy - sz   txz + sy  0 |
+| txy + sz   tyy + c    tyz - sx  0 |
+| txz - sy   tyz + sx   tzz + c   0 |
+| 0          0          0         1 |
+```
+
+(where `txy` denotes `t·x·y`, etc.).
+
+#### 4.2.9 `matrix3d(m11, m12, m13, m14, m21, …, m44)`
+
+Applies the 4×4 matrix whose elements are taken in **column-major**
+order:
+
+```
+| m11 m21 m31 m41 |
+| m12 m22 m32 m42 |
+| m13 m23 m33 m43 |
+| m14 m24 m34 m44 |
+```
+
+This is the same convention used by `matrix3d()` in
+[CSS-TRANSFORMS-2], §11.
+
+### 4.3 Composition
+
+Transforms compose by matrix multiplication, applied left to right.
+Given `transform="A B C"`, the resulting transformation matrix is
+`A · B · C`, and a point `p` in the local coordinate system is
+mapped to the surrounding coordinate system by `(A · B · C) · p`.
+This matches [SVG11], §7.6.
+
+Where a `'transform'` attribute is set on a descendant element, the
+descendant's transformation is composed with its ancestors' by
+matrix multiplication, applied from the root toward the leaf. This
+is the same rule SVG 1.1 uses for two-dimensional transforms,
+unchanged.
+
+---
+
+## 5. Three-dimensional graphics elements
+
+The elements defined in this section are *graphics elements* in the
+sense of [SVG11], §1.3. They may appear wherever an SVG 1.1
+graphics element may appear.
+
+### 5.1 Common attributes
+
+Each three-dimensional graphics element accepts the following
+attribute groups, defined by SVG 1.1:
+
+- *Core attributes* ([SVG11], §5.2.1): `'id'`, `'xml:base'`,
+  `'xml:lang'`, `'xml:space'`.
+- *Conditional processing attributes* ([SVG11], §5.8.2):
+  `'requiredFeatures'`, `'requiredExtensions'`, `'systemLanguage'`.
+- *Style attributes*: `'class'`, `'style'` ([SVG11], §6.13).
+- The `'transform'` attribute ([SVG11], §7.6), extended per §4.
+- The presentation attributes corresponding to the properties
+  defined in §6.
+
+### 5.2 The `'cube'` element
+
+The `'cube'` element defines an axis-aligned rectangular cuboid in
+the user coordinate system.
+
+**Attributes:**
+
+| Attribute | Type | Default | Description |
+|---|---|---|---|
+| `cx` | `<coordinate>` | `0` | X coordinate of the centre. |
+| `cy` | `<coordinate>` | `0` | Y coordinate of the centre. |
+| `cz` | `<coordinate>` | `0` | Z coordinate of the centre. |
+| `size` | `<length>` | (none) | Edge length along all three axes. |
+| `width` | `<length>` | `size` if present, otherwise `0` | Edge length along X. |
+| `height` | `<length>` | `size` if present, otherwise `0` | Edge length along Y. |
+| `depth` | `<length>` | `size` if present, otherwise `0` | Edge length along Z. |
+
+A negative value for `'size'`, `'width'`, `'height'`, or `'depth'`
+is an error. The element MUST be rendered as if it had not been
+specified.
+
+A value of zero for `'width'`, `'height'`, or `'depth'` disables
+rendering of the element, but does not disable rendering of its
+descendants.
+
+If `'width'`, `'height'`, or `'depth'` is not specified and `'size'`
+is, the unspecified attribute defaults to the value of `'size'`. If
+neither is specified, the per-axis attribute defaults to zero.
+
+The element describes the axis-aligned cuboid whose centre, in local
+coordinates, is `(cx, cy, cz)` and whose extent along each axis is
+the corresponding attribute. The element's `'transform'` is then
+applied, mapping the cuboid into the surrounding coordinate system
+per §4.3.
+
+### 5.3 The `'ellipsoid'` element
+
+The `'ellipsoid'` element defines an ellipsoid in the user
+coordinate system.
+
+**Attributes:**
+
+| Attribute | Type | Default | Description |
+|---|---|---|---|
+| `cx` | `<coordinate>` | `0` | X coordinate of the centre. |
+| `cy` | `<coordinate>` | `0` | Y coordinate of the centre. |
+| `cz` | `<coordinate>` | `0` | Z coordinate of the centre. |
+| `r` | `<length>` | (none) | Radius along all three axes. |
+| `rx` | `<length>` | `r` if present, otherwise `0` | Radius along X. |
+| `ry` | `<length>` | `r` if present, otherwise `0` | Radius along Y. |
+| `rz` | `<length>` | `r` if present, otherwise `0` | Radius along Z. |
+
+A negative value for `'r'`, `'rx'`, `'ry'`, or `'rz'` is an error.
+The element MUST be rendered as if it had not been specified.
+
+A value of zero for `'rx'`, `'ry'`, or `'rz'` disables rendering of
+the element.
+
+If `'rx'`, `'ry'`, or `'rz'` is not specified and `'r'` is, the
+unspecified attribute defaults to the value of `'r'`. If neither is
+specified, the per-axis attribute defaults to zero.
+
+The element describes the set of points `(x, y, z)` satisfying
+
+```
+((x − cx) / rx)² + ((y − cy) / ry)² + ((z − cz) / rz)² ≤ 1
+```
+
+in local coordinates. The element's `'transform'` is then applied
+per §4.3.
+
+The `'ellipsoid'` element generalises SVG 1.1's `'ellipse'`
+([SVG11], §9.4): `<ellipsoid cx="…" cy="…" rx="…" ry="…" rz="0"/>`
+restricted to `z = 0` is the same set of points as the corresponding
+`'ellipse'`. (The `'ellipsoid'` element does not, however, replace
+the `'ellipse'` element, and the two are processed independently.)
+
+---
+
+## 6. Painting and visibility
+
+Three-dimensional graphics elements (§5) are painted using a subset
+of the SVG 1.1 paint properties. This specification does not define
+new paint properties.
+
+### 6.1 The `'fill'` property
+
+The SVG 1.1 `'fill'` property ([SVG11], §11.3) applies to
+three-dimensional graphics elements. It specifies the paint used to
+render the visible surface of the element.
+
+When the computed value of `'fill'` is a `<paint>` value that
+references a paint server (e.g., a gradient or pattern via
+`url(#…)`), the rendering of the surface using that paint server is
+implementation-defined. Conforming implementations SHOULD apply the
+paint server's two-dimensional paint to the projected surface in a
+manner consistent with that paint server's intent on a comparable
+2D shape; the spec does not further constrain this mapping.
+
+### 6.2 The `'opacity'` property
+
+The CSS `'opacity'` property ([CSS-COLOR-4], §1.1, by reference from
+SVG 1.1) applies to three-dimensional graphics elements with its
+usual semantics.
+
+### 6.3 Properties not defined by this specification
+
+This specification does not define behaviour for the following SVG
+1.1 paint or rendering properties when set on a three-dimensional
+graphics element:
+
+- `'stroke'` and the stroke-related properties (`'stroke-width'`,
+  `'stroke-linecap'`, etc.).
+- `'fill-rule'`.
+- `'marker'` and related properties.
+- `'clip-path'`, `'mask'`, `'filter'`.
+
+Implementations MAY ignore these properties on three-dimensional
+graphics elements, or MAY assign them an implementation-defined
+meaning. Authors SHOULD NOT rely on any particular interpretation.
+
+---
+
+## 7. Rendering model
+
+### 7.1 The viewing transformation
+
+A conforming implementation projects three-dimensional content to
+the two-dimensional viewport using an *implementation-defined viewing
+transformation*. The viewing transformation comprises a position, an
+orientation, and a projection (typically a perspective or
+orthographic projection).
+
+The viewing transformation is **not** addressable from the document.
+This specification defines no element, attribute, or property by
+which an author can set the viewing transformation. Implementations
+MUST NOT consult the document for this information.
+
+The viewing transformation MAY depend on user interaction (e.g.,
+orbiting controls), on the embedding context (e.g., an AR/VR
+session), or on implementation-defined heuristics (e.g., framing the
+axis-aligned bounding box of the document's three-dimensional
+content). The choice of default is implementation-defined.
+
+### 7.2 Projection
+
+Each three-dimensional graphics element is converted, after the
+composition of its `'transform'` attribute with its ancestors'
+transforms (§4.3), into a set of surface points in user-space
+coordinates. The viewing transformation (§7.1) projects these points
+to the two-dimensional viewport, producing pixel positions.
+
+The surface is then filled with the computed value of the `'fill'`
+property (§6.1), modulated by `'opacity'`.
+
+### 7.3 Composition with SVG 1.1 content
+
+Two-dimensional SVG 1.1 content lies in the plane `z = 0` (§3.1).
+Three-dimensional graphics elements with all surface points
+satisfying `z = 0` after composition of transforms produce
+two-dimensional output and composite with SVG 1.1 content per
+SVG 1.1's painter's algorithm ([SVG11], §3).
+
+For three-dimensional graphics elements with surface points at
+`z ≠ 0`, the compositing of those elements with one another and with
+two-dimensional SVG 1.1 content is implementation-defined.
+Implementations SHOULD use a depth-aware rendering technique
+(e.g., a depth buffer, depth sorting, order-independent
+transparency) such that elements with greater Z (closer to the
+viewer) occlude elements with lesser Z.
+
+---
+
+## 8. References
+
+### 8.1 Normative references
+
+- **[SVG11]** Erik Dahlström et al., *Scalable Vector Graphics (SVG)
+  1.1 (Second Edition)*. W3C Recommendation, 16 August 2011.
+  <https://www.w3.org/TR/SVG11/>
+- **[CSS-TRANSFORMS-2]** Tab Atkins Jr. et al., *CSS Transforms
+  Module Level 2*. W3C Working Draft.
+  <https://www.w3.org/TR/css-transforms-2/>
+- **[CSS-VALUES-4]** Tab Atkins Jr. et al., *CSS Values and Units
+  Module Level 4*. W3C Working Draft.
+  <https://www.w3.org/TR/css-values-4/>
+- **[CSS-COLOR-4]** Tab Atkins Jr. et al., *CSS Color Module Level
+  4*. W3C Candidate Recommendation.
+  <https://www.w3.org/TR/css-color-4/>
+- **[RFC 2119]** S. Bradner, *Key words for use in RFCs to Indicate
+  Requirement Levels*. IETF BCP 14, March 1997.
+  <https://www.rfc-editor.org/rfc/rfc2119>
+- **[RFC 8174]** B. Leiba, *Ambiguity of Uppercase vs Lowercase in
+  RFC 2119 Key Words*. IETF BCP 14, May 2017.
+  <https://www.rfc-editor.org/rfc/rfc8174>
