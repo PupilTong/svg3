@@ -49,6 +49,8 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 cargo run -p app-macos                       # open the native macOS window
 bash scripts/bundle-macos.sh                 # build a .app: target/release/bundle/svg3-macos.app
+
+cargo bench -p svg3-dom                      # criterion benches (codspeed-instrumented)
 ```
 
 ## Roadmap
