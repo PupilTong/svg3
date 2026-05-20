@@ -14,10 +14,12 @@ permissions:
   contents: read
 
 jobs:
-  rust:
-    # macOS is the first target platform: the runner builds wgpu (Metal),
-    # winit and stylo with no extra system packages.
-    runs-on: macos-latest
+  # Lint, test, coverage and benchmark for the library crates. CodSpeed
+  # simulation mode uses Valgrind, which is Linux-only — so the bench
+  # job has to live here. We exclude `app-macos` because its winit + wgpu
+  # (Metal) stack only compiles on macOS (covered by the `macos` job).
+  linux:
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       # Third-party actions are pinned to full commit SHAs (not mutable
@@ -32,11 +34,63 @@ jobs:
       - name: Cache Cargo
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
+      - name: Install cargo tools
+        uses: taiki-e/install-action@213ccc1a076163c093f914550b94feb90fab916d # v2.79.2
+        with:
+          tool: cargo-codspeed,cargo-llvm-cov
+
       - name: Format
         run: cargo fmt --check
 
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --exclude app-macos --all-targets --all-features -- -D warnings
 
-      - name: Test
-        run: cargo test --workspace
+      - name: Test & generate coverage
+        # `cargo llvm-cov` runs the tests under instrumentation and emits
+        # an LCOV file; one step replaces the separate `cargo test` and
+        # coverage runs.
+        run: cargo llvm-cov --workspace --exclude app-macos --all-features --lcov --output-path lcov.info
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@e79a6962e0d4c0c17b229090214935d2e33f8354 # v6.0.1
+        with:
+          files: lcov.info
+          # Optional on public repos (tokenless upload works); required on
+          # private repos. The secret is read if present and otherwise
+          # ignored.
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+
+      - name: Build benchmarks
+        run: cargo codspeed build --workspace --exclude app-macos
+
+      - name: Run benchmarks (CodSpeed simulation)
+        uses: CodSpeedHQ/action@3194d9a39c4d46684cb44bf7207fc56626aad8fd # v4.15.1
+        with:
+          mode: simulation
+          run: cargo codspeed run
+
+  # macOS-specific job: the only crate that needs Apple frameworks is
+  # `app-macos` (winit → Cocoa, wgpu → Metal). Build, lint and test just
+  # that one package so the macOS runner stays cheap.
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install toolchain
+        run: rustup show
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: Clippy (app-macos)
+        run: cargo clippy -p app-macos --all-targets --all-features -- -D warnings
+
+      - name: Build (app-macos)
+        run: cargo build -p app-macos
+
+      - name: Test (app-macos)
+        run: cargo test -p app-macos

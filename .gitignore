@@ -13,6 +13,9 @@ target
 # Contains mutation testing data
 **/mutants.out*/
 
+# Coverage reports (cargo-llvm-cov / lcov)
+lcov.info
+
 # Claude Code local working files
 .claude
 
