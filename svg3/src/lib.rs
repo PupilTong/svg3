@@ -6,9 +6,10 @@
 //! - [`style`] — resolve computed styles via Stylo.
 //! - [`render`] — paint the styled scene with wgpu.
 //!
-//! Status: scaffolding. [`render_str`] wires the layers, but each layer is a
-//! skeleton, so it currently surfaces the first stage's "not implemented"
-//! error.
+//! Status: early scaffolding. [`render_str`] wires the layers; the parser in
+//! [`dom`] is now implemented (it produces a real element tree), but [`style`]
+//! and [`render`] are still skeletons, so `render_str` currently surfaces the
+//! style stage's "not implemented" error.
 
 pub use svg3_dom as dom;
 pub use svg3_render as render;
@@ -48,8 +49,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pipeline_surfaces_parse_not_implemented() {
+    fn pipeline_surfaces_style_not_implemented() {
+        // Parsing now succeeds for valid svg3 XML; the pipeline fails at the
+        // next stage that is still a skeleton (style resolution).
         let err = render_str("<scene/>", render::RenderConfig::default()).unwrap_err();
-        assert!(matches!(err, Error::Parse(dom::ParseError::NotImplemented)));
+        assert!(matches!(
+            err,
+            Error::Style(style::StyleError::NotImplemented)
+        ));
     }
 }

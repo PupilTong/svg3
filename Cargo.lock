@@ -2552,8 +2552,6 @@ dependencies = [
 name = "svg3-dom"
 version = "0.1.0"
 dependencies = [
- "glam",
- "log",
  "quick-xml 0.40.1",
  "thiserror 2.0.18",
 ]
