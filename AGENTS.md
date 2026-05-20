@@ -25,7 +25,9 @@ This repository supports LLM-based assistants. The working language is English.
 ## CI / supply chain
 
 - **GitHub Actions are pinned to full 40-char commit SHAs, never tags or branches.** When adding or bumping an action, resolve the release tag to its commit SHA (e.g. `gh api repos/<owner>/<repo>/commits/<tag> --jq .sha`) and pin that, with a trailing `# vX.Y.Z` comment for readability.
-- CI runs on `macos-latest` (the first target platform): `cargo fmt --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace`.
+- CI is split between two runners:
+  - **`ubuntu-latest`** (`lint-test` job): `cargo fmt --check`, `cargo clippy --workspace --exclude app-macos --all-targets --all-features -- -D warnings`, `cargo test --workspace --exclude app-macos`, then `cargo codspeed build` + the `CodSpeedHQ/action` in `mode: simulation`. CodSpeed's simulation mode uses Valgrind (Linux-only), so benches must run here.
+  - **`macos-latest`** (`macos` job): `cargo clippy -p app-macos`, `cargo build -p app-macos`, `cargo test -p app-macos`. The only crate that needs Apple frameworks is `app-macos` (winit → Cocoa, wgpu → Metal); the library crates compile fine on Linux and are checked there.
 
 ## Repository structure
 
@@ -71,9 +73,11 @@ so a bench file just writes `use criterion::*;` and both `cargo bench` and
 - **Run locally:** `cargo bench -p svg3-dom`.
 - **Build the instrumented binaries:** `cargo codspeed build` (install
   the cargo subcommand once with `cargo install cargo-codspeed`).
-- **CI:** `.github/workflows/ci.yml` runs `cargo codspeed build` and then
-  `CodSpeedHQ/action@…` in `mode: simulation` on `macos-latest`. CodSpeed
-  posts per-benchmark deltas on PRs.
+- **CI:** the `lint-test` job in `.github/workflows/ci.yml` runs `cargo
+  codspeed build --workspace --exclude app-macos` and then
+  `CodSpeedHQ/action@…` in `mode: simulation` on `ubuntu-latest` (the
+  simulation mode uses Valgrind, which is Linux-only). CodSpeed posts
+  per-benchmark deltas on PRs.
 
 Only crates with real work to measure ship benches. Today that is
 `svg3-dom::parse` only — the style and render crates are still skeletons,

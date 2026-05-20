@@ -14,10 +14,12 @@ permissions:
   contents: read
 
 jobs:
-  rust:
-    # macOS is the first target platform: the runner builds wgpu (Metal),
-    # winit and stylo with no extra system packages.
-    runs-on: macos-latest
+  # Lint, test and benchmark the library crates on Linux. CodSpeed
+  # simulation mode uses Valgrind, which is Linux-only — so the bench job
+  # has to live here. We exclude `app-macos` because its winit + wgpu
+  # (Metal) stack only compiles on macOS.
+  lint-test:
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       # Third-party actions are pinned to full commit SHAs (not mutable
@@ -41,16 +43,41 @@ jobs:
         run: cargo fmt --check
 
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --exclude app-macos --all-targets --all-features -- -D warnings
 
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --exclude app-macos
 
       - name: Build benchmarks
-        run: cargo codspeed build
+        run: cargo codspeed build --workspace --exclude app-macos
 
       - name: Run benchmarks (CodSpeed simulation)
         uses: CodSpeedHQ/action@3194d9a39c4d46684cb44bf7207fc56626aad8fd # v4.15.1
         with:
           mode: simulation
           run: cargo codspeed run
+
+  # macOS-specific job: the only crate that needs Apple frameworks is
+  # `app-macos` (winit → Cocoa, wgpu → Metal). Build, lint and test just
+  # that one package so the macOS runner stays cheap.
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install toolchain
+        run: rustup show
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: Clippy (app-macos)
+        run: cargo clippy -p app-macos --all-targets --all-features -- -D warnings
+
+      - name: Build (app-macos)
+        run: cargo build -p app-macos
+
+      - name: Test (app-macos)
+        run: cargo test -p app-macos
