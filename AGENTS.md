@@ -32,7 +32,7 @@ This repository supports LLM-based assistants. The working language is English.
 
 ## Repository structure
 
-- `svg3-dom/`: runtime SVG3 XML parsing (`quick-xml`) and the mutable element tree (the 3D element model: `<scene>`, `<cube>`, `<ellipsoid>`, …). Pure Rust, no GPU dependencies.
+- `svg3-dom/`: runtime svg3 XML parsing (`quick-xml`) and the mutable element tree. svg3 is specified as an extension to SVG 1.1 ([`SPEC.md`](SPEC.md)) — the document root is `<svg>` and the v0 parser recognises `<g>` (SVG 1.1 grouping), `<cube>`, and `<ellipsoid>` (svg3 3D primitives); other SVG 1.1 elements round-trip as `ElementKind::Unknown` until they are specialised. Pure Rust, no GPU dependencies.
 - `svg3-style/`: runtime CSS parsing + style resolution via [Stylo](https://crates.io/crates/stylo). The planned integration implements Stylo's `TElement`/`TNode`/`TDocument` traits over `svg3-dom`; **[Blitz (`blitz-dom`)](https://github.com/DioxusLabs/blitz) is the canonical reference** for driving Stylo over a custom DOM. Currently a skeleton.
 - `svg3-render/`: Turns a styled scene into GPU draw calls with [wgpu](https://crates.io/crates/wgpu). Currently a skeleton.
 - `svg3/`: Umbrella crate. Re-exports the layers and exposes the public `parse → render` facade.
@@ -40,7 +40,7 @@ This repository supports LLM-based assistants. The working language is English.
 
 ## Project design overview
 
-The document language is specified in [`SPEC.md`](SPEC.md) (working draft 0). Section status tags (`[Implemented]` / `[Partial]` / `[Roadmap]` / `[Out of scope (v0)]`) say what the current scaffold meets vs. what is design-only. Keep `SPEC.md` in sync when a roadmap item lands; do not document features there before the milestone needs them — the project's no-speculative-scaffolding rule applies to the spec too.
+The document language is specified in [`SPEC.md`](SPEC.md) (editor's draft). `SPEC.md` is a normative extension spec — it defines `svg3` as an extension to SVG 1.1 that adds three-dimensional graphics elements (`<cube>`, `<ellipsoid>`), 3D transform functions, and a rendering model for them. It does **not** carry per-section implementation status; what the current scaffold actually implements is tracked in [`README.md`](README.md)'s Roadmap and in the issue tracker. When the spec and the implementation diverge, that is a bug worth filing, not a status the spec records.
 
 - A document-driven 3D renderer: SVG/XML extended with 3D elements.
 - **Runtime parsing.** Documents are parsed at runtime: XML via `quick-xml` (in `svg3-dom`), CSS via Stylo's parser (`cssparser`/`selectors`, in `svg3-style`). svg3 deliberately does **not** replicate the Paws template's compile-time style preprocessor (`view-macros`' `css!()` macro + `paws-style-ir`). There is no proc-macro / preprocessor crate; do not add one.

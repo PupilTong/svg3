@@ -426,14 +426,14 @@ The element describes the set of points `(x, y, z)` satisfying
 ((x − cx) / rx)² + ((y − cy) / ry)² + ((z − cz) / rz)² ≤ 1
 ```
 
-in local coordinates. The element's `'transform'` is then applied
-per §4.3.
+(with all three radii strictly positive — see the zero-disables rule
+above) in local coordinates. The element's `'transform'` is then
+applied per §4.3.
 
-The `'ellipsoid'` element generalises SVG 1.1's `'ellipse'`
-([SVG11], §9.4): `<ellipsoid cx="…" cy="…" rx="…" ry="…" rz="0"/>`
-restricted to `z = 0` is the same set of points as the corresponding
-`'ellipse'`. (The `'ellipsoid'` element does not, however, replace
-the `'ellipse'` element, and the two are processed independently.)
+The `'ellipsoid'` element does not replace SVG 1.1's `'ellipse'`
+element ([SVG11], §9.4); two-dimensional ellipses in the plane
+`z = 0` are authored with the SVG 1.1 `'ellipse'` element, and the
+two are processed independently.
 
 ---
 
