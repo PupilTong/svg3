@@ -36,3 +36,11 @@ thiserror = "2"
 
 # App / platform
 anyhow = "1"
+
+# Benchmarking
+# `codspeed-criterion-compat` is a drop-in replacement for `criterion` that
+# also instruments runs for CodSpeed. Declaring it under the `criterion`
+# name (via `package = ...`) means downstream crates write the usual
+# `use criterion::*;` and `cargo bench` / `cargo codspeed build` both
+# produce the right binary.
+criterion = { package = "codspeed-criterion-compat", version = "4" }

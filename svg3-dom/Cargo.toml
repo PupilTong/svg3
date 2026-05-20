@@ -7,3 +7,10 @@ license.workspace = true
 [dependencies]
 quick-xml.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "parse"
+harness = false

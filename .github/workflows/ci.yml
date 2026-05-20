@@ -32,6 +32,11 @@ jobs:
       - name: Cache Cargo
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
+      - name: Install cargo tools
+        uses: taiki-e/install-action@213ccc1a076163c093f914550b94feb90fab916d # v2.79.2
+        with:
+          tool: cargo-codspeed
+
       - name: Format
         run: cargo fmt --check
 
@@ -40,3 +45,12 @@ jobs:
 
       - name: Test
         run: cargo test --workspace
+
+      - name: Build benchmarks
+        run: cargo codspeed build
+
+      - name: Run benchmarks (CodSpeed simulation)
+        uses: CodSpeedHQ/action@3194d9a39c4d46684cb44bf7207fc56626aad8fd # v4.15.1
+        with:
+          mode: simulation
+          run: cargo codspeed run

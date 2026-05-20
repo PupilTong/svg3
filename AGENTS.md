@@ -54,7 +54,31 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 cargo run -p app-macos                        # native macOS window (clears to a colour)
 bash scripts/bundle-macos.sh                  # assemble target/release/bundle/svg3-macos.app
+
+cargo bench -p svg3-dom                       # criterion benches (codspeed-instrumented)
+cargo codspeed build                          # build the CodSpeed-instrumented bench binaries
 ```
+
+## Benchmarking
+
+Benchmarks live in each crate's `benches/` directory and use
+[`codspeed-criterion-compat`](https://docs.codspeed.io/benchmarks/rust/criterion) —
+the criterion API, instrumented for CodSpeed. It is declared in the root
+`[workspace.dependencies]` as `criterion = { package = "codspeed-criterion-compat", ... }`,
+so a bench file just writes `use criterion::*;` and both `cargo bench` and
+`cargo codspeed build` produce the right binary.
+
+- **Run locally:** `cargo bench -p svg3-dom`.
+- **Build the instrumented binaries:** `cargo codspeed build` (install
+  the cargo subcommand once with `cargo install cargo-codspeed`).
+- **CI:** `.github/workflows/ci.yml` runs `cargo codspeed build` and then
+  `CodSpeedHQ/action@…` in `mode: simulation` on `macos-latest`. CodSpeed
+  posts per-benchmark deltas on PRs.
+
+Only crates with real work to measure ship benches. Today that is
+`svg3-dom::parse` only — the style and render crates are still skeletons,
+so benches for them are out of scope until the cascade and the GPU
+pipeline land.
 
 ## Maintaining this file
 
