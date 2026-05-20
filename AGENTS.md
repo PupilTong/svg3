@@ -40,6 +40,8 @@ This repository supports LLM-based assistants. The working language is English.
 
 ## Project design overview
 
+The document language is specified in [`SPEC.md`](SPEC.md) (working draft 0). Section status tags (`[Implemented]` / `[Partial]` / `[Roadmap]` / `[Out of scope (v0)]`) say what the current scaffold meets vs. what is design-only. Keep `SPEC.md` in sync when a roadmap item lands; do not document features there before the milestone needs them — the project's no-speculative-scaffolding rule applies to the spec too.
+
 - A document-driven 3D renderer: SVG/XML extended with 3D elements.
 - **Runtime parsing.** Documents are parsed at runtime: XML via `quick-xml` (in `svg3-dom`), CSS via Stylo's parser (`cssparser`/`selectors`, in `svg3-style`). svg3 deliberately does **not** replicate the Paws template's compile-time style preprocessor (`view-macros`' `css!()` macro + `paws-style-ir`). There is no proc-macro / preprocessor crate; do not add one.
 - **Stylo** provides web-standard CSS behavior and computed-style resolution.

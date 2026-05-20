@@ -11,6 +11,8 @@ scene is painted with [wgpu](https://crates.io/crates/wgpu).
 The project is built from the ground up on the current Rust graphics ecosystem.
 Demos will target multiple platforms; a native macOS desktop app is the first.
 
+The document language is described in [SPEC.md](SPEC.md) (working draft 0).
+
 ## Pipeline
 
 ```
