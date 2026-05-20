@@ -26,10 +26,12 @@ SVG3 XML  ──►  svg3-dom    ──►  svg3-style   ──►  svg3-render 
 | `svg3-style`  | Resolve computed styles for the element tree via Stylo.              |
 | `svg3-render` | Turn a styled scene into GPU draw calls with wgpu.                    |
 | `svg3`        | Umbrella crate: public API tying DOM + style + render together.      |
+| `app-macos`   | Native macOS demo: a winit window with a wgpu (Metal) surface.       |
 
-> **Status: scaffolding.** Crates currently provide skeletons and compile
-> green. Rendering, parsing and the Stylo cascade are not implemented yet —
-> see the roadmap below.
+> **Status: early scaffolding.** `app-macos` opens a real Metal-backed Cocoa
+> window and clears it to a solid colour each frame (roadmap item 1). The
+> core crates are still skeletons: SVG3 parsing, the Stylo cascade and scene
+> rendering are not implemented yet — see the roadmap below.
 
 ## Toolchain
 
@@ -43,11 +45,14 @@ cargo build --workspace          # first build is slow (stylo + wgpu)
 cargo test  --workspace
 cargo fmt --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+cargo run -p app-macos                       # open the native macOS window
+bash scripts/bundle-macos.sh                 # build a .app: target/release/bundle/svg3-macos.app
 ```
 
 ## Roadmap
 
-1. winit event loop + wgpu surface — a window that clears to a colour (introduces the first demo app crate).
+1. **(done)** winit event loop + wgpu surface — a window that clears to a colour (the `app-macos` crate).
 2. SVG3 XML parsing → element tree (`<scene>`, `<cube>`, `<ellipsoid>`).
 3. 3D primitive mesh generation; render a single `<cube>`.
 4. Real Stylo integration (computed styles drive material/transform).

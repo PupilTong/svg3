@@ -33,6 +33,7 @@ This repository supports LLM-based assistants. The working language is English.
 - `svg3-style/`: runtime CSS parsing + style resolution via [Stylo](https://crates.io/crates/stylo). The planned integration implements Stylo's `TElement`/`TNode`/`TDocument` traits over `svg3-dom`; **[Blitz (`blitz-dom`)](https://github.com/DioxusLabs/blitz) is the canonical reference** for driving Stylo over a custom DOM. Currently a skeleton.
 - `svg3-render/`: Turns a styled scene into GPU draw calls with [wgpu](https://crates.io/crates/wgpu). Currently a skeleton.
 - `svg3/`: Umbrella crate. Re-exports the layers and exposes the public `parse → render` facade.
+- `app-macos/`: native macOS demo binary (`svg3-macos`). A winit 0.30 event loop driving a wgpu (Metal) surface that clears to a solid colour. Plus `app-macos/macos/Info.plist` and `scripts/bundle-macos.sh` for assembling a `.app`. Does **not** depend on `svg3` yet (the parse → render path is unimplemented).
 
 ## Project design overview
 
@@ -41,7 +42,7 @@ This repository supports LLM-based assistants. The working language is English.
 - **Stylo** provides web-standard CSS behavior and computed-style resolution.
 - **wgpu** provides cross-platform native GPU rendering (Metal/Vulkan/DX12).
 - **Native only — no WASM.** Targets native platforms (macOS first, then Windows/Linux). There is no WASM engine, `wasm32` target, or browser/WebGPU path planned. Deliberate divergence from the Paws template's `wasmtime-engine` — do not add one.
-- The core (`svg3-dom`/`svg3-style`/`svg3-render`/`svg3`) is platform-agnostic. Platform/demo glue will live in a separate app crate introduced at the windowing milestone — **none exists yet, and no placeholder/stub app crate should be added before it does real work** (winit loop + wgpu surface).
+- The core (`svg3-dom`/`svg3-style`/`svg3-render`/`svg3`) is platform-agnostic. Platform/demo glue lives in `app-macos`, which does real work (a winit 0.30 event loop + a wgpu Metal surface that clears each frame). The no-placeholder rule still applies to any **future** app crate (e.g. Windows/Linux demos): do not add a stub app crate before it does real work.
 
 ## How to run
 
@@ -50,6 +51,9 @@ cargo build --workspace
 cargo test  --workspace
 cargo fmt --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+cargo run -p app-macos                        # native macOS window (clears to a colour)
+bash scripts/bundle-macos.sh                  # assemble target/release/bundle/svg3-macos.app
 ```
 
 ## Maintaining this file
