@@ -14,11 +14,11 @@ permissions:
   contents: read
 
 jobs:
-  # Lint, test and benchmark the library crates on Linux. CodSpeed
-  # simulation mode uses Valgrind, which is Linux-only — so the bench job
-  # has to live here. We exclude `app-macos` because its winit + wgpu
-  # (Metal) stack only compiles on macOS.
-  lint-test:
+  # Lint, test, coverage and benchmark for the library crates. CodSpeed
+  # simulation mode uses Valgrind, which is Linux-only — so the bench
+  # job has to live here. We exclude `app-macos` because its winit + wgpu
+  # (Metal) stack only compiles on macOS (covered by the `macos` job).
+  linux:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:

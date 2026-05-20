@@ -26,7 +26,7 @@ This repository supports LLM-based assistants. The working language is English.
 
 - **GitHub Actions are pinned to full 40-char commit SHAs, never tags or branches.** When adding or bumping an action, resolve the release tag to its commit SHA (e.g. `gh api repos/<owner>/<repo>/commits/<tag> --jq .sha`) and pin that, with a trailing `# vX.Y.Z` comment for readability.
 - CI is split between two runners:
-  - **`ubuntu-latest`** (`lint-test` job): `cargo fmt --check`, `cargo clippy --workspace --exclude app-macos --all-targets --all-features -- -D warnings`, `cargo llvm-cov --workspace --exclude app-macos --all-features --lcov --output-path lcov.info` (runs tests under coverage instrumentation), `codecov/codecov-action` upload, then `cargo codspeed build --workspace --exclude app-macos` + the `CodSpeedHQ/action` in `mode: simulation`. CodSpeed's simulation mode uses Valgrind (Linux-only), so benches must run here.
+  - **`ubuntu-latest`** (`linux` job): `cargo fmt --check`, `cargo clippy --workspace --exclude app-macos --all-targets --all-features -- -D warnings`, `cargo llvm-cov --workspace --exclude app-macos --all-features --lcov --output-path lcov.info` (runs tests under coverage instrumentation), `codecov/codecov-action` upload, then `cargo codspeed build --workspace --exclude app-macos` + the `CodSpeedHQ/action` in `mode: simulation`. CodSpeed's simulation mode uses Valgrind (Linux-only), so benches must run here.
   - **`macos-latest`** (`macos` job): `cargo clippy -p app-macos`, `cargo build -p app-macos`, `cargo test -p app-macos`. The only crate that needs Apple frameworks is `app-macos` (winit → Cocoa, wgpu → Metal); the library crates compile fine on Linux and are checked there.
 - **Coverage:** `cargo llvm-cov` produces `lcov.info`, uploaded to Codecov by `codecov/codecov-action`. The project threshold is 3% (see `codecov.yml`); patch coverage is informational only. `app-macos` is excluded — its windowed event loop is not unit-testable, and counting it would create a permanent 0% drag. `fail_ci_if_error: false` so a missing/broken Codecov token does not break CI; add a `CODECOV_TOKEN` repo secret if uploads need to be reliable on private mirrors.
 
@@ -74,7 +74,7 @@ so a bench file just writes `use criterion::*;` and both `cargo bench` and
 - **Run locally:** `cargo bench -p svg3-dom`.
 - **Build the instrumented binaries:** `cargo codspeed build` (install
   the cargo subcommand once with `cargo install cargo-codspeed`).
-- **CI:** the `lint-test` job in `.github/workflows/ci.yml` runs `cargo
+- **CI:** the `linux` job in `.github/workflows/ci.yml` runs `cargo
   codspeed build --workspace --exclude app-macos` and then
   `CodSpeedHQ/action@…` in `mode: simulation` on `ubuntu-latest` (the
   simulation mode uses Valgrind, which is Linux-only). CodSpeed posts
