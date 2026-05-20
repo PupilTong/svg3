@@ -1,14 +1,17 @@
 //! `svg3-dom` — the SVG3 document model and runtime XML parser.
 //!
-//! Parses SVG3 XML (an SVG/XML dialect extended with 3D elements such as
-//! `<scene>`, `<cube>` and `<ellipsoid>`) into a mutable element tree.
+//! A [`Document`] is a flat arena of [`Node`]s addressed by [`NodeId`].
+//! Each `Node` carries [`Element`] data (tag kind + raw attributes) plus
+//! its children's ids. Storing nodes in a `Vec` gives stable identifiers
+//! and decouples tree mutation from the borrow checker — both useful for
+//! the planned Stylo cascade (Blitz / `blitz-dom`, the canonical Stylo-over-
+//! custom-DOM reference, uses the same shape).
 //!
 //! The parser is structural only at this milestone: attribute *values* are
-//! preserved as raw strings (so the planned Stylo cascade can consume `class`,
-//! `id`, `style`, …), but no attribute values are interpreted into typed
-//! representations (e.g. `transform="translate(...)"` is not parsed into a
-//! matrix). Text content inside elements is ignored. Namespaces are not
-//! handled.
+//! preserved as raw strings (so the planned Stylo cascade can consume
+//! `class`, `id`, `style`, …) but no attribute values are interpreted into
+//! typed representations. Text content inside elements is ignored.
+//! Namespaces are not handled.
 
 use std::collections::BTreeMap;
 
@@ -33,7 +36,7 @@ pub enum ElementKind {
 
 impl ElementKind {
     /// Map an XML tag name to an [`ElementKind`]. Unknown tags are preserved
-    /// so the document can still be inspected even if it uses non-svg3
+    /// so the document still round-trips when it contains non-svg3
     /// elements; the planned Stylo cascade will match selectors on the raw
     /// tag name regardless.
     pub fn from_tag(tag: &str) -> Self {
@@ -58,52 +61,118 @@ impl ElementKind {
     }
 }
 
-/// A single node in the document tree.
+/// Element data living on a [`Node`]: a tag [`ElementKind`] and the raw
+/// attributes parsed from XML.
 ///
-/// Attribute values are stored as raw `String`s in document order's
-/// lexicographic projection (a `BTreeMap`); the parser does not interpret
-/// them. Higher layers (style, render) decide how to consume `class`, `id`,
-/// `transform`, geometry attributes, etc.
+/// Values are XML-unescape-normalised `String`s; the parser does not
+/// interpret them into typed forms (e.g. `transform="translate(...)"` stays
+/// a string). Higher layers — style resolution, rendering — decide how to
+/// consume `class`, `id`, geometry attributes, etc.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Node {
-    /// What kind of element this is.
+pub struct Element {
+    /// Tag kind.
     pub kind: ElementKind,
-    /// Raw attributes, keyed by name. Values are XML-unescaped strings.
+    /// Raw attributes, keyed by name.
     pub attributes: BTreeMap<String, String>,
-    /// Child nodes, in document order.
-    pub children: Vec<Node>,
 }
 
-impl Node {
-    /// Create a leaf node of `kind` with no attributes and no children.
+impl Element {
+    /// Construct an element with the given kind and no attributes.
     pub fn new(kind: ElementKind) -> Self {
         Self {
             kind,
             attributes: BTreeMap::new(),
-            children: Vec::new(),
         }
-    }
-
-    /// Append `child` and return `self`, for ergonomic tree building.
-    pub fn with_child(mut self, child: Node) -> Self {
-        self.children.push(child);
-        self
     }
 }
 
-/// A parsed SVG3 document. The root is required to be a `<scene>`.
+/// Opaque stable identifier for a [`Node`] inside a [`Document`].
+///
+/// `NodeId`s are dense indices and are only meaningful inside the
+/// [`Document`] that produced them — do not mix ids across documents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct NodeId(u32);
+
+/// One node in a [`Document`]'s arena. Children are ids into the same
+/// arena.
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Node {
+    /// Element data on this node.
+    pub element: Element,
+    /// Children in document order.
+    pub children: Vec<NodeId>,
+}
+
+/// A parsed SVG3 document.
+///
+/// Nodes live in a flat arena, addressed by [`NodeId`]. The root is always
+/// a `<scene>` element.
+#[derive(Debug, Clone)]
 pub struct Document {
-    /// The root node (an [`ElementKind::Scene`]).
-    pub root: Node,
+    nodes: Vec<Node>,
+    root: NodeId,
 }
 
 impl Document {
-    /// Create an empty document with a `<scene>` root.
+    /// Create an empty document containing just a `<scene>` root.
     pub fn new() -> Self {
+        let scene = Node {
+            element: Element::new(ElementKind::Scene),
+            children: Vec::new(),
+        };
         Self {
-            root: Node::new(ElementKind::Scene),
+            nodes: vec![scene],
+            root: NodeId(0),
         }
+    }
+
+    /// The id of the root `<scene>` node.
+    pub fn root(&self) -> NodeId {
+        self.root
+    }
+
+    /// Borrow a node by id. Panics if `id` does not belong to this
+    /// document.
+    pub fn node(&self, id: NodeId) -> &Node {
+        &self.nodes[id.0 as usize]
+    }
+
+    /// Mutably borrow a node by id. Panics if `id` does not belong to this
+    /// document.
+    pub fn node_mut(&mut self, id: NodeId) -> &mut Node {
+        &mut self.nodes[id.0 as usize]
+    }
+
+    /// Convenience shorthand for `&doc.node(id).element`.
+    pub fn element(&self, id: NodeId) -> &Element {
+        &self.node(id).element
+    }
+
+    /// Append a new child element under `parent` and return its id.
+    pub fn append_child(&mut self, parent: NodeId, kind: ElementKind) -> NodeId {
+        let id = self.alloc(Element::new(kind));
+        self.nodes[parent.0 as usize].children.push(id);
+        id
+    }
+
+    /// Number of nodes in the arena (always at least 1 — the root).
+    pub fn len(&self) -> usize {
+        self.nodes.len()
+    }
+
+    /// Always `false` for a constructed document; provided to satisfy
+    /// clippy's `len_without_is_empty`.
+    pub fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
+    }
+
+    fn alloc(&mut self, element: Element) -> NodeId {
+        let id = NodeId(self.nodes.len() as u32);
+        self.nodes.push(Node {
+            element,
+            children: Vec::new(),
+        });
+        id
     }
 }
 
@@ -122,7 +191,7 @@ pub enum ParseError {
     /// The root element was not `<scene>`.
     #[error("expected `<scene>` root element, found `<{found}>`")]
     UnexpectedRoot {
-        /// The tag name that was found instead.
+        /// The tag name found at the document root.
         found: String,
     },
     /// An element was left open at end of document.
@@ -145,27 +214,32 @@ pub enum ParseError {
 /// Parse an SVG3 document from XML text.
 ///
 /// The root element must be `<scene>`. Tag names are mapped via
-/// [`ElementKind::from_tag`]; unknown tags become [`ElementKind::Unknown`] so
-/// the document round-trips even when it contains non-svg3 elements.
-/// Attribute values are XML-unescaped and stored verbatim on the [`Node`].
+/// [`ElementKind::from_tag`]; unknown tags become [`ElementKind::Unknown`]
+/// so the document round-trips even when it contains non-svg3 elements.
+/// Attribute values are XML-unescape-normalised and stored verbatim on the
+/// owning [`Element`].
 pub fn parse(input: &str) -> Result<Document, ParseError> {
     let mut reader = Reader::from_str(input);
-    let mut stack: Vec<Node> = Vec::new();
-    let mut root: Option<Node> = None;
+    let mut arena: Vec<Node> = Vec::new();
+    let mut parents: Vec<NodeId> = Vec::new();
+    let mut root: Option<NodeId> = None;
     let mut buf: Vec<u8> = Vec::new();
 
     loop {
         match reader.read_event_into(&mut buf)? {
             Event::Start(e) => {
-                stack.push(build_node(&e)?);
+                let element = build_element(&e)?;
+                let id = alloc(&mut arena, element);
+                attach(&mut arena, &parents, &mut root, id);
+                parents.push(id);
             }
             Event::Empty(e) => {
-                let node = build_node(&e)?;
-                attach(&mut stack, &mut root, node);
+                let element = build_element(&e)?;
+                let id = alloc(&mut arena, element);
+                attach(&mut arena, &parents, &mut root, id);
             }
             Event::End(_) => {
-                let node = stack.pop().ok_or(ParseError::EmptyDocument)?;
-                attach(&mut stack, &mut root, node);
+                parents.pop().ok_or(ParseError::EmptyDocument)?;
             }
             Event::Eof => break,
             // Text, comments, CDATA, processing instructions, XML
@@ -175,43 +249,55 @@ pub fn parse(input: &str) -> Result<Document, ParseError> {
         buf.clear();
     }
 
-    if let Some(unclosed) = stack.pop() {
-        return Err(ParseError::UnclosedElement {
-            tag: unclosed.kind.as_tag().to_owned(),
-        });
+    if let Some(unclosed_id) = parents.last() {
+        let tag = arena[unclosed_id.0 as usize]
+            .element
+            .kind
+            .as_tag()
+            .to_owned();
+        return Err(ParseError::UnclosedElement { tag });
     }
 
     let root = root.ok_or(ParseError::EmptyDocument)?;
-    if root.kind != ElementKind::Scene {
+    let root_kind = &arena[root.0 as usize].element.kind;
+    if *root_kind != ElementKind::Scene {
         return Err(ParseError::UnexpectedRoot {
-            found: root.kind.as_tag().to_owned(),
+            found: root_kind.as_tag().to_owned(),
         });
     }
-    Ok(Document { root })
+
+    Ok(Document { nodes: arena, root })
 }
 
-fn build_node(e: &BytesStart<'_>) -> Result<Node, ParseError> {
+fn build_element(e: &BytesStart<'_>) -> Result<Element, ParseError> {
     let tag = std::str::from_utf8(e.name().into_inner())?;
-    let mut node = Node::new(ElementKind::from_tag(tag));
+    let mut element = Element::new(ElementKind::from_tag(tag));
     for attr in e.attributes() {
         let attr = attr?;
         let key = std::str::from_utf8(attr.key.into_inner())?.to_owned();
         let value = attr.normalized_value(XmlVersion::Implicit1_0)?.into_owned();
-        node.attributes.insert(key, value);
+        element.attributes.insert(key, value);
     }
-    Ok(node)
+    Ok(element)
 }
 
-fn attach(stack: &mut [Node], root: &mut Option<Node>, node: Node) {
-    if let Some(parent) = stack.last_mut() {
-        parent.children.push(node);
+fn alloc(arena: &mut Vec<Node>, element: Element) -> NodeId {
+    let id = NodeId(arena.len() as u32);
+    arena.push(Node {
+        element,
+        children: Vec::new(),
+    });
+    id
+}
+
+fn attach(arena: &mut [Node], parents: &[NodeId], root: &mut Option<NodeId>, id: NodeId) {
+    if let Some(parent) = parents.last() {
+        arena[parent.0 as usize].children.push(id);
     } else {
-        // `attach` is only called from `Empty` / `End` arms; quick-xml
-        // guarantees a balanced or error-surfaced document, so on a
-        // top-level Empty/End we are establishing the single root.
-        // (Multiple top-level siblings would already have failed at the
-        // XML layer.)
-        *root = Some(node);
+        // First top-level allocation = root. quick-xml enforces XML's
+        // single-root rule, so a sibling at the document level would
+        // already have surfaced as an XML error before we got here.
+        *root = Some(id);
     }
 }
 
@@ -233,55 +319,61 @@ mod tests {
     }
 
     #[test]
-    fn document_tree_can_be_built_programmatically() {
-        let cube = Node::new(ElementKind::Cube);
+    fn document_can_be_built_programmatically() {
         let mut doc = Document::new();
-        doc.root = doc.root.with_child(cube);
+        let cube_id = doc.append_child(doc.root(), ElementKind::Cube);
 
-        assert_eq!(doc.root.kind, ElementKind::Scene);
-        assert_eq!(doc.root.children.len(), 1);
-        assert_eq!(doc.root.children[0].kind, ElementKind::Cube);
+        assert_eq!(doc.element(doc.root()).kind, ElementKind::Scene);
+        assert_eq!(doc.node(doc.root()).children, vec![cube_id]);
+        assert_eq!(doc.element(cube_id).kind, ElementKind::Cube);
+        assert_eq!(doc.len(), 2);
     }
 
     #[test]
     fn parse_empty_scene() {
         let doc = parse("<scene/>").unwrap();
-        assert_eq!(doc.root.kind, ElementKind::Scene);
-        assert!(doc.root.attributes.is_empty());
-        assert!(doc.root.children.is_empty());
+        let root = doc.element(doc.root());
+        assert_eq!(root.kind, ElementKind::Scene);
+        assert!(root.attributes.is_empty());
+        assert!(doc.node(doc.root()).children.is_empty());
+        assert_eq!(doc.len(), 1);
     }
 
     #[test]
     fn parse_scene_with_explicit_close() {
         let doc = parse("<scene></scene>").unwrap();
-        assert_eq!(doc.root.kind, ElementKind::Scene);
-        assert!(doc.root.children.is_empty());
+        assert_eq!(doc.element(doc.root()).kind, ElementKind::Scene);
+        assert!(doc.node(doc.root()).children.is_empty());
     }
 
     #[test]
     fn parse_single_cube() {
         let doc = parse("<scene><cube/></scene>").unwrap();
-        assert_eq!(doc.root.kind, ElementKind::Scene);
-        assert_eq!(doc.root.children.len(), 1);
-        assert_eq!(doc.root.children[0].kind, ElementKind::Cube);
+        assert_eq!(doc.element(doc.root()).kind, ElementKind::Scene);
+        let children = &doc.node(doc.root()).children;
+        assert_eq!(children.len(), 1);
+        assert_eq!(doc.element(children[0]).kind, ElementKind::Cube);
+        assert_eq!(doc.len(), 2);
     }
 
     #[test]
     fn parse_nested_groups() {
         let xml = "<scene><group><cube/><ellipsoid/></group></scene>";
         let doc = parse(xml).unwrap();
-        let group = &doc.root.children[0];
-        assert_eq!(group.kind, ElementKind::Group);
+        let group_id = doc.node(doc.root()).children[0];
+        let group = doc.node(group_id);
+        assert_eq!(group.element.kind, ElementKind::Group);
         assert_eq!(group.children.len(), 2);
-        assert_eq!(group.children[0].kind, ElementKind::Cube);
-        assert_eq!(group.children[1].kind, ElementKind::Ellipsoid);
+        assert_eq!(doc.element(group.children[0]).kind, ElementKind::Cube);
+        assert_eq!(doc.element(group.children[1]).kind, ElementKind::Ellipsoid);
     }
 
     #[test]
     fn parse_preserves_attributes_and_unescapes_values() {
         let xml = r#"<scene><cube id="a" class="b" size="2" label="a&amp;b"/></scene>"#;
         let doc = parse(xml).unwrap();
-        let cube = &doc.root.children[0];
+        let cube_id = doc.node(doc.root()).children[0];
+        let cube = doc.element(cube_id);
         assert_eq!(cube.kind, ElementKind::Cube);
         assert_eq!(cube.attributes.get("id").map(String::as_str), Some("a"));
         assert_eq!(cube.attributes.get("class").map(String::as_str), Some("b"));
@@ -295,8 +387,9 @@ mod tests {
     #[test]
     fn parse_unknown_elements_kept_verbatim() {
         let doc = parse("<scene><widget/></scene>").unwrap();
+        let widget_id = doc.node(doc.root()).children[0];
         assert_eq!(
-            doc.root.children[0].kind,
+            doc.element(widget_id).kind,
             ElementKind::Unknown("widget".to_owned())
         );
     }
