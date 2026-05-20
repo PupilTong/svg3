@@ -1,0 +1,23 @@
+# Codecov configuration for svg3.
+#
+# - `project` covers overall coverage delta on a commit/PR. `threshold: 3%`
+#   lets small dips through without failing the check while still surfacing
+#   real regressions.
+# - `patch` is informational only — a PR is not blocked on its diff's own
+#   coverage number, just measured.
+# - `app-macos` is the macOS demo binary; it has no unit tests (windowed
+#   event loop is not unit-testable), so excluding it from coverage avoids
+#   a permanent ~0% drag on the overall figure.
+
+coverage:
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 3%
+    patch:
+      default:
+        informational: true
+
+ignore:
+  - "app-macos/**"
