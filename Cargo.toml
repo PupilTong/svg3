@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["svg3-dom", "svg3-style", "svg3-render", "svg3"]
+members = ["svg3-dom", "svg3-style", "svg3-render", "svg3", "app-macos"]
 
 [workspace.package]
 version = "0.1.0"
@@ -16,6 +16,8 @@ svg3 = { path = "svg3" }
 
 # Graphics
 wgpu = "29"
+winit = "0.30"            # 0.30 stable; 0.31 is beta — avoid
+pollster = "0.4"
 bytemuck = "1"
 
 # Style resolution
@@ -29,4 +31,8 @@ quick-xml = "0.40"
 
 # Diagnostics
 log = "0.4"
+env_logger = "0.11"
 thiserror = "2"
+
+# App / platform
+anyhow = "1"
