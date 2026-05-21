@@ -2,7 +2,11 @@
 //!
 //! Opens a Cocoa NSWindow via winit, accepts an SVG string through a macOS
 //! dialog, and draws the currently implemented `<rect>` / `<circle>` geometry
-//! into a Metal-backed wgpu surface.
+//! into a Metal-backed wgpu surface. The document is viewed through an orbit
+//! camera the user can move: drag or the arrow keys to orbit, scroll to
+//! zoom, `R` to reset.
+
+mod camera;
 
 use std::borrow::Cow;
 use std::process::Command;
@@ -10,19 +14,28 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use glam::Vec3;
-use svg3_render::{build_scene, document_viewport, RenderConfig, Vertex, Viewport};
+use svg3_render::{build_scene, document_viewport, Mesh, RenderConfig, Vertex, Viewport};
 use wgpu::util::DeviceExt;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalSize};
-use winit::event::{ElementState, MouseButton, WindowEvent};
+use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::{Key, ModifiersState};
+use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
+use camera::OrbitCamera;
+
 const APP_TITLE: &str = "svg3";
-const EDIT_HINT: &str = "click window or Command+O to edit";
+const EDIT_HINT: &str = "drag/arrows orbit · scroll zoom · R reset · Cmd+O edit";
 const INITIAL_WINDOW_SIZE: LogicalSize<f64> = LogicalSize::new(800.0, 600.0);
 const MIN_WINDOW_SIZE: LogicalSize<f64> = LogicalSize::new(320.0, 240.0);
+
+/// Orbit sensitivity for a mouse drag, in radians per pixel.
+const DRAG_ORBIT_SPEED: f32 = 0.005;
+/// Orbit step applied per arrow-key press, in radians.
+const KEY_ORBIT_STEP: f32 = 0.08;
+/// Eye-distance multiplier applied per mouse-wheel line of scroll.
+const WHEEL_ZOOM_STEP: f32 = 0.88;
 
 const CLEAR_COLOR: wgpu::Color = wgpu::Color {
     r: 0.96,
@@ -36,7 +49,15 @@ const DEFAULT_SVG: &str = r##"<svg><rect x="40" y="40" width="240" height="140" 
 const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 2] =
     wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4];
 
+/// A built scene: the object-space mesh kept for re-projection, plus its GPU
+/// buffers. The vertex buffer holds clip-space positions and is rewritten
+/// whenever the camera moves; the index buffer and `mesh` are stable until
+/// the SVG itself changes.
 struct DrawScene {
+    /// Object-space geometry (SVG user space), re-projected on camera moves.
+    mesh: Mesh,
+    /// The document viewport the camera frames and targets.
+    viewport: Viewport,
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     index_count: u32,
@@ -56,6 +77,11 @@ struct Gfx {
     pipeline: wgpu::RenderPipeline,
     scene: Option<DrawScene>,
     svg_source: String,
+    /// The orbit camera the document is viewed through.
+    camera: OrbitCamera,
+    /// Last status message, kept so the window title can be rebuilt whenever
+    /// the camera moves.
+    status: String,
 }
 
 impl Gfx {
@@ -108,6 +134,11 @@ impl Gfx {
             pipeline,
             scene: None,
             svg_source: String::new(),
+            camera: OrbitCamera::framing(Viewport {
+                width: width as f32,
+                height: height as f32,
+            }),
+            status: String::new(),
         };
         gfx.set_svg_source(DEFAULT_SVG.to_owned());
         Ok(gfx)
@@ -195,10 +226,14 @@ impl Gfx {
         match svg3_dom::parse(&self.svg_source) {
             Ok(document) => {
                 self.scene = self.build_draw_scene(&document);
-                if self.scene.is_some() {
-                    self.set_status("rendered");
-                } else {
-                    self.set_status("no supported shapes");
+                match self.scene.as_ref().map(|scene| scene.viewport) {
+                    Some(viewport) => {
+                        // A freshly loaded document gets a head-on framing.
+                        self.camera.reset(viewport);
+                        self.reproject();
+                        self.set_status("rendered");
+                    }
+                    None => self.set_status("no supported shapes"),
                 }
             }
             Err(e) => {
@@ -211,47 +246,30 @@ impl Gfx {
     }
 
     fn rebuild_scene(&mut self) {
+        // A resize re-tessellates (percentage lengths track the viewport)
+        // but keeps the camera where the user left it.
         self.scene = match svg3_dom::parse(&self.svg_source) {
             Ok(document) => self.build_draw_scene(&document),
             Err(_) => None,
         };
+        self.reproject();
         self.window.request_redraw();
     }
 
+    /// Tessellate `document` into an object-space [`DrawScene`]. The vertex
+    /// buffer is allocated but left empty — [`Gfx::reproject`] fills it with
+    /// clip-space positions for the current camera.
     fn build_draw_scene(&self, document: &svg3_dom::Document) -> Option<DrawScene> {
-        let width = self.config.width.max(1);
-        let height = self.config.height.max(1);
         let target_viewport = Viewport {
-            width: width as f32,
-            height: height as f32,
+            width: self.config.width.max(1) as f32,
+            height: self.config.height.max(1) as f32,
         };
-        let mesh = build_scene(document, document_viewport(document, target_viewport));
+        let viewport = document_viewport(document, target_viewport);
+        let mesh = build_scene(document, viewport);
         if mesh.is_empty() {
             return None;
         }
 
-        let projection = RenderConfig {
-            format: self.config.format,
-            width,
-            height,
-            camera: None,
-        }
-        .projection();
-        let vertices: Vec<Vertex> = mesh
-            .vertices
-            .iter()
-            .map(|v| Vertex {
-                position: projection.project_point3(Vec3::from(v.position)).into(),
-                color: v.color,
-            })
-            .collect();
-        let vertex_buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("svg3 app vertex buffer"),
-                contents: bytemuck::cast_slice(&vertices),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
         let index_buffer = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -259,23 +277,103 @@ impl Gfx {
                 contents: bytemuck::cast_slice(&mesh.indices),
                 usage: wgpu::BufferUsages::INDEX,
             });
+        let vertex_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("svg3 app vertex buffer"),
+            size: std::mem::size_of_val(mesh.vertices.as_slice()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let index_count = mesh.indices.len() as u32;
         Some(DrawScene {
+            mesh,
+            viewport,
             vertex_buffer,
             index_buffer,
-            index_count: mesh.indices.len() as u32,
+            index_count,
         })
     }
 
-    fn set_status(&self, status: &str) {
-        let status = compact_status(status, 100);
-        self.window
-            .set_title(&format!("{APP_TITLE} - {status} ({EDIT_HINT})"));
+    /// Project the scene's object-space mesh through the current camera and
+    /// upload the clip-space vertices. Cheap enough to call on every camera
+    /// or surface change.
+    fn reproject(&self) {
+        let Some(scene) = &self.scene else {
+            return;
+        };
+        let view_projection = RenderConfig {
+            format: self.config.format,
+            width: self.config.width.max(1),
+            height: self.config.height.max(1),
+            camera: Some(self.camera.to_camera(scene.viewport)),
+        }
+        .view_projection();
+        let vertices: Vec<Vertex> = scene
+            .mesh
+            .vertices
+            .iter()
+            .map(|v| Vertex {
+                position: view_projection
+                    .project_point3(Vec3::from(v.position))
+                    .into(),
+                color: v.color,
+            })
+            .collect();
+        self.queue
+            .write_buffer(&scene.vertex_buffer, 0, bytemuck::cast_slice(&vertices));
+        self.window.request_redraw();
+    }
+
+    /// Orbit the camera by `dyaw` / `dpitch` radians and re-project.
+    fn orbit_camera(&mut self, dyaw: f32, dpitch: f32) {
+        self.camera.orbit(dyaw, dpitch);
+        self.reproject();
+        self.refresh_title();
+    }
+
+    /// Multiply the camera's eye distance by `factor` and re-project.
+    fn zoom_camera(&mut self, factor: f32) {
+        self.camera.zoom(factor);
+        self.reproject();
+        self.refresh_title();
+    }
+
+    /// Reframe the camera head-on for the current document.
+    fn reset_camera(&mut self) {
+        let Some(viewport) = self.scene.as_ref().map(|scene| scene.viewport) else {
+            return;
+        };
+        self.camera.reset(viewport);
+        self.reproject();
+        self.refresh_title();
+    }
+
+    fn set_status(&mut self, status: &str) {
+        self.status = compact_status(status, 80).into_owned();
+        self.refresh_title();
+    }
+
+    /// Rebuild the window title from the current status and camera state.
+    fn refresh_title(&self) {
+        let camera = format!(
+            "cam {:.0}°/{:.0}° d{:.0}",
+            self.camera.yaw().to_degrees(),
+            self.camera.pitch().to_degrees(),
+            self.camera.distance(),
+        );
+        self.window.set_title(&format!(
+            "{APP_TITLE} - {} - {camera} ({EDIT_HINT})",
+            self.status
+        ));
     }
 }
 
 struct App {
     gfx: Option<Gfx>,
     modifiers: ModifiersState,
+    /// Last cursor position, for computing orbit-drag deltas.
+    cursor: Option<(f64, f64)>,
+    /// Whether the left button is held — an orbit drag is in progress.
+    orbiting: bool,
 }
 
 impl Default for App {
@@ -283,6 +381,8 @@ impl Default for App {
         Self {
             gfx: None,
             modifiers: ModifiersState::empty(),
+            cursor: None,
+            orbiting: false,
         }
     }
 }
@@ -300,6 +400,26 @@ impl App {
                 gfx.set_status("input dialog failed");
                 gfx.window.request_redraw();
             }
+        }
+    }
+
+    /// Apply a camera control key (arrow keys orbit, `R` resets).
+    fn handle_camera_key(&mut self, event: &winit::event::KeyEvent) {
+        if event.state != ElementState::Pressed {
+            return;
+        }
+        let Some(gfx) = self.gfx.as_mut() else {
+            return;
+        };
+        match event.logical_key.as_ref() {
+            Key::Named(NamedKey::ArrowLeft) => gfx.orbit_camera(-KEY_ORBIT_STEP, 0.0),
+            Key::Named(NamedKey::ArrowRight) => gfx.orbit_camera(KEY_ORBIT_STEP, 0.0),
+            Key::Named(NamedKey::ArrowUp) => gfx.orbit_camera(0.0, -KEY_ORBIT_STEP),
+            Key::Named(NamedKey::ArrowDown) => gfx.orbit_camera(0.0, KEY_ORBIT_STEP),
+            Key::Character(key) if key.eq_ignore_ascii_case("r") && !event.repeat => {
+                gfx.reset_camera();
+            }
+            _ => {}
         }
     }
 }
@@ -358,13 +478,41 @@ impl ApplicationHandler for App {
             {
                 self.open_svg_dialog();
             }
-            WindowEvent::KeyboardInput { .. } => {}
+            WindowEvent::KeyboardInput { event, .. } => {
+                self.handle_camera_key(&event);
+            }
             WindowEvent::MouseInput {
-                state: ElementState::Pressed,
+                state,
                 button: MouseButton::Left,
                 ..
             } => {
-                self.open_svg_dialog();
+                // A left drag orbits the camera; the SVG dialog opens via
+                // Command+O / Command+I instead.
+                self.orbiting = state == ElementState::Pressed;
+            }
+            WindowEvent::CursorLeft { .. } => {
+                self.cursor = None;
+                self.orbiting = false;
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                let next = (position.x, position.y);
+                if let (true, Some((px, py)), Some(gfx)) =
+                    (self.orbiting, self.cursor, self.gfx.as_mut())
+                {
+                    let dyaw = (next.0 - px) as f32 * DRAG_ORBIT_SPEED;
+                    let dpitch = (next.1 - py) as f32 * DRAG_ORBIT_SPEED;
+                    gfx.orbit_camera(dyaw, dpitch);
+                }
+                self.cursor = Some(next);
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let lines = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => y,
+                    MouseScrollDelta::PixelDelta(position) => position.y as f32 / 60.0,
+                };
+                if let Some(gfx) = self.gfx.as_mut() {
+                    gfx.zoom_camera(WHEEL_ZOOM_STEP.powf(lines));
+                }
             }
             _ => {}
         }
@@ -501,6 +649,10 @@ fn compact_status(status: &str, max_chars: usize) -> Cow<'_, str> {
 
 fn main() -> Result<()> {
     env_logger::init();
+    println!(
+        "svg3-macos camera controls: drag or arrow keys orbit · scroll \
+         zooms · R resets · Command+O / Command+I edits the SVG"
+    );
     let event_loop = EventLoop::new().context("failed to create event loop")?;
     event_loop.set_control_flow(ControlFlow::Wait);
     let mut app = App::default();
