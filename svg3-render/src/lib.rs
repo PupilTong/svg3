@@ -351,12 +351,11 @@ impl Renderer {
 
         let pipeline = build_pipeline(&device);
 
-        let (_transform_buffer, transform_bind_group) =
-            build_transform_bind_group(&device, &pipeline, config.view_projection());
-
         // Vertices are uploaded in SVG/world space; `shader.wgsl` projects
         // them to clip space from the uniform view-projection matrix.
         let buffers = (!mesh.is_empty()).then(|| {
+            let transform_bind_group =
+                build_transform_bind_group(&device, &pipeline, config.view_projection());
             let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("svg3 vertex buffer"),
                 contents: bytemuck::cast_slice(&mesh.vertices),
@@ -367,7 +366,7 @@ impl Renderer {
                 contents: bytemuck::cast_slice(&mesh.indices),
                 usage: wgpu::BufferUsages::INDEX,
             });
-            (vertex_buffer, index_buffer)
+            (vertex_buffer, index_buffer, transform_bind_group)
         });
 
         let bytes_per_row = width * 4;
@@ -397,9 +396,9 @@ impl Renderer {
                 })],
                 ..Default::default()
             });
-            if let Some((vertex_buffer, index_buffer)) = &buffers {
+            if let Some((vertex_buffer, index_buffer, transform_bind_group)) = &buffers {
                 pass.set_pipeline(&pipeline);
-                pass.set_bind_group(0, &transform_bind_group, &[]);
+                pass.set_bind_group(0, transform_bind_group, &[]);
                 pass.set_vertex_buffer(0, vertex_buffer.slice(..));
                 pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..mesh.indices.len() as u32, 0, 0..1);
@@ -498,22 +497,21 @@ fn build_transform_bind_group(
     device: &wgpu::Device,
     pipeline: &wgpu::RenderPipeline,
     view_projection: Mat4,
-) -> (wgpu::Buffer, wgpu::BindGroup) {
+) -> wgpu::BindGroup {
     let uniform = TransformUniform::new(view_projection);
     let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("svg3 transform uniform"),
         contents: bytemuck::bytes_of(&uniform),
         usage: wgpu::BufferUsages::UNIFORM,
     });
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("svg3 transform bind group"),
         layout: &pipeline.get_bind_group_layout(0),
         entries: &[wgpu::BindGroupEntry {
             binding: 0,
             resource: buffer.as_entire_binding(),
         }],
-    });
-    (buffer, bind_group)
+    })
 }
 
 /// Map the readback buffer and copy its rows into a tightly-packed
@@ -853,6 +851,36 @@ mod tests {
         );
         // A corner pixel lies outside the disc — the transparent clear colour.
         assert_eq!(image.pixel(2, 2)[3], 0, "background should be transparent");
+    }
+
+    #[test]
+    fn render_to_image_draws_rect_through_camera() {
+        // The perspective camera path reaches pixels through the WGSL
+        // transform uniform, not the CPU orthographic projection.
+        let document = svg3_dom::parse(
+            r#"<svg width="64" height="64"><rect x="16" y="16" width="32" height="32" fill="blue"/></svg>"#,
+        )
+        .unwrap();
+        let config = RenderConfig {
+            width: 64,
+            height: 64,
+            camera: Some(Camera::facing(64, 64)),
+            ..RenderConfig::default()
+        };
+        let image = match Renderer::new().render_to_image(&document, config) {
+            Ok(image) => image,
+            Err(RenderError::NoAdapter) => {
+                eprintln!("skipping render_to_image_draws_rect_through_camera: no GPU adapter");
+                return;
+            }
+            Err(e) => panic!("headless render failed: {e}"),
+        };
+        assert_eq!((image.width, image.height), (64, 64));
+        let centre = image.pixel(32, 32);
+        assert!(
+            centre[2] > 200 && centre[0] < 60 && centre[1] < 60,
+            "camera centre pixel not blue: {centre:?}"
+        );
     }
 
     #[test]

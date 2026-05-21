@@ -1,8 +1,10 @@
 //! Full-renderer benchmarks for `Renderer::render_to_image`.
 //!
-//! These benches exercise the current end-to-end headless wgpu path: scene
+//! These benches exercise `Renderer::render_to_image` as it exists today:
+//! per-call GPU adapter/device acquisition, pipeline creation, scene
 //! tessellation, vertex upload, render pass, and readback. They are intended
-//! for GPU-capable macOS runners and self-skip when no adapter is available.
+//! for GPU-capable macOS runners and self-skip when no adapter is available,
+//! so CI treats them as a timing smoke check rather than tracked CodSpeed data.
 
 use std::hint::black_box;
 
@@ -91,7 +93,6 @@ fn bench_render(c: &mut Criterion) {
     dolly.eye.z *= 0.55;
 
     let mut group = c.benchmark_group("render");
-    group.sample_size(10);
     group.bench_function("orthographic_many_shapes", |b| {
         b.iter(|| {
             black_box(render_or_panic(
