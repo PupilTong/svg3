@@ -16,6 +16,9 @@ target
 # Coverage reports (cargo-llvm-cov / lcov)
 lcov.info
 
+# Snapshot-test actual output, written beside a golden on mismatch
+*.actual.png
+
 # Claude Code local working files
 .claude
 

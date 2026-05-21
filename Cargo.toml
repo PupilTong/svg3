@@ -44,3 +44,7 @@ anyhow = "1"
 # `use criterion::*;` and `cargo bench` / `cargo codspeed build` both
 # produce the right binary.
 criterion = { package = "codspeed-criterion-compat", version = "4" }
+
+# Testing
+# `png` encodes/decodes the golden images for svg3-render's snapshot tests.
+png = "0.18"
