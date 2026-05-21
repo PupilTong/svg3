@@ -1,4 +1,4 @@
-// Minimal 2D pass-through shader for filled `<rect>` geometry.
+// Minimal 2D pass-through shader for filled basic-shape geometry.
 //
 // Vertex positions arrive already in clip space — the default-surface
 // orthographic projection (`RenderConfig::projection`) is applied on the

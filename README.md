@@ -34,11 +34,12 @@ svg3 XML   ──►  svg3-dom    ──►  svg3-style   ──►  svg3-render
 > **Status: early scaffolding.** `app-macos` opens a real Metal-backed Cocoa
 > window and clears it to a solid colour each frame (roadmap item 1).
 > `svg3-dom` parses svg3 XML into an element tree with raw attributes
-> (roadmap item 2) — currently the `<svg>` root, `<g>`, `<rect>`, `<cube>`,
-> and `<ellipsoid>` are recognised; the rest of SVG 1.1 round-trips as
-> unknown elements. `svg3-render` tessellates `<rect>` and rasterises it
-> headlessly to an image (roadmap item 3). The Stylo cascade is still a
-> skeleton — see the roadmap below.
+> (roadmap item 2) — currently the `<svg>` root, `<g>`, `<rect>`,
+> `<circle>`, `<cube>`, and `<ellipsoid>` are recognised; the rest of
+> SVG 1.1 round-trips as unknown elements. `svg3-render` tessellates
+> `<rect>` and `<circle>` and rasterises them headlessly to an image
+> (roadmap item 3). The Stylo cascade is still a skeleton — see the
+> roadmap below.
 
 ## Toolchain
 
@@ -63,7 +64,7 @@ cargo bench --workspace                      # criterion benches (codspeed-instr
 
 1. **(done)** winit event loop + wgpu surface — a window that clears to a colour (the `app-macos` crate).
 2. **(done)** svg3 XML parsing → element tree (`<svg>` root with `<g>`, `<cube>`, `<ellipsoid>`; per [SPEC.md](SPEC.md)).
-3. **(done)** 2D basic shapes — tessellate `<rect>` and render it headlessly to an image (`svg3-render`).
+3. **(done)** 2D basic shapes — tessellate `<rect>` and `<circle>` and render them headlessly to an image (`svg3-render`).
 4. 3D primitive mesh generation; render a single `<cube>`.
 5. Real Stylo integration (computed styles drive material/transform).
 6. Multi-platform native demos (Windows, Linux) + Linux/Windows CI.

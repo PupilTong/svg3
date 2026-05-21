@@ -29,6 +29,8 @@ pub enum ElementKind {
     Group,
     /// Axis-aligned rectangle (SVG 1.1 `<rect>` basic shape).
     Rect,
+    /// Circle (SVG 1.1 `<circle>` basic shape).
+    Circle,
     /// Axis-aligned box primitive.
     Cube,
     /// Ellipsoid primitive.
@@ -48,6 +50,7 @@ impl ElementKind {
             "svg" => Self::Svg,
             "g" => Self::Group,
             "rect" => Self::Rect,
+            "circle" => Self::Circle,
             "cube" => Self::Cube,
             "ellipsoid" => Self::Ellipsoid,
             other => Self::Unknown(other.to_owned()),
@@ -60,6 +63,7 @@ impl ElementKind {
             Self::Svg => "svg",
             Self::Group => "g",
             Self::Rect => "rect",
+            Self::Circle => "circle",
             Self::Cube => "cube",
             Self::Ellipsoid => "ellipsoid",
             Self::Unknown(t) => t.as_str(),
@@ -317,6 +321,7 @@ mod tests {
         assert_eq!(ElementKind::from_tag("svg"), ElementKind::Svg);
         assert_eq!(ElementKind::from_tag("g"), ElementKind::Group);
         assert_eq!(ElementKind::from_tag("rect"), ElementKind::Rect);
+        assert_eq!(ElementKind::from_tag("circle"), ElementKind::Circle);
         assert_eq!(ElementKind::from_tag("cube"), ElementKind::Cube);
         assert_eq!(ElementKind::from_tag("ellipsoid"), ElementKind::Ellipsoid);
         // `as_tag` round-trips a recognised kind back to its source name.
@@ -395,6 +400,22 @@ mod tests {
         assert_eq!(
             rect.attributes.get("fill").map(String::as_str),
             Some("blue")
+        );
+    }
+
+    #[test]
+    fn parse_circle_preserves_geometry_attributes() {
+        let xml = r#"<svg><circle cx="30" cy="40" r="25" fill="red"/></svg>"#;
+        let doc = parse(xml).unwrap();
+        let circle_id = doc.node(doc.root()).children[0];
+        let circle = doc.element(circle_id);
+        assert_eq!(circle.kind, ElementKind::Circle);
+        assert_eq!(circle.attributes.get("cx").map(String::as_str), Some("30"));
+        assert_eq!(circle.attributes.get("cy").map(String::as_str), Some("40"));
+        assert_eq!(circle.attributes.get("r").map(String::as_str), Some("25"));
+        assert_eq!(
+            circle.attributes.get("fill").map(String::as_str),
+            Some("red")
         );
     }
 
