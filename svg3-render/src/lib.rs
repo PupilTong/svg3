@@ -7,11 +7,12 @@
 //! shapes: [`build_scene`] tessellates every such shape in a document into
 //! a [`Mesh`], and [`Renderer::render_to_image`] rasterises that mesh
 //! headlessly — no window or swapchain — into an [`Image`]. Basic shapes
-//! are two-dimensional, so geometry is placed on the default surface
-//! through the orthographic [`RenderConfig::projection`] ("the default
-//! camera") rather than the 3D perspective [`Camera`], which is reserved
-//! for `<cube>`/`<ellipsoid>`. The root `<svg width>` / `<svg height>` set
-//! the default viewport for percentage lengths; when either is omitted or
+//! are two-dimensional, so geometry lies in the world plane `z = 0`: by
+//! default it is drawn flat through the orthographic
+//! [`RenderConfig::projection`], but an optional [`Camera`] on
+//! [`RenderConfig`] instead views that plane through a movable 3D
+//! perspective camera. The root `<svg width>` / `<svg height>` set the
+//! default viewport for percentage lengths; when either is omitted or
 //! invalid, the render target dimension is used.
 
 mod circle;
@@ -54,6 +55,11 @@ pub struct RenderConfig {
     pub width: u32,
     /// Target height, in physical pixels.
     pub height: u32,
+    /// Optional 3D camera. `None` draws content flat through the default
+    /// orthographic [`projection`](RenderConfig::projection); `Some` views
+    /// the scene — including 2D content in the plane `z = 0` — through a
+    /// movable perspective [`Camera`].
+    pub camera: Option<Camera>,
 }
 
 impl Default for RenderConfig {
@@ -62,6 +68,7 @@ impl Default for RenderConfig {
             format: wgpu::TextureFormat::Bgra8UnormSrgb,
             width: 1,
             height: 1,
+            camera: None,
         }
     }
 }
@@ -87,12 +94,27 @@ impl RenderConfig {
             1.0,
         )
     }
+
+    /// The matrix that maps scene geometry to clip space: the
+    /// [`camera`](RenderConfig::camera)'s view-projection when one is set,
+    /// otherwise the default orthographic [`projection`](RenderConfig::projection).
+    pub fn view_projection(&self) -> Mat4 {
+        match self.camera {
+            Some(camera) => {
+                let aspect = self.width.max(1) as f32 / self.height.max(1) as f32;
+                camera.view_proj(aspect)
+            }
+            None => self.projection(),
+        }
+    }
 }
 
-/// A right-handed perspective camera.
+/// A movable perspective camera.
 ///
-/// Used by the 3D primitives (`<cube>`, `<ellipsoid>`); 2D content such as
-/// `<rect>` is projected by [`RenderConfig::projection`] instead.
+/// Set one on [`RenderConfig::camera`] to view the scene — including 2D
+/// content in the world plane `z = 0` — from any position in 3D space.
+/// World space is left-handed, per SPEC §3.1: +X right, +Y down, +Z toward
+/// the viewer.
 #[derive(Debug, Clone, Copy)]
 pub struct Camera {
     /// Eye position in world space.
@@ -104,10 +126,39 @@ pub struct Camera {
 }
 
 impl Camera {
+    /// A straight-on reference camera framing a `width`×`height` document.
+    ///
+    /// The eye sits on the `+Z` (viewer) side, level with the document
+    /// centre and far enough back that the document height fills the frame
+    /// exactly. This is the natural starting point a caller perturbs to move
+    /// the camera through 3D space. `width`/`height` are clamped to at least
+    /// 1, matching the render target.
+    pub fn facing(width: u32, height: u32) -> Self {
+        let w = width.max(1) as f32;
+        let h = height.max(1) as f32;
+        let fov_y = std::f32::consts::FRAC_PI_4;
+        // The eye distance at which a vertical field of view of `fov_y`
+        // spans exactly `h` user units.
+        let distance = (h / 2.0) / (fov_y / 2.0).tan();
+        Self {
+            eye: Vec3::new(w / 2.0, h / 2.0, distance),
+            target: Vec3::new(w / 2.0, h / 2.0, 0.0),
+            fov_y,
+        }
+    }
+
     /// Combined view-projection matrix for the given `aspect` (width / height).
+    ///
+    /// Left-handed, matching the SPEC §3.1 world (+X right, +Y down, +Z
+    /// toward the viewer). The `-Y` up vector keeps y-down content upright:
+    /// unlike [`RenderConfig::projection`], whose y-flip is baked into its
+    /// orthographic bounds, a perspective matrix carries no flip of its own.
+    ///
+    /// `near`/`far` are a generous fixed range; geometry nearer than `0.1`
+    /// or farther than `100_000` user units from the eye is clipped.
     pub fn view_proj(&self, aspect: f32) -> Mat4 {
-        let view = Mat4::look_at_rh(self.eye, self.target, Vec3::Y);
-        let proj = Mat4::perspective_rh(self.fov_y, aspect, 0.1, 100.0);
+        let view = Mat4::look_at_lh(self.eye, self.target, Vec3::NEG_Y);
+        let proj = Mat4::perspective_lh(self.fov_y, aspect, 0.1, 100_000.0);
         proj * view
     }
 }
@@ -286,7 +337,7 @@ impl Renderer {
 
         // Project to clip space on the CPU so the shader is a pass-through;
         // skip buffer creation entirely when there is nothing to draw.
-        let projection = config.projection();
+        let projection = config.view_projection();
         let buffers = (!mesh.is_empty()).then(|| {
             let vertices: Vec<Vertex> = mesh
                 .vertices
@@ -513,6 +564,70 @@ mod tests {
         };
         let m = cam.view_proj(16.0 / 9.0);
         assert!(m.to_cols_array().iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn camera_facing_frames_document() {
+        // The straight-on reference camera frames a square document: its
+        // centre lands on the NDC origin and every corner stays inside the
+        // clip box, including the depth range, so nothing is clipped away.
+        let camera = Camera::facing(100, 100);
+        let view_proj = camera.view_proj(1.0);
+        let at = |x, y| view_proj.project_point3(Vec3::new(x, y, 0.0));
+
+        let centre = at(50.0, 50.0);
+        assert!(
+            centre.x.abs() < 1e-4 && centre.y.abs() < 1e-4,
+            "document centre should project to the NDC origin: {centre:?}"
+        );
+        for (x, y) in [(0.0, 0.0), (100.0, 0.0), (0.0, 100.0), (100.0, 100.0)] {
+            let ndc = at(x, y);
+            assert!(
+                ndc.x.abs() <= 1.0 + 1e-3 && ndc.y.abs() <= 1.0 + 1e-3,
+                "corner ({x}, {y}) should be within the clip box: {ndc:?}"
+            );
+            assert!(
+                (0.0..=1.0).contains(&ndc.z),
+                "corner ({x}, {y}) should be within the depth range: {ndc:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn camera_facing_is_upright_not_mirrored() {
+        // The straight-on camera renders y-down content the same way up as
+        // the orthographic default: SVG-up (smaller y) maps to NDC +y, and
+        // SVG-left (smaller x) maps to NDC -x. This pins the camera's
+        // handedness and up vector.
+        let view_proj = Camera::facing(100, 100).view_proj(1.0);
+        let at = |x, y| view_proj.project_point3(Vec3::new(x, y, 0.0));
+
+        let above = at(50.0, 20.0);
+        let left = at(20.0, 50.0);
+        assert!(
+            above.y > 0.0,
+            "a point above centre should map to +y NDC: {above:?}"
+        );
+        assert!(
+            left.x < 0.0,
+            "a point left of centre should map to -x NDC: {left:?}"
+        );
+    }
+
+    #[test]
+    fn view_projection_defaults_to_orthographic() {
+        // With no camera set, `view_projection` is exactly the orthographic
+        // `projection` — so 2D rendering is unchanged when a caller opts out.
+        let config = RenderConfig {
+            width: 200,
+            height: 100,
+            ..RenderConfig::default()
+        };
+        assert!(config.camera.is_none());
+        assert_eq!(
+            config.view_projection().to_cols_array(),
+            config.projection().to_cols_array(),
+        );
     }
 
     #[test]
