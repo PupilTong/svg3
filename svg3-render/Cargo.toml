@@ -20,3 +20,7 @@ png.workspace = true
 [[bench]]
 name = "tessellate"
 harness = false
+
+[[bench]]
+name = "render"
+harness = false

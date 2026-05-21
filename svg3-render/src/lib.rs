@@ -44,6 +44,22 @@ pub struct Vertex {
     pub color: [f32; 4],
 }
 
+/// Uniform data consumed by `shader.wgsl`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct TransformUniform {
+    /// Column-major view-projection matrix, matching WGSL matrix layout.
+    view_projection: [[f32; 4]; 4],
+}
+
+impl TransformUniform {
+    fn new(view_projection: Mat4) -> Self {
+        Self {
+            view_projection: view_projection.to_cols_array_2d(),
+        }
+    }
+}
+
 /// Target-surface configuration for a render pass.
 #[derive(Debug, Clone, Copy)]
 pub struct RenderConfig {
@@ -335,21 +351,15 @@ impl Renderer {
 
         let pipeline = build_pipeline(&device);
 
-        // Project to clip space on the CPU so the shader is a pass-through;
-        // skip buffer creation entirely when there is nothing to draw.
-        let projection = config.view_projection();
+        let (_transform_buffer, transform_bind_group) =
+            build_transform_bind_group(&device, &pipeline, config.view_projection());
+
+        // Vertices are uploaded in SVG/world space; `shader.wgsl` projects
+        // them to clip space from the uniform view-projection matrix.
         let buffers = (!mesh.is_empty()).then(|| {
-            let vertices: Vec<Vertex> = mesh
-                .vertices
-                .iter()
-                .map(|v| Vertex {
-                    position: projection.project_point3(Vec3::from(v.position)).into(),
-                    color: v.color,
-                })
-                .collect();
             let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("svg3 vertex buffer"),
-                contents: bytemuck::cast_slice(&vertices),
+                contents: bytemuck::cast_slice(&mesh.vertices),
                 usage: wgpu::BufferUsages::VERTEX,
             });
             let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -389,6 +399,7 @@ impl Renderer {
             });
             if let Some((vertex_buffer, index_buffer)) = &buffers {
                 pass.set_pipeline(&pipeline);
+                pass.set_bind_group(0, &transform_bind_group, &[]);
                 pass.set_vertex_buffer(0, vertex_buffer.slice(..));
                 pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..mesh.indices.len() as u32, 0, 0..1);
@@ -449,7 +460,7 @@ fn acquire_gpu() -> Result<(wgpu::Device, wgpu::Queue), RenderError> {
     })
 }
 
-/// Build the 2D pass-through render pipeline.
+/// Build the basic-shape render pipeline.
 fn build_pipeline(device: &wgpu::Device) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -481,6 +492,28 @@ fn build_pipeline(device: &wgpu::Device) -> wgpu::RenderPipeline {
         multiview_mask: None,
         cache: None,
     })
+}
+
+fn build_transform_bind_group(
+    device: &wgpu::Device,
+    pipeline: &wgpu::RenderPipeline,
+    view_projection: Mat4,
+) -> (wgpu::Buffer, wgpu::BindGroup) {
+    let uniform = TransformUniform::new(view_projection);
+    let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("svg3 transform uniform"),
+        contents: bytemuck::bytes_of(&uniform),
+        usage: wgpu::BufferUsages::UNIFORM,
+    });
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("svg3 transform bind group"),
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: buffer.as_entire_binding(),
+        }],
+    });
+    (buffer, bind_group)
 }
 
 /// Map the readback buffer and copy its rows into a tightly-packed
@@ -552,6 +585,14 @@ mod tests {
         assert_eq!(
             std::mem::size_of::<Vertex>(),
             7 * std::mem::size_of::<f32>()
+        );
+    }
+
+    #[test]
+    fn transform_uniform_matches_wgsl_matrix_size() {
+        assert_eq!(
+            std::mem::size_of::<TransformUniform>(),
+            16 * std::mem::size_of::<f32>()
         );
     }
 

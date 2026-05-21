@@ -31,7 +31,7 @@ This repository supports LLM-based assistants. The working language is English.
 
 - **GitHub Actions are pinned to full 40-char commit SHAs, never tags or branches.** When adding or bumping an action, resolve the release tag to its commit SHA (e.g. `gh api repos/<owner>/<repo>/commits/<tag> --jq .sha`) and pin that, with a trailing `# vX.Y.Z` comment for readability.
 - CI is split between two runners. `svg3-render` rasterises with wgpu and its tests need a real GPU adapter, which the `ubuntu-latest` runner lacks — so lint, tests, and coverage run on macOS (Metal), and the Linux runner is kept only for the CodSpeed benchmark job:
-  - **`macos-latest`** (`macos` job): `cargo fmt --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo llvm-cov --workspace --exclude app-macos --all-features --lcov --output-path lcov.info` (runs the tests under coverage instrumentation — the headless `svg3-render` render test exercises Metal here), `codecov/codecov-action` upload, and `cargo build -p app-macos` + `cargo test -p app-macos`.
+  - **`macos-latest`** (`macos` job): `cargo fmt --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo llvm-cov --workspace --exclude app-macos --all-features --lcov --output-path lcov.info` (runs the tests under coverage instrumentation — the headless `svg3-render` render test exercises Metal here), `codecov/codecov-action` upload, `cargo build -p app-macos` + `cargo test -p app-macos`, and `cargo bench -p svg3-render --bench render -- --sample-size 10` as a macOS/GPU full-renderer timing smoke check.
   - **`ubuntu-latest`** (`linux` job): `cargo codspeed build --workspace --exclude app-macos` + the `CodSpeedHQ/action` in `mode: simulation`. CodSpeed's simulation mode uses Valgrind (Linux-only), so the benches must run here; they are pure CPU and need no GPU.
 - **Coverage:** `cargo llvm-cov` produces `lcov.info`, uploaded to Codecov by `codecov/codecov-action`. The project threshold is 3% (see `codecov.yml`); patch coverage is informational only. `app-macos` is excluded — its windowed event loop is not unit-testable, and counting it would create a permanent 0% drag. `fail_ci_if_error: false` so a missing/broken Codecov token does not break CI; add a `CODECOV_TOKEN` repo secret if uploads need to be reliable on private mirrors.
 
@@ -88,10 +88,12 @@ so a bench file just writes `use criterion::*;` and both `cargo bench` and
   per-benchmark deltas on PRs.
 
 Only crates with real work to measure ship benches. Today that is
-`svg3-dom`'s `parse` (XML parsing) and `svg3-render`'s `tessellate`
-(`<rect>` and `<circle>` tessellation via `build_scene`). The style crate
-is still a skeleton, so benches for it are out of scope until the Stylo
-cascade lands.
+`svg3-dom`'s `parse` (XML parsing), `svg3-render`'s `tessellate`
+(`<rect>` and `<circle>` tessellation via `build_scene`), and
+`svg3-render`'s `render` full-renderer bench (`Renderer::render_to_image`).
+The full-renderer bench needs a GPU adapter and self-skips when none is
+available. The style crate is still a skeleton, so benches for it are out
+of scope until the Stylo cascade lands.
 
 ## Maintaining this file
 

@@ -13,8 +13,7 @@ use std::process::Command;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
-use glam::Vec3;
-use svg3_render::{build_scene, document_viewport, Mesh, RenderConfig, Vertex, Viewport};
+use svg3_render::{build_scene, document_viewport, RenderConfig, Vertex, Viewport};
 use wgpu::util::DeviceExt;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalSize};
@@ -49,17 +48,16 @@ const DEFAULT_SVG: &str = r##"<svg><rect x="40" y="40" width="240" height="140" 
 const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 2] =
     wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4];
 
-/// A built scene: the object-space mesh kept for re-projection, plus its GPU
-/// buffers. The vertex buffer holds clip-space positions and is rewritten
-/// whenever the camera moves; the index buffer and `mesh` are stable until
-/// the SVG itself changes.
+/// A built scene: object-space geometry buffers plus the camera transform
+/// uniform. The vertex and index buffers are stable until the SVG itself
+/// changes; camera moves only rewrite the uniform buffer.
 struct DrawScene {
-    /// Object-space geometry (SVG user space), re-projected on camera moves.
-    mesh: Mesh,
     /// The document viewport the camera frames and targets.
     viewport: Viewport,
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
+    transform_buffer: wgpu::Buffer,
+    transform_bind_group: wgpu::BindGroup,
     index_count: u32,
 }
 
@@ -213,6 +211,7 @@ impl Gfx {
                 ..Default::default()
             });
             pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &scene.transform_bind_group, &[]);
             pass.set_vertex_buffer(0, scene.vertex_buffer.slice(..));
             pass.set_index_buffer(scene.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..scene.index_count, 0, 0..1);
@@ -256,13 +255,13 @@ impl Gfx {
         self.window.request_redraw();
     }
 
-    /// Tessellate `document` into an object-space [`DrawScene`]. The vertex
-    /// buffer is allocated but left empty — [`Gfx::reproject`] fills it with
-    /// clip-space positions for the current camera.
+    /// Tessellate `document` into an object-space [`DrawScene`].
     fn build_draw_scene(&self, document: &svg3_dom::Document) -> Option<DrawScene> {
+        let width = self.config.width.max(1);
+        let height = self.config.height.max(1);
         let target_viewport = Viewport {
-            width: self.config.width.max(1) as f32,
-            height: self.config.height.max(1) as f32,
+            width: width as f32,
+            height: height as f32,
         };
         let viewport = document_viewport(document, target_viewport);
         let mesh = build_scene(document, viewport);
@@ -270,6 +269,21 @@ impl Gfx {
             return None;
         }
 
+        let render_config = RenderConfig {
+            format: self.config.format,
+            width,
+            height,
+            camera: Some(self.camera.to_camera(viewport)),
+        };
+        let (transform_buffer, transform_bind_group) =
+            build_transform_bind_group(&self.device, &self.pipeline, render_config);
+        let vertex_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("svg3 app vertex buffer"),
+                contents: bytemuck::cast_slice(&mesh.vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
         let index_buffer = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -277,25 +291,19 @@ impl Gfx {
                 contents: bytemuck::cast_slice(&mesh.indices),
                 usage: wgpu::BufferUsages::INDEX,
             });
-        let vertex_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("svg3 app vertex buffer"),
-            size: std::mem::size_of_val(mesh.vertices.as_slice()) as u64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
         let index_count = mesh.indices.len() as u32;
         Some(DrawScene {
-            mesh,
             viewport,
             vertex_buffer,
             index_buffer,
+            transform_buffer,
+            transform_bind_group,
             index_count,
         })
     }
 
-    /// Project the scene's object-space mesh through the current camera and
-    /// upload the clip-space vertices. Cheap enough to call on every camera
-    /// or surface change.
+    /// Upload the current camera transform. Cheap enough to call on every
+    /// camera or surface change.
     fn reproject(&self) {
         let Some(scene) = &self.scene else {
             return;
@@ -307,19 +315,9 @@ impl Gfx {
             camera: Some(self.camera.to_camera(scene.viewport)),
         }
         .view_projection();
-        let vertices: Vec<Vertex> = scene
-            .mesh
-            .vertices
-            .iter()
-            .map(|v| Vertex {
-                position: view_projection
-                    .project_point3(Vec3::from(v.position))
-                    .into(),
-                color: v.color,
-            })
-            .collect();
+        let transform = view_projection.to_cols_array_2d();
         self.queue
-            .write_buffer(&scene.vertex_buffer, 0, bytemuck::cast_slice(&vertices));
+            .write_buffer(&scene.transform_buffer, 0, bytemuck::cast_slice(&transform));
         self.window.request_redraw();
     }
 
@@ -555,6 +553,28 @@ fn build_pipeline(device: &wgpu::Device, format: wgpu::TextureFormat) -> wgpu::R
         multiview_mask: None,
         cache: None,
     })
+}
+
+fn build_transform_bind_group(
+    device: &wgpu::Device,
+    pipeline: &wgpu::RenderPipeline,
+    config: RenderConfig,
+) -> (wgpu::Buffer, wgpu::BindGroup) {
+    let view_projection = config.view_projection().to_cols_array_2d();
+    let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("svg3 app transform uniform"),
+        contents: bytemuck::cast_slice(&view_projection),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    });
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("svg3 app transform bind group"),
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: buffer.as_entire_binding(),
+        }],
+    });
+    (buffer, bind_group)
 }
 
 fn is_svg_input_shortcut(event: &winit::event::KeyEvent, modifiers: ModifiersState) -> bool {
