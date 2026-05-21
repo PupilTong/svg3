@@ -22,6 +22,7 @@ mod shape;
 pub use shape::Viewport;
 
 use glam::{Mat4, Vec3};
+use std::sync::Mutex;
 use svg3_dom::{Document, ElementKind};
 use thiserror::Error;
 use wgpu::util::DeviceExt;
@@ -300,20 +301,49 @@ pub fn document_viewport(document: &Document, fallback: Viewport) -> Viewport {
 
 /// Renders SVG3 documents to GPU images.
 #[derive(Debug, Default)]
-pub struct Renderer;
+pub struct Renderer {
+    gpu: Mutex<Option<GpuContext>>,
+}
+
+#[derive(Debug, Clone)]
+struct GpuContext {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    pipeline: wgpu::RenderPipeline,
+}
 
 impl Renderer {
     /// Create a new renderer.
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    fn gpu(&self) -> Result<GpuContext, RenderError> {
+        let mut cached = self
+            .gpu
+            .lock()
+            .expect("renderer GPU cache mutex should not be poisoned");
+        if cached.is_none() {
+            let (device, queue) = acquire_gpu()?;
+            let pipeline = build_pipeline(&device);
+            *cached = Some(GpuContext {
+                device,
+                queue,
+                pipeline,
+            });
+        }
+        Ok(cached
+            .as_ref()
+            .expect("renderer GPU cache should be populated")
+            .clone())
     }
 
     /// Render every `<rect>` and `<circle>` in `document` headlessly into an
     /// [`Image`] of `config.width × config.height` pixels.
     ///
-    /// Brings up a wgpu device with no surface, rasterises the tessellated
-    /// scene into an offscreen sRGB texture, and reads the pixels back. The
-    /// surface is cleared to transparent before drawing.
+    /// Lazily brings up a reusable wgpu device with no surface, rasterises
+    /// the tessellated scene into an offscreen sRGB texture, and reads the
+    /// pixels back. The surface is cleared to transparent before drawing.
     ///
     /// Returns [`RenderError::NoAdapter`] when the machine exposes no GPU
     /// adapter — callers should treat that as "skip", not "fail".
@@ -330,7 +360,10 @@ impl Renderer {
         };
         let mesh = build_scene(document, document_viewport(document, target_viewport));
 
-        let (device, queue) = acquire_gpu()?;
+        let gpu = self.gpu()?;
+        let device = &gpu.device;
+        let queue = &gpu.queue;
+        let pipeline = &gpu.pipeline;
 
         let extent = wgpu::Extent3d {
             width,
@@ -349,13 +382,11 @@ impl Renderer {
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let pipeline = build_pipeline(&device);
-
         // Vertices are uploaded in SVG/world space; `shader.wgsl` projects
         // them to clip space from the uniform view-projection matrix.
         let buffers = (!mesh.is_empty()).then(|| {
             let transform_bind_group =
-                build_transform_bind_group(&device, &pipeline, config.view_projection());
+                build_transform_bind_group(device, pipeline, config.view_projection());
             let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("svg3 vertex buffer"),
                 contents: bytemuck::cast_slice(&mesh.vertices),
@@ -397,7 +428,7 @@ impl Renderer {
                 ..Default::default()
             });
             if let Some((vertex_buffer, index_buffer, transform_bind_group)) = &buffers {
-                pass.set_pipeline(&pipeline);
+                pass.set_pipeline(pipeline);
                 pass.set_bind_group(0, transform_bind_group, &[]);
                 pass.set_vertex_buffer(0, vertex_buffer.slice(..));
                 pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
@@ -423,7 +454,7 @@ impl Renderer {
         );
         queue.submit(std::iter::once(encoder.finish()));
 
-        let pixels = read_back(&device, &readback, width, height, padded_bytes_per_row)?;
+        let pixels = read_back(device, &readback, width, height, padded_bytes_per_row)?;
         Ok(Image {
             width,
             height,
@@ -881,6 +912,32 @@ mod tests {
             centre[2] > 200 && centre[0] < 60 && centre[1] < 60,
             "camera centre pixel not blue: {centre:?}"
         );
+    }
+
+    #[test]
+    fn render_to_image_reuses_renderer_gpu_state() {
+        // A single `Renderer` should support repeated renders without
+        // reacquiring the headless device or rebuilding the pipeline.
+        let document =
+            svg3_dom::parse(r#"<svg><rect width="16" height="16" fill="blue"/></svg>"#).unwrap();
+        let config = RenderConfig {
+            width: 16,
+            height: 16,
+            ..RenderConfig::default()
+        };
+        let renderer = Renderer::new();
+        let first = match renderer.render_to_image(&document, config) {
+            Ok(image) => image,
+            Err(RenderError::NoAdapter) => {
+                eprintln!("skipping render_to_image_reuses_renderer_gpu_state: no GPU adapter");
+                return;
+            }
+            Err(e) => panic!("headless render failed: {e}"),
+        };
+        let second = renderer
+            .render_to_image(&document, config)
+            .expect("cached renderer render should succeed");
+        assert_eq!(first.pixels, second.pixels);
     }
 
     #[test]
