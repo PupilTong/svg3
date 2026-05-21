@@ -97,10 +97,9 @@ impl Length {
 
 /// The SVG viewport that percentage lengths resolve against.
 ///
-/// In the current model the viewport is the render target — 1 user unit =
-/// 1 device pixel — so the outer `<svg>`'s own `width`/`height`/`viewBox`
-/// are not consulted ([`crate::RenderConfig::projection`] makes the same
-/// assumption).
+/// In the current model the viewport is the root `<svg>`'s `width`/`height`
+/// resolved against the render target fallback — 1 user unit = 1 device
+/// pixel. `viewBox` is not consulted yet.
 #[derive(Debug, Clone, Copy)]
 pub struct Viewport {
     /// Viewport width in user units.
