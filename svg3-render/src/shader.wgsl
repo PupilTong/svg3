@@ -1,9 +1,15 @@
-// Minimal 2D pass-through shader for filled basic-shape geometry.
+// Minimal shader for filled basic-shape geometry.
 //
-// Vertex positions arrive already in clip space — the default-surface
-// orthographic projection (`RenderConfig::projection`) is applied on the
-// CPU — so the vertex stage only forwards position and colour. Colours are
-// linear RGBA; the `Rgba8UnormSrgb` target encodes them to sRGB on store.
+// Vertex positions arrive in SVG/world space. The vertex stage applies the
+// configured view-projection matrix, then forwards linear RGBA colours to the
+// fragment stage. The `Rgba8UnormSrgb` target encodes them to sRGB on store.
+
+struct Transform {
+    view_projection: mat4x4<f32>,
+}
+
+@group(0) @binding(0)
+var<uniform> transform: Transform;
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
@@ -16,7 +22,7 @@ fn vs_main(
     @location(1) color: vec4<f32>,
 ) -> VertexOutput {
     var out: VertexOutput;
-    out.clip_position = vec4<f32>(position, 1.0);
+    out.clip_position = transform.view_projection * vec4<f32>(position, 1.0);
     out.color = color;
     return out;
 }

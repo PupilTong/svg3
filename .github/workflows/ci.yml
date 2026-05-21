@@ -70,6 +70,9 @@ jobs:
       - name: Test app-macos
         run: cargo test -p app-macos
 
+      - name: Benchmark svg3-render full renderer
+        run: cargo bench -p svg3-render --bench render -- --sample-size 10
+
   # Benchmark job. CodSpeed's simulation mode uses Valgrind, which is
   # Linux-only, so the benches have to run on `ubuntu-latest`. The `parse`
   # and `tessellate` benches are pure CPU and need no GPU.
