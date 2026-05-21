@@ -14,7 +14,7 @@ permissions:
   contents: read
 
 jobs:
-  # Lint, test and coverage for the whole workspace. `svg3-render`
+  # Lint, test, coverage, and benchmark the workspace. `svg3-render`
   # rasterises with wgpu and its headless render test needs a real GPU
   # adapter, which GitHub's `ubuntu-latest` runner lacks — so this job runs
   # on macOS, where wgpu uses Metal. `app-macos` (winit -> Cocoa) also only
@@ -38,7 +38,7 @@ jobs:
       - name: Install cargo tools
         uses: taiki-e/install-action@213ccc1a076163c093f914550b94feb90fab916d # v2.79.2
         with:
-          tool: cargo-llvm-cov
+          tool: cargo-llvm-cov,cargo-codspeed
 
       - name: Format
         run: cargo fmt --check
@@ -64,34 +64,11 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
 
-      - name: Build app-macos
-        run: cargo build -p app-macos
-
       - name: Test app-macos
         run: cargo test -p app-macos
 
-  # Benchmark job. CodSpeed's simulation mode uses Valgrind, which is
-  # Linux-only, so the benches have to run on `ubuntu-latest`. The `parse`
-  # and `tessellate` benches are pure CPU and need no GPU.
-  linux:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - name: Install toolchain
-        run: rustup show
-
-      - name: Cache Cargo
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-
-      - name: Install cargo tools
-        uses: taiki-e/install-action@213ccc1a076163c093f914550b94feb90fab916d # v2.79.2
-        with:
-          tool: cargo-codspeed
-
       - name: Build benchmarks
+        # The `parse` and `tessellate` benches are pure CPU and need no GPU.
         run: cargo codspeed build --workspace --exclude app-macos
 
       - name: Run benchmarks (CodSpeed simulation)
