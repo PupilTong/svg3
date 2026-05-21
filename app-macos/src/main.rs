@@ -234,6 +234,7 @@ impl Gfx {
             format: self.config.format,
             width,
             height,
+            camera: None,
         }
         .projection();
         let vertices: Vec<Vertex> = mesh
