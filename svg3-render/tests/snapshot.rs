@@ -1,11 +1,11 @@
 //! End-to-end snapshot tests for `<rect>` and `<circle>` rendering.
 //!
-//! Each case parses an svg3 document modeled on the SVG WPT `shapes/rect-*`
-//! and `shapes/circle-*` reference tests, renders it headlessly with
-//! [`Renderer::render_to_image`], and compares the result against a
-//! committed golden PNG in `tests/snapshots/`. Those PNGs are the
-//! reviewable snapshots — open them in a pull request to see what the
-//! renderer produces.
+//! Each case parses an svg3 document — the SVG WPT `shapes/rect-*` /
+//! `shapes/circle-*` reference tests, plus the canonical SVG sample —
+//! renders it headlessly with [`Renderer::render_to_image`], and compares
+//! the result against a committed golden PNG in `tests/snapshots/`. Those
+//! PNGs are the reviewable snapshots — open them in a pull request to see
+//! what the renderer produces.
 //!
 //! After an intentional rendering change, regenerate the goldens and review
 //! the updated images in the diff:
@@ -22,93 +22,129 @@ use std::path::{Path, PathBuf};
 use svg3_dom::parse;
 use svg3_render::{Image, RenderConfig, RenderError, Renderer};
 
-/// Side length of the square render target, in pixels.
+/// Side length of the default square render target, in pixels.
 const CANVAS: u32 = 100;
 
 /// Per-channel `RGBA8` tolerance when comparing against a golden, absorbing
 /// sRGB-encode rounding differences between GPU drivers.
 const CHANNEL_TOLERANCE: u8 = 4;
 
-/// A named snapshot case: an svg3 document modeled on a WPT reference test.
+/// A named snapshot case: an svg3 document rendered into a `width`×`height`
+/// target and compared against `tests/snapshots/<name>.png`.
 struct Case {
     /// Golden file stem — `tests/snapshots/<name>.png`.
     name: &'static str,
     /// The svg3 document to render.
     svg: &'static str,
+    /// Render-target width, in pixels.
+    width: u32,
+    /// Render-target height, in pixels.
+    height: u32,
+}
+
+impl Case {
+    /// A case rendered into a square `CANVAS`×`CANVAS` target.
+    const fn square(name: &'static str, svg: &'static str) -> Self {
+        Self {
+            name,
+            svg,
+            width: CANVAS,
+            height: CANVAS,
+        }
+    }
+
+    /// A case rendered into a `width`×`height` target.
+    const fn sized(name: &'static str, svg: &'static str, width: u32, height: u32) -> Self {
+        Self {
+            name,
+            svg,
+            width,
+            height,
+        }
+    }
 }
 
 const CASES: &[Case] = &[
     // WPT `shapes/rect-01`: a basic filled rectangle.
-    Case {
-        name: "rect-fill",
-        svg: r#"<svg><rect x="10" y="10" width="80" height="80" fill="blue"/></svg>"#,
-    },
+    Case::square(
+        "rect-fill",
+        r#"<svg><rect x="10" y="10" width="80" height="80" fill="blue"/></svg>"#,
+    ),
     // A rectangle with no `fill` — SVG 1.1's initial value is opaque black.
-    Case {
-        name: "rect-default-fill",
-        svg: r#"<svg><rect x="20" y="20" width="60" height="50"/></svg>"#,
-    },
+    Case::square(
+        "rect-default-fill",
+        r#"<svg><rect x="20" y="20" width="60" height="50"/></svg>"#,
+    ),
     // WPT `shapes/rect-03`: rounded corners via `rx`/`ry`.
-    Case {
-        name: "rect-rounded",
-        svg: r#"<svg><rect x="10" y="10" width="80" height="80" rx="16" ry="16" fill="blue"/></svg>"#,
-    },
+    Case::square(
+        "rect-rounded",
+        r#"<svg><rect x="10" y="10" width="80" height="80" rx="16" ry="16" fill="blue"/></svg>"#,
+    ),
     // WPT `import/shapes-rect-06`: `rx`/`ry` over half the side are clamped —
     // here to a fully-rounded "stadium".
-    Case {
-        name: "rect-rounded-clamped",
-        svg: r#"<svg><rect x="15" y="30" width="70" height="40" rx="80" ry="80" fill="blue"/></svg>"#,
-    },
+    Case::square(
+        "rect-rounded-clamped",
+        r#"<svg><rect x="15" y="30" width="70" height="40" rx="80" ry="80" fill="blue"/></svg>"#,
+    ),
     // WPT `shapes/rect-05`: a zero-width rectangle is not rendered.
-    Case {
-        name: "rect-zero-size",
-        svg: r#"<svg><rect x="30" y="30" width="0" height="40" fill="blue"/></svg>"#,
-    },
+    Case::square(
+        "rect-zero-size",
+        r#"<svg><rect x="30" y="30" width="0" height="40" fill="blue"/></svg>"#,
+    ),
     // Painter's order: a later `<rect>` paints over an earlier one.
-    Case {
-        name: "rect-overlap",
-        svg: r#"<svg><rect x="10" y="10" width="55" height="55" fill="blue"/><rect x="40" y="40" width="50" height="50" fill="red"/></svg>"#,
-    },
+    Case::square(
+        "rect-overlap",
+        r#"<svg><rect x="10" y="10" width="55" height="55" fill="blue"/><rect x="40" y="40" width="50" height="50" fill="red"/></svg>"#,
+    ),
     // A hexadecimal `fill` colour.
-    Case {
-        name: "rect-hex-fill",
-        svg: r##"<svg><rect x="18" y="18" width="64" height="64" fill="#11aa55"/></svg>"##,
-    },
+    Case::square(
+        "rect-hex-fill",
+        r##"<svg><rect x="18" y="18" width="64" height="64" fill="#11aa55"/></svg>"##,
+    ),
     // WPT `shapes/circle-*`: a basic filled circle.
-    Case {
-        name: "circle-fill",
-        svg: r#"<svg><circle cx="50" cy="50" r="40" fill="blue"/></svg>"#,
-    },
+    Case::square(
+        "circle-fill",
+        r#"<svg><circle cx="50" cy="50" r="40" fill="blue"/></svg>"#,
+    ),
     // A circle with no `fill` — SVG 1.1's initial value is opaque black.
-    Case {
-        name: "circle-default-fill",
-        svg: r#"<svg><circle cx="50" cy="50" r="35"/></svg>"#,
-    },
+    Case::square(
+        "circle-default-fill",
+        r#"<svg><circle cx="50" cy="50" r="35"/></svg>"#,
+    ),
     // [SVG11] §9.3: a zero-radius circle is not rendered.
-    Case {
-        name: "circle-zero-radius",
-        svg: r#"<svg><circle cx="50" cy="50" r="0" fill="blue"/></svg>"#,
-    },
+    Case::square(
+        "circle-zero-radius",
+        r#"<svg><circle cx="50" cy="50" r="0" fill="blue"/></svg>"#,
+    ),
     // Painter's order: a later `<circle>` paints over an earlier one.
-    Case {
-        name: "circle-overlap",
-        svg: r#"<svg><circle cx="38" cy="38" r="32" fill="blue"/><circle cx="62" cy="62" r="32" fill="red"/></svg>"#,
-    },
+    Case::square(
+        "circle-overlap",
+        r#"<svg><circle cx="38" cy="38" r="32" fill="blue"/><circle cx="62" cy="62" r="32" fill="red"/></svg>"#,
+    ),
     // A hexadecimal `fill` colour.
-    Case {
-        name: "circle-hex-fill",
-        svg: r##"<svg><circle cx="50" cy="50" r="38" fill="#11aa55"/></svg>"##,
-    },
+    Case::square(
+        "circle-hex-fill",
+        r##"<svg><circle cx="50" cy="50" r="38" fill="#11aa55"/></svg>"##,
+    ),
+    // The canonical SVG sample, rendered at its declared 300×200 size. The
+    // `<rect width="100%">` exercises percentage lengths; the `<text>` is
+    // parsed but not yet rendered (text rendering is a separate milestone),
+    // so the golden shows a red ground with a centred green disc.
+    Case::sized(
+        "svg-rect-circle-text",
+        r#"<svg version="1.1" width="300" height="200" xmlns="http://www.w3.org/2000/svg">
+  <rect width="100%" height="100%" fill="red" />
+  <circle cx="150" cy="100" r="80" fill="green" />
+  <text x="150" y="125" font-size="60" text-anchor="middle" fill="white">SVG</text>
+</svg>"#,
+        300,
+        200,
+    ),
 ];
 
 #[test]
 fn shape_snapshots_match_references() {
     let renderer = Renderer::new();
-    let config = RenderConfig {
-        width: CANVAS,
-        height: CANVAS,
-        ..RenderConfig::default()
-    };
     let update = std::env::var_os("SVG3_UPDATE_SNAPSHOTS").is_some();
 
     let mut updated: Vec<&str> = Vec::new();
@@ -116,6 +152,11 @@ fn shape_snapshots_match_references() {
 
     for case in CASES {
         let document = parse(case.svg).expect("snapshot fixture should parse");
+        let config = RenderConfig {
+            width: case.width,
+            height: case.height,
+            ..RenderConfig::default()
+        };
         let image = match renderer.render_to_image(&document, config) {
             Ok(image) => image,
             Err(RenderError::NoAdapter) => {

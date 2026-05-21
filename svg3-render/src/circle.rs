@@ -14,7 +14,7 @@ use std::f32::consts::TAU;
 
 use svg3_dom::Element;
 
-use crate::shape::{parse_length, vertex};
+use crate::shape::{vertex, Length, Viewport};
 use crate::Mesh;
 
 /// Segments approximating the circle's perimeter. Fixed so a circle's
@@ -35,21 +35,26 @@ pub(crate) struct CircleGeometry {
 
 /// Resolve a `<circle>`'s raw attributes into a [`CircleGeometry`].
 ///
+/// Percentage lengths resolve against `viewport` — `cx` against its width,
+/// `cy` against its height, and `r` against its normalized diagonal
+/// ([SVG11] §7.10).
+///
 /// Returns `None` when the circle is not rendered. Per [SVG11] §9.3 a zero
 /// `r` disables rendering; a negative `r` is a document error, which svg3
 /// likewise skips rather than rendering. `cx`/`cy` default to `0`.
-pub(crate) fn resolve_circle(element: &Element) -> Option<CircleGeometry> {
-    let length = |name: &str| {
+pub(crate) fn resolve_circle(element: &Element, viewport: Viewport) -> Option<CircleGeometry> {
+    let length = |name: &str, basis: f32| {
         element
             .attributes
             .get(name)
             .map(String::as_str)
-            .and_then(parse_length)
+            .and_then(Length::parse)
+            .map(|len| len.resolve(basis))
     };
 
-    let cx = length("cx").unwrap_or(0.0);
-    let cy = length("cy").unwrap_or(0.0);
-    let r = length("r").unwrap_or(0.0);
+    let cx = length("cx", viewport.width).unwrap_or(0.0);
+    let cy = length("cy", viewport.height).unwrap_or(0.0);
+    let r = length("r", viewport.diagonal()).unwrap_or(0.0);
 
     if r <= 0.0 {
         return None;
@@ -100,10 +105,19 @@ mod tests {
         element
     }
 
+    /// A 100×100 viewport. The geometry tests below use absolute lengths, so
+    /// the viewport value only matters for the percentage case.
+    fn vp() -> Viewport {
+        Viewport {
+            width: 100.0,
+            height: 100.0,
+        }
+    }
+
     #[test]
     fn resolve_circle_applies_position_defaults() {
         // `cx`/`cy` default to 0 ([SVG11] §9.3).
-        let geo = resolve_circle(&circle(&[("r", "20")])).unwrap();
+        let geo = resolve_circle(&circle(&[("r", "20")]), vp()).unwrap();
         assert_eq!(
             geo,
             CircleGeometry {
@@ -115,16 +129,35 @@ mod tests {
     }
 
     #[test]
+    fn resolve_circle_resolves_percentage_geometry() {
+        // `cx` resolves against viewport width, `cy` against viewport height
+        // ([SVG11] §7.10).
+        let viewport = Viewport {
+            width: 200.0,
+            height: 100.0,
+        };
+        let geo = resolve_circle(
+            &circle(&[("cx", "50%"), ("cy", "25%"), ("r", "20")]),
+            viewport,
+        )
+        .unwrap();
+        assert_eq!(geo.cx, 100.0);
+        assert_eq!(geo.cy, 25.0);
+        assert_eq!(geo.r, 20.0);
+    }
+
+    #[test]
     fn resolve_circle_skips_degenerate_radius() {
         // Missing, zero, or negative `r` => not rendered ([SVG11] §9.3).
-        assert_eq!(resolve_circle(&circle(&[("cx", "10")])), None);
-        assert_eq!(resolve_circle(&circle(&[("r", "0")])), None);
-        assert_eq!(resolve_circle(&circle(&[("r", "-5")])), None);
+        assert_eq!(resolve_circle(&circle(&[("cx", "10")]), vp()), None);
+        assert_eq!(resolve_circle(&circle(&[("r", "0")]), vp()), None);
+        assert_eq!(resolve_circle(&circle(&[("r", "-5")]), vp()), None);
     }
 
     #[test]
     fn tessellate_circle_fans_within_bounds() {
-        let geo = resolve_circle(&circle(&[("cx", "50"), ("cy", "40"), ("r", "30")])).unwrap();
+        let geo =
+            resolve_circle(&circle(&[("cx", "50"), ("cy", "40"), ("r", "30")]), vp()).unwrap();
         let mesh = tessellate_circle(&geo, [0.0, 0.0, 1.0, 1.0]);
         // Centre + one perimeter point per segment; one fan triangle per edge.
         assert_eq!(mesh.vertices.len(), CIRCLE_SEGMENTS + 1);

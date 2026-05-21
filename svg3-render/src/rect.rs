@@ -14,7 +14,7 @@ use std::f32::consts::{FRAC_PI_2, PI};
 
 use svg3_dom::Element;
 
-use crate::shape::{parse_length, vertex};
+use crate::shape::{vertex, Length, Viewport};
 use crate::Mesh;
 
 /// Segments approximating each rounded corner's quarter-arc. Fixed so a
@@ -41,6 +41,9 @@ pub(crate) struct RectGeometry {
 
 /// Resolve a `<rect>`'s raw attributes into a [`RectGeometry`].
 ///
+/// Percentage lengths resolve against `viewport` — `x`/`width`/`rx` against
+/// its width, `y`/`height`/`ry` against its height ([SVG11] §7.10).
+///
 /// Returns `None` when the rectangle is not rendered — a missing, zero, or
 /// negative `width`/`height` ([SVG11] §9.2; WPT `shapes/rect-05`).
 ///
@@ -48,19 +51,20 @@ pub(crate) struct RectGeometry {
 /// if only one is given the other mirrors it; if neither is given both are
 /// `0`; a negative radius is treated as auto. Each radius is then clamped
 /// to half its side, independently (WPT `import/shapes-rect-06`).
-pub(crate) fn resolve_rect(element: &Element) -> Option<RectGeometry> {
-    let length = |name: &str| {
+pub(crate) fn resolve_rect(element: &Element, viewport: Viewport) -> Option<RectGeometry> {
+    let length = |name: &str, basis: f32| {
         element
             .attributes
             .get(name)
             .map(String::as_str)
-            .and_then(parse_length)
+            .and_then(Length::parse)
+            .map(|len| len.resolve(basis))
     };
 
-    let x = length("x").unwrap_or(0.0);
-    let y = length("y").unwrap_or(0.0);
-    let width = length("width").unwrap_or(0.0);
-    let height = length("height").unwrap_or(0.0);
+    let x = length("x", viewport.width).unwrap_or(0.0);
+    let y = length("y", viewport.height).unwrap_or(0.0);
+    let width = length("width", viewport.width).unwrap_or(0.0);
+    let height = length("height", viewport.height).unwrap_or(0.0);
 
     if width <= 0.0 || height <= 0.0 {
         return None;
@@ -68,8 +72,8 @@ pub(crate) fn resolve_rect(element: &Element) -> Option<RectGeometry> {
 
     // A negative or unparseable radius is "auto"; an auto axis mirrors the
     // other; if both are auto the corners are sharp.
-    let rx_attr = length("rx").filter(|v| *v >= 0.0);
-    let ry_attr = length("ry").filter(|v| *v >= 0.0);
+    let rx_attr = length("rx", viewport.width).filter(|v| *v >= 0.0);
+    let ry_attr = length("ry", viewport.height).filter(|v| *v >= 0.0);
     let (rx, ry) = match (rx_attr, ry_attr) {
         (Some(rx), Some(ry)) => (rx, ry),
         (Some(rx), None) => (rx, rx),
@@ -180,10 +184,19 @@ mod tests {
         element
     }
 
+    /// A 100×100 viewport. The geometry tests below use absolute lengths, so
+    /// the viewport value only matters for the percentage case.
+    fn vp() -> Viewport {
+        Viewport {
+            width: 100.0,
+            height: 100.0,
+        }
+    }
+
     #[test]
     fn resolve_rect_applies_position_defaults() {
         // `x`/`y` default to 0 ([SVG11] §9.2).
-        let geo = resolve_rect(&rect(&[("width", "40"), ("height", "20")])).unwrap();
+        let geo = resolve_rect(&rect(&[("width", "40"), ("height", "20")]), vp()).unwrap();
         assert_eq!(
             geo,
             RectGeometry {
@@ -198,24 +211,55 @@ mod tests {
     }
 
     #[test]
+    fn resolve_rect_resolves_percentage_sizes() {
+        // `width`/`x` resolve against viewport width, `height`/`y` against
+        // viewport height ([SVG11] §7.10).
+        let viewport = Viewport {
+            width: 300.0,
+            height: 200.0,
+        };
+        let geo = resolve_rect(
+            &rect(&[
+                ("x", "10%"),
+                ("y", "25%"),
+                ("width", "100%"),
+                ("height", "50%"),
+            ]),
+            viewport,
+        )
+        .unwrap();
+        assert_eq!(
+            geo,
+            RectGeometry {
+                x: 30.0,
+                y: 50.0,
+                width: 300.0,
+                height: 100.0,
+                rx: 0.0,
+                ry: 0.0,
+            }
+        );
+    }
+
+    #[test]
     fn resolve_rect_skips_degenerate_sizes() {
         // Missing, zero, or negative width/height => not rendered
         // (WPT `shapes/rect-05`).
-        assert_eq!(resolve_rect(&rect(&[("height", "10")])), None);
+        assert_eq!(resolve_rect(&rect(&[("height", "10")]), vp()), None);
         assert_eq!(
-            resolve_rect(&rect(&[("width", "0"), ("height", "10")])),
+            resolve_rect(&rect(&[("width", "0"), ("height", "10")]), vp()),
             None
         );
         assert_eq!(
-            resolve_rect(&rect(&[("width", "10"), ("height", "0")])),
+            resolve_rect(&rect(&[("width", "10"), ("height", "0")]), vp()),
             None
         );
         assert_eq!(
-            resolve_rect(&rect(&[("width", "-5"), ("height", "10")])),
+            resolve_rect(&rect(&[("width", "-5"), ("height", "10")]), vp()),
             None
         );
         assert_eq!(
-            resolve_rect(&rect(&[("width", "10"), ("height", "-5")])),
+            resolve_rect(&rect(&[("width", "10"), ("height", "-5")]), vp()),
             None
         );
     }
@@ -225,7 +269,7 @@ mod tests {
         let radii = |extra: &[(&str, &str)]| {
             let mut attrs = vec![("width", "100"), ("height", "100")];
             attrs.extend_from_slice(extra);
-            let g = resolve_rect(&rect(&attrs)).unwrap();
+            let g = resolve_rect(&rect(&attrs), vp()).unwrap();
             (g.rx, g.ry)
         };
         // Only `rx` given => `ry` mirrors it; only `ry` => `rx` mirrors it.
@@ -240,12 +284,15 @@ mod tests {
     fn resolve_rect_clamps_radii_to_half_side() {
         // rx/ry over half the side are clamped, independently per axis
         // (WPT `import/shapes-rect-06`).
-        let geo = resolve_rect(&rect(&[
-            ("width", "20"),
-            ("height", "100"),
-            ("rx", "50"),
-            ("ry", "20"),
-        ]))
+        let geo = resolve_rect(
+            &rect(&[
+                ("width", "20"),
+                ("height", "100"),
+                ("rx", "50"),
+                ("ry", "20"),
+            ]),
+            vp(),
+        )
         .unwrap();
         assert_eq!((geo.rx, geo.ry), (10.0, 20.0));
     }
@@ -253,12 +300,10 @@ mod tests {
     #[test]
     fn tessellate_sharp_rect_is_two_triangles() {
         // WPT `shapes/rect-01`: <rect x=10 y=10 width=50 height=50>.
-        let geo = resolve_rect(&rect(&[
-            ("x", "10"),
-            ("y", "10"),
-            ("width", "50"),
-            ("height", "50"),
-        ]))
+        let geo = resolve_rect(
+            &rect(&[("x", "10"), ("y", "10"), ("width", "50"), ("height", "50")]),
+            vp(),
+        )
         .unwrap();
         let mesh = tessellate_rect(&geo, [0.0, 0.0, 1.0, 1.0]);
         assert_eq!(mesh.vertices.len(), 4);
@@ -271,12 +316,10 @@ mod tests {
     #[test]
     fn tessellate_treats_zero_radius_as_sharp() {
         // An explicit `ry=0` disables rounding even with `rx>0`.
-        let geo = resolve_rect(&rect(&[
-            ("width", "40"),
-            ("height", "40"),
-            ("rx", "10"),
-            ("ry", "0"),
-        ]))
+        let geo = resolve_rect(
+            &rect(&[("width", "40"), ("height", "40"), ("rx", "10"), ("ry", "0")]),
+            vp(),
+        )
         .unwrap();
         assert_eq!(tessellate_rect(&geo, [1.0; 4]).vertices.len(), 4);
     }
@@ -284,14 +327,17 @@ mod tests {
     #[test]
     fn tessellate_rounded_rect_fans_within_bounds() {
         // WPT `shapes/rect-03`: <rect x=10 y=10 width=50 height=50 rx=8 ry=8>.
-        let geo = resolve_rect(&rect(&[
-            ("x", "10"),
-            ("y", "10"),
-            ("width", "50"),
-            ("height", "50"),
-            ("rx", "8"),
-            ("ry", "8"),
-        ]))
+        let geo = resolve_rect(
+            &rect(&[
+                ("x", "10"),
+                ("y", "10"),
+                ("width", "50"),
+                ("height", "50"),
+                ("rx", "8"),
+                ("ry", "8"),
+            ]),
+            vp(),
+        )
         .unwrap();
         let mesh = tessellate_rect(&geo, [1.0; 4]);
         // Centroid + four quarter-arcs, one fan triangle per perimeter edge.
