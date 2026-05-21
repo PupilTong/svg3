@@ -62,12 +62,21 @@ impl Default for RenderConfig {
 impl RenderConfig {
     /// The default 2D camera: an orthographic projection mapping SVG user
     /// space — origin top-left, y-down, spanning `0..width × 0..height` — to
-    /// wgpu normalized device coordinates.
+    /// wgpu normalized device coordinates. `width`/`height` are clamped to
+    /// at least 1, matching the render target, so the matrix stays valid
+    /// (finite) for a zero-sized config.
     ///
     /// Assumes 1 user unit = 1 device pixel; the outer `<svg>`'s `viewBox`
     /// and `preserveAspectRatio` are not consulted yet.
     pub fn projection(&self) -> Mat4 {
-        Mat4::orthographic_rh(0.0, self.width as f32, self.height as f32, 0.0, -1.0, 1.0)
+        Mat4::orthographic_rh(
+            0.0,
+            self.width.max(1) as f32,
+            self.height.max(1) as f32,
+            0.0,
+            -1.0,
+            1.0,
+        )
     }
 }
 
@@ -463,6 +472,19 @@ mod tests {
         assert!((tl.x + 1.0).abs() < 1e-5 && (tl.y - 1.0).abs() < 1e-5);
         assert!((br.x - 1.0).abs() < 1e-5 && (br.y + 1.0).abs() < 1e-5);
         assert!(mid.x.abs() < 1e-5 && mid.y.abs() < 1e-5);
+    }
+
+    #[test]
+    fn projection_is_finite_for_zero_sized_config() {
+        // A zero-dimension config is clamped like the render target, so the
+        // projection stays finite instead of dividing by a zero extent.
+        let config = RenderConfig {
+            width: 0,
+            height: 0,
+            ..RenderConfig::default()
+        };
+        let proj = config.projection();
+        assert!(proj.to_cols_array().iter().all(|v| v.is_finite()));
     }
 
     #[test]
