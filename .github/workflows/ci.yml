@@ -14,14 +14,16 @@ permissions:
   contents: read
 
 jobs:
-  # Lint, test and coverage for the whole workspace. `svg3-render`
+  # The whole pipeline runs on a single macOS runner. `svg3-render`
   # rasterises with wgpu and its headless render test needs a real GPU
-  # adapter, which GitHub's `ubuntu-latest` runner lacks — so this job runs
-  # on macOS, where wgpu uses Metal. `app-macos` (winit -> Cocoa) also only
-  # builds on macOS.
-  macos:
+  # adapter (Metal), and `app-macos` (winit -> Cocoa) only builds on macOS.
+  # The CodSpeed benchmark uses `walltime` mode: the default CPU-simulation
+  # mode needs Valgrind, which is Linux-only. Walltime on a shared hosted
+  # runner is noisier than a dedicated CodSpeed macro runner — accepted here
+  # to keep CI on one runner.
+  ci:
     runs-on: macos-latest
-    timeout-minutes: 45
+    timeout-minutes: 50
     steps:
       # Third-party actions are pinned to full commit SHAs (not mutable
       # tags) for supply-chain integrity. The trailing comment records the
@@ -38,7 +40,7 @@ jobs:
       - name: Install cargo tools
         uses: taiki-e/install-action@213ccc1a076163c093f914550b94feb90fab916d # v2.79.2
         with:
-          tool: cargo-llvm-cov
+          tool: cargo-llvm-cov,cargo-codspeed
 
       - name: Format
         run: cargo fmt --check
@@ -70,32 +72,11 @@ jobs:
       - name: Test app-macos
         run: cargo test -p app-macos
 
-  # Benchmark job. CodSpeed's simulation mode uses Valgrind, which is
-  # Linux-only, so the benches have to run on `ubuntu-latest`. The `parse`
-  # and `tessellate` benches are pure CPU and need no GPU.
-  linux:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - name: Install toolchain
-        run: rustup show
-
-      - name: Cache Cargo
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-
-      - name: Install cargo tools
-        uses: taiki-e/install-action@213ccc1a076163c093f914550b94feb90fab916d # v2.79.2
-        with:
-          tool: cargo-codspeed
-
       - name: Build benchmarks
         run: cargo codspeed build --workspace --exclude app-macos
 
-      - name: Run benchmarks (CodSpeed simulation)
+      - name: Run benchmarks (CodSpeed walltime)
         uses: CodSpeedHQ/action@3194d9a39c4d46684cb44bf7207fc56626aad8fd # v4.15.1
         with:
-          mode: simulation
+          mode: walltime
           run: cargo codspeed run

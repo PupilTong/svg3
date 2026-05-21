@@ -25,9 +25,8 @@ This repository supports LLM-based assistants. The working language is English.
 ## CI / supply chain
 
 - **GitHub Actions are pinned to full 40-char commit SHAs, never tags or branches.** When adding or bumping an action, resolve the release tag to its commit SHA (e.g. `gh api repos/<owner>/<repo>/commits/<tag> --jq .sha`) and pin that, with a trailing `# vX.Y.Z` comment for readability.
-- CI is split between two runners. `svg3-render` rasterises with wgpu and its tests need a real GPU adapter, which the `ubuntu-latest` runner lacks — so lint, tests, and coverage run on macOS (Metal), and the Linux runner is kept only for the CodSpeed benchmark job:
-  - **`macos-latest`** (`macos` job): `cargo fmt --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo llvm-cov --workspace --exclude app-macos --all-features --lcov --output-path lcov.info` (runs the tests under coverage instrumentation — the headless `svg3-render` render test exercises Metal here), `codecov/codecov-action` upload, and `cargo build -p app-macos` + `cargo test -p app-macos`.
-  - **`ubuntu-latest`** (`linux` job): `cargo codspeed build --workspace --exclude app-macos` + the `CodSpeedHQ/action` in `mode: simulation`. CodSpeed's simulation mode uses Valgrind (Linux-only), so the benches must run here; they are pure CPU and need no GPU.
+- CI runs entirely on one `macos-latest` runner (the `ci` job). `svg3-render` rasterises with wgpu and its headless render test needs a real GPU adapter (Metal), and `app-macos` (winit → Cocoa) only builds on macOS — so the whole workspace is linted, tested, coverage-measured, and benchmarked there: `cargo fmt --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo llvm-cov --workspace --exclude app-macos --all-features --lcov --output-path lcov.info`, `codecov/codecov-action` upload, `cargo build`/`cargo test -p app-macos`, then `cargo codspeed build` + the `CodSpeedHQ/action`.
+- The CodSpeed benchmark runs in `mode: walltime`, not `simulation`: simulation mode uses Valgrind, which is Linux-only and cannot run on the macOS runner. Walltime on a shared hosted runner is noisier than a dedicated CodSpeed macro runner — an accepted trade-off for keeping CI on a single runner.
 - **Coverage:** `cargo llvm-cov` produces `lcov.info`, uploaded to Codecov by `codecov/codecov-action`. The project threshold is 3% (see `codecov.yml`); patch coverage is informational only. `app-macos` is excluded — its windowed event loop is not unit-testable, and counting it would create a permanent 0% drag. `fail_ci_if_error: false` so a missing/broken Codecov token does not break CI; add a `CODECOV_TOKEN` repo secret if uploads need to be reliable on private mirrors.
 
 ## Repository structure
@@ -76,11 +75,12 @@ so a bench file just writes `use criterion::*;` and both `cargo bench` and
 - **Run locally:** `cargo bench --workspace` (or `-p svg3-dom` / `-p svg3-render`).
 - **Build the instrumented binaries:** `cargo codspeed build` (install
   the cargo subcommand once with `cargo install cargo-codspeed`).
-- **CI:** the `linux` job in `.github/workflows/ci.yml` runs `cargo
+- **CI:** the `ci` job in `.github/workflows/ci.yml` runs `cargo
   codspeed build --workspace --exclude app-macos` and then
-  `CodSpeedHQ/action@…` in `mode: simulation` on `ubuntu-latest` (the
-  simulation mode uses Valgrind, which is Linux-only). CodSpeed posts
-  per-benchmark deltas on PRs.
+  `CodSpeedHQ/action@…` in `mode: walltime` on `macos-latest`. (Simulation
+  mode uses Valgrind, which is Linux-only and cannot run on the macOS
+  runner; walltime trades some measurement stability for single-runner
+  CI.) CodSpeed posts per-benchmark deltas on PRs.
 
 Only crates with real work to measure ship benches. Today that is
 `svg3-dom`'s `parse` (XML parsing) and `svg3-render`'s `tessellate`
