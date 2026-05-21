@@ -100,9 +100,17 @@ fn rect_snapshots_match_references() {
         };
 
         let golden = snapshot_path(case.name);
-        if update || !golden.exists() {
+        if update {
             write_png(&golden, &image);
             updated.push(case.name);
+        } else if !golden.exists() {
+            // A missing golden must fail — otherwise a deleted PNG or a new
+            // case without a committed golden would pass CI silently.
+            failures.push(format!(
+                "{}: no golden at `{}` — create it with SVG3_UPDATE_SNAPSHOTS=1",
+                case.name,
+                golden.display(),
+            ));
         } else if let Err(message) = compare(&golden, &image) {
             failures.push(format!("{}: {message}", case.name));
         }
@@ -117,9 +125,10 @@ fn rect_snapshots_match_references() {
     }
     assert!(
         failures.is_empty(),
-        "{} snapshot(s) differ from their golden image. Inspect the \
-         `*.actual.png` files written beside each golden, and if the change \
-         is intentional regenerate them with `SVG3_UPDATE_SNAPSHOTS=1`:\n  {}",
+        "{} snapshot case(s) failed:\n  {}\n\nFor a pixel mismatch, inspect \
+         the `*.actual.png` written beside the golden. If the change is \
+         intentional (or a golden is missing), regenerate the goldens with \
+         `SVG3_UPDATE_SNAPSHOTS=1`.",
         failures.len(),
         failures.join("\n  "),
     );
