@@ -22,6 +22,11 @@ This repository supports LLM-based assistants. The working language is English.
 - CI runs `cargo fmt --check` using the toolchain pinned in `rust-toolchain.toml`, which is the same toolchain `rustup` selects locally — so local and CI formatting agree as long as you don't override the toolchain.
 - Always run `cargo fmt --check` (not just `cargo fmt`) before committing.
 
+## Testing
+
+- `cargo test --workspace` runs the unit and integration tests. The GPU-backed tests in `svg3-render` — the headless render test and the `tests/snapshot.rs` E2E suite — self-skip when no GPU adapter is available, so they run on macOS but not on a GPU-less host.
+- **Snapshot tests:** `svg3-render/tests/snapshot.rs` renders `<rect>` documents headlessly and compares them against the committed golden PNGs in `svg3-render/tests/snapshots/` (the reviewable images). After an intentional rendering change, regenerate the goldens with `SVG3_UPDATE_SNAPSHOTS=1 cargo test -p svg3-render --test snapshot` and review the updated PNGs in the diff. On a mismatch the test writes the actual render as `<name>.actual.png` (git-ignored) next to the golden for inspection.
+
 ## CI / supply chain
 
 - **GitHub Actions are pinned to full 40-char commit SHAs, never tags or branches.** When adding or bumping an action, resolve the release tag to its commit SHA (e.g. `gh api repos/<owner>/<repo>/commits/<tag> --jq .sha`) and pin that, with a trailing `# vX.Y.Z` comment for readability.
