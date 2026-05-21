@@ -39,9 +39,9 @@ This repository supports LLM-based assistants. The working language is English.
 
 - `svg3-dom/`: runtime svg3 XML parsing (`quick-xml`) and the mutable element tree. svg3 is specified as an extension to SVG 1.1 ([`SPEC.md`](SPEC.md)) — the document root is `<svg>` and the parser recognises `<g>` (SVG 1.1 grouping), `<rect>` and `<circle>` (SVG 1.1 basic shapes), `<cube>`, and `<ellipsoid>` (svg3 3D primitives); other SVG 1.1 elements round-trip as `ElementKind::Unknown` until they are specialised. Pure Rust, no GPU dependencies.
 - `svg3-style/`: runtime CSS parsing + style resolution via [Stylo](https://crates.io/crates/stylo). The planned integration implements Stylo's `TElement`/`TNode`/`TDocument` traits over `svg3-dom`; **[Blitz (`blitz-dom`)](https://github.com/DioxusLabs/blitz) is the canonical reference** for driving Stylo over a custom DOM. Currently a skeleton.
-- `svg3-render/`: turns a parsed scene into GPU geometry with [wgpu](https://crates.io/crates/wgpu) — `build_scene` tessellates `<rect>` and `<circle>` into a `Mesh`, and `Renderer::render_to_image` rasterises it headlessly to an `Image`. Length parsing (absolute and percentage), `fill` resolution, and the `Viewport` that percentages resolve against live in `shape.rs`. The Stylo-driven styled-scene path and the windowed-surface path are still to come.
+- `svg3-render/`: turns a parsed scene into GPU geometry with [wgpu](https://crates.io/crates/wgpu) — `build_scene` tessellates `<rect>` and `<circle>` into a `Mesh`, and `Renderer::render_to_image` rasterises it headlessly to an `Image`. Length parsing (absolute and percentage), `fill` resolution, and the `Viewport` that percentages resolve against live in `shape.rs`; root `<svg width>` / `<svg height>` now define the percentage viewport, falling back to the render target when omitted. The Stylo-driven styled-scene path is still to come; `app-macos` has a small demo-only windowed draw path for the current basic-shape mesh.
 - `svg3/`: Umbrella crate. Re-exports the layers and exposes the public `parse → render` facade.
-- `app-macos/`: native macOS demo binary (`svg3-macos`). A winit 0.30 event loop driving a wgpu (Metal) surface that clears to a solid colour. Plus `app-macos/macos/Info.plist` and `scripts/bundle-macos.sh` for assembling a `.app`. Does **not** depend on `svg3` yet — wiring the demo window to render real documents is a later milestone.
+- `app-macos/`: native macOS demo binary (`svg3-macos`). A winit 0.30 event loop driving a wgpu (Metal) surface; it prompts for an SVG string on launch (and again when the window is clicked or via Command+O/Command+I), parses it with `svg3-dom`, tessellates supported `<rect>` / `<circle>` content with `svg3-render`, and draws the result. Plus `app-macos/macos/Info.plist` and `scripts/bundle-macos.sh` for assembling a `.app`.
 
 ## Project design overview
 
@@ -52,7 +52,7 @@ The document language is specified in [`SPEC.md`](SPEC.md) (editor's draft). `SP
 - **Stylo** provides web-standard CSS behavior and computed-style resolution.
 - **wgpu** provides cross-platform native GPU rendering (Metal/Vulkan/DX12).
 - **Native only — no WASM.** Targets native platforms (macOS first, then Windows/Linux). There is no WASM engine, `wasm32` target, or browser/WebGPU path planned. Deliberate divergence from the Paws template's `wasmtime-engine` — do not add one.
-- The core (`svg3-dom`/`svg3-style`/`svg3-render`/`svg3`) is platform-agnostic. Platform/demo glue lives in `app-macos`, which does real work (a winit 0.30 event loop + a wgpu Metal surface that clears each frame). The no-placeholder rule still applies to any **future** app crate (e.g. Windows/Linux demos): do not add a stub app crate before it does real work.
+- The core (`svg3-dom`/`svg3-style`/`svg3-render`/`svg3`) is platform-agnostic. Platform/demo glue lives in `app-macos`, which does real work (a winit 0.30 event loop + a wgpu Metal surface that renders pasted SVG basic shapes). The no-placeholder rule still applies to any **future** app crate (e.g. Windows/Linux demos): do not add a stub app crate before it does real work.
 
 ## How to run
 
@@ -62,7 +62,7 @@ cargo test  --workspace
 cargo fmt --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 
-cargo run -p app-macos                        # native macOS window (clears to a colour)
+cargo run -p app-macos                        # native macOS demo; paste SVG text into the dialog
 bash scripts/bundle-macos.sh                  # assemble target/release/bundle/svg3-macos.app
 
 cargo bench --workspace                       # criterion benches (codspeed-instrumented)

@@ -153,9 +153,13 @@ name = "app-macos"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytemuck",
  "env_logger",
+ "glam",
  "log",
  "pollster",
+ "svg3-dom",
+ "svg3-render",
  "wgpu",
  "winit",
 ]

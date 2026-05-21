@@ -10,7 +10,9 @@
 //! are two-dimensional, so geometry is placed on the default surface
 //! through the orthographic [`RenderConfig::projection`] ("the default
 //! camera") rather than the 3D perspective [`Camera`], which is reserved
-//! for `<cube>`/`<ellipsoid>`.
+//! for `<cube>`/`<ellipsoid>`. The root `<svg width>` / `<svg height>` set
+//! the default viewport for percentage lengths; when either is omitted or
+//! invalid, the render target dimension is used.
 
 mod circle;
 mod rect;
@@ -71,8 +73,10 @@ impl RenderConfig {
     /// at least 1, matching the render target, so the matrix stays valid
     /// (finite) for a zero-sized config.
     ///
-    /// Assumes 1 user unit = 1 device pixel; the outer `<svg>`'s `viewBox`
-    /// and `preserveAspectRatio` are not consulted yet.
+    /// Assumes 1 user unit = 1 device pixel. The outer `<svg>`'s
+    /// `width`/`height` drive the document viewport used for percentage
+    /// lengths, but this target projection stays tied to output pixels;
+    /// `viewBox` and `preserveAspectRatio` are not consulted yet.
     pub fn projection(&self) -> Mat4 {
         Mat4::orthographic_rh(
             0.0,
@@ -164,13 +168,13 @@ impl Image {
 /// Walk `document` and tessellate every `<rect>` and `<circle>` into one
 /// combined [`Mesh`].
 ///
-/// `viewport` is the basis for percentage lengths (e.g. `width="100%"`); in
-/// the current model it is the render-target size. The mesh is in SVG user
-/// space (origin top-left, y-down, `z = 0`). Shapes are appended in document
-/// order, so a later shape paints over an earlier one. A shape that is not
-/// rendered — a degenerate size, or `fill="none"` — contributes nothing.
-/// `transform` and grouping are not applied yet, so a shape is placed at its
-/// own coordinates regardless of any ancestor `<g>`.
+/// `viewport` is the basis for percentage lengths (e.g. `width="100%"`);
+/// callers that want SVG root sizing should pass [`document_viewport`]. The
+/// mesh is in SVG user space (origin top-left, y-down, `z = 0`). Shapes are
+/// appended in document order, so a later shape paints over an earlier one. A
+/// shape that is not rendered — a degenerate size, or `fill="none"` —
+/// contributes nothing. `transform` and grouping are not applied yet, so a
+/// shape is placed at its own coordinates regardless of any ancestor `<g>`.
 pub fn build_scene(document: &Document, viewport: Viewport) -> Mesh {
     let mut mesh = Mesh::default();
     // Pre-order DFS; children pushed in reverse so they pop in document
@@ -202,6 +206,31 @@ pub fn build_scene(document: &Document, viewport: Viewport) -> Mesh {
     mesh
 }
 
+/// Resolve the document viewport from the root `<svg width>` / `<svg height>`.
+///
+/// Missing, unparseable, or non-positive dimensions fall back to `fallback`.
+/// Percentage dimensions resolve against `fallback`, matching SVG's default
+/// `100%` sizing behavior for a standalone document.
+pub fn document_viewport(document: &Document, fallback: Viewport) -> Viewport {
+    let root = document.element(document.root());
+    Viewport {
+        width: root
+            .attributes
+            .get("width")
+            .and_then(|value| shape::Length::parse(value))
+            .map(|length| length.resolve(fallback.width))
+            .filter(|value| *value > 0.0)
+            .unwrap_or(fallback.width),
+        height: root
+            .attributes
+            .get("height")
+            .and_then(|value| shape::Length::parse(value))
+            .map(|length| length.resolve(fallback.height))
+            .filter(|value| *value > 0.0)
+            .unwrap_or(fallback.height),
+    }
+}
+
 /// Renders SVG3 documents to GPU images.
 #[derive(Debug, Default)]
 pub struct Renderer;
@@ -228,13 +257,11 @@ impl Renderer {
     ) -> Result<Image, RenderError> {
         let width = config.width.max(1);
         let height = config.height.max(1);
-        let mesh = build_scene(
-            document,
-            Viewport {
-                width: width as f32,
-                height: height as f32,
-            },
-        );
+        let target_viewport = Viewport {
+            width: width as f32,
+            height: height as f32,
+        };
+        let mesh = build_scene(document, document_viewport(document, target_viewport));
 
         let (device, queue) = acquire_gpu()?;
 
@@ -564,6 +591,55 @@ mod tests {
     }
 
     #[test]
+    fn document_viewport_reads_root_width_and_height() {
+        let document = svg3_dom::parse(r#"<svg width="300" height="200"/>"#).unwrap();
+        let viewport = document_viewport(
+            &document,
+            Viewport {
+                width: 800.0,
+                height: 600.0,
+            },
+        );
+        assert_eq!(viewport.width, 300.0);
+        assert_eq!(viewport.height, 200.0);
+    }
+
+    #[test]
+    fn document_viewport_resolves_percentage_root_dimensions_against_fallback() {
+        let document = svg3_dom::parse(r#"<svg width="50%" height="25%"/>"#).unwrap();
+        let viewport = document_viewport(
+            &document,
+            Viewport {
+                width: 800.0,
+                height: 600.0,
+            },
+        );
+        assert_eq!(viewport.width, 400.0);
+        assert_eq!(viewport.height, 150.0);
+    }
+
+    #[test]
+    fn build_scene_resolves_percentages_against_svg_root_size() {
+        let document = svg3_dom::parse(
+            r#"<svg width="300" height="200"><rect width="100%" height="100%"/></svg>"#,
+        )
+        .unwrap();
+        let viewport = document_viewport(
+            &document,
+            Viewport {
+                width: 800.0,
+                height: 600.0,
+            },
+        );
+        let mesh = build_scene(&document, viewport);
+        assert_eq!(mesh.vertices.len(), 4);
+        assert_eq!(mesh.vertices[0].position, [0.0, 0.0, 0.0]);
+        assert_eq!(mesh.vertices[1].position, [300.0, 0.0, 0.0]);
+        assert_eq!(mesh.vertices[2].position, [300.0, 200.0, 0.0]);
+        assert_eq!(mesh.vertices[3].position, [0.0, 200.0, 0.0]);
+    }
+
+    #[test]
     fn render_to_image_draws_blue_rect() {
         // WPT `shapes/rect-01`: a blue rect on an otherwise empty surface.
         let document = svg3_dom::parse(
@@ -655,5 +731,43 @@ mod tests {
                 "pixel ({x}, {y}) not blue: {px:?}"
             );
         }
+    }
+
+    #[test]
+    fn render_to_image_uses_svg_root_size_for_percentages() {
+        // The output target is larger than the root SVG viewport. The
+        // percentage rect uses the root 20x10 viewport and therefore leaves
+        // the rest of the render target transparent.
+        let document = svg3_dom::parse(
+            r#"<svg width="20" height="10"><rect width="100%" height="100%" fill="blue"/></svg>"#,
+        )
+        .unwrap();
+        let config = RenderConfig {
+            width: 40,
+            height: 24,
+            ..RenderConfig::default()
+        };
+        let image = match Renderer::new().render_to_image(&document, config) {
+            Ok(image) => image,
+            Err(RenderError::NoAdapter) => {
+                eprintln!(
+                    "skipping render_to_image_uses_svg_root_size_for_percentages: no GPU adapter"
+                );
+                return;
+            }
+            Err(e) => panic!("headless render failed: {e}"),
+        };
+        assert_eq!((image.width, image.height), (40, 24));
+
+        let inside = image.pixel(19, 9);
+        assert!(
+            inside[2] > 200 && inside[0] < 60 && inside[1] < 60,
+            "inside pixel not blue: {inside:?}"
+        );
+        assert_eq!(
+            image.pixel(21, 12)[3],
+            0,
+            "outside root viewport should be transparent"
+        );
     }
 }
