@@ -2,27 +2,30 @@
 
 **An extended SVG renderer for 3D models.**
 
-`svg3` extends the SVG/XML document model with native 3D elements — e.g.
-`<scene>`, `<cube>`, `<ellipsoid>` — and renders them on the GPU. Styling stays
-faithful to the web platform: element styles are resolved with
-[Stylo](https://crates.io/crates/stylo) (Servo's CSS engine), and the resulting
-scene is painted with [wgpu](https://crates.io/crates/wgpu).
+`svg3` is an extension to SVG 1.1: it inherits SVG 1.1's `<svg>` root and 2D
+drawing model and adds three-dimensional graphics elements (`<cube>`,
+`<ellipsoid>`, …) plus 3D transform functions, rendered on the GPU. Styling
+stays faithful to the web platform: element styles are resolved with
+[Stylo](https://crates.io/crates/stylo) (Servo's CSS engine), and the
+resulting scene is painted with [wgpu](https://crates.io/crates/wgpu).
 
 The project is built from the ground up on the current Rust graphics ecosystem.
 Demos will target multiple platforms; a native macOS desktop app is the first.
 
+The document language is specified in [SPEC.md](SPEC.md) (editor's draft).
+
 ## Pipeline
 
 ```
-SVG3 XML  ──►  svg3-dom    ──►  svg3-style   ──►  svg3-render  ──►  GPU surface
-(text)         (element tree)   (Stylo cascade)   (wgpu draw)
+svg3 XML   ──►  svg3-dom    ──►  svg3-style   ──►  svg3-render  ──►  GPU surface
+(text)          (element tree)   (Stylo cascade)   (wgpu draw)
 ```
 
 ## Workspace
 
 | Crate         | Responsibility                                                       |
 |---------------|----------------------------------------------------------------------|
-| `svg3-dom`    | Parse SVG3 XML into a mutable element tree; the 3D element model.     |
+| `svg3-dom`    | Parse svg3 XML into a mutable element tree (SVG-1.1 root + 3D extensions). |
 | `svg3-style`  | Resolve computed styles for the element tree via Stylo.              |
 | `svg3-render` | Turn a styled scene into GPU draw calls with wgpu.                    |
 | `svg3`        | Umbrella crate: public API tying DOM + style + render together.      |
@@ -30,8 +33,10 @@ SVG3 XML  ──►  svg3-dom    ──►  svg3-style   ──►  svg3-render 
 
 > **Status: early scaffolding.** `app-macos` opens a real Metal-backed Cocoa
 > window and clears it to a solid colour each frame (roadmap item 1).
-> `svg3-dom` now parses svg3 XML into an element tree with raw attributes
-> (roadmap item 2). The Stylo cascade and the scene renderer are still
+> `svg3-dom` parses svg3 XML into an element tree with raw attributes
+> (roadmap item 2) — currently the `<svg>` root, `<g>`, `<cube>`, and
+> `<ellipsoid>` are recognised; the rest of SVG 1.1 round-trips as
+> unknown elements. The Stylo cascade and the scene renderer are still
 > skeletons — see the roadmap below.
 
 ## Toolchain
@@ -56,7 +61,7 @@ cargo bench -p svg3-dom                      # criterion benches (codspeed-instr
 ## Roadmap
 
 1. **(done)** winit event loop + wgpu surface — a window that clears to a colour (the `app-macos` crate).
-2. **(done)** SVG3 XML parsing → element tree (`<scene>`, `<cube>`, `<ellipsoid>`).
+2. **(done)** svg3 XML parsing → element tree (`<svg>` root with `<g>`, `<cube>`, `<ellipsoid>`; per [SPEC.md](SPEC.md)).
 3. 3D primitive mesh generation; render a single `<cube>`.
 4. Real Stylo integration (computed styles drive material/transform).
 5. Multi-platform native demos (Windows, Linux) + Linux/Windows CI.

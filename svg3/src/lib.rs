@@ -50,9 +50,10 @@ mod tests {
 
     #[test]
     fn pipeline_surfaces_style_not_implemented() {
-        // Parsing now succeeds for valid svg3 XML; the pipeline fails at the
-        // next stage that is still a skeleton (style resolution).
-        let err = render_str("<scene/>", render::RenderConfig::default()).unwrap_err();
+        // Parsing now succeeds for valid svg3 XML (svg3 inherits SVG 1.1's
+        // `<svg>` root); the pipeline fails at the next stage that is still
+        // a skeleton (style resolution).
+        let err = render_str("<svg/>", render::RenderConfig::default()).unwrap_err();
         assert!(matches!(
             err,
             Error::Style(style::StyleError::NotImplemented)

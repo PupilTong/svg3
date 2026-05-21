@@ -19,12 +19,13 @@ use quick_xml::events::{BytesStart, Event};
 use quick_xml::{Reader, XmlVersion};
 use thiserror::Error;
 
-/// The kind of an SVG3 element.
+/// The kind of an svg3 element.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ElementKind {
-    /// Root 3D scene container.
-    Scene,
-    /// Grouping / transform container.
+    /// Document root — the SVG 1.1 `<svg>` element. svg3 documents share
+    /// the SVG 1.1 root per [SPEC.md](../SPEC.md) §1.1.
+    Svg,
+    /// Grouping / transform container (SVG 1.1 `<g>`).
     Group,
     /// Axis-aligned box primitive.
     Cube,
@@ -35,14 +36,15 @@ pub enum ElementKind {
 }
 
 impl ElementKind {
-    /// Map an XML tag name to an [`ElementKind`]. Unknown tags are preserved
-    /// so the document still round-trips when it contains non-svg3
-    /// elements; the planned Stylo cascade will match selectors on the raw
-    /// tag name regardless.
+    /// Map an XML tag name to an [`ElementKind`]. Unrecognised tags are
+    /// preserved verbatim so SVG 1.1 markup that svg3 has not implemented
+    /// yet (paths, basic shapes, text, …) still round-trips through the
+    /// DOM; the planned Stylo cascade can match selectors on the raw tag
+    /// name regardless.
     pub fn from_tag(tag: &str) -> Self {
         match tag {
-            "scene" => Self::Scene,
-            "g" | "group" => Self::Group,
+            "svg" => Self::Svg,
+            "g" => Self::Group,
             "cube" => Self::Cube,
             "ellipsoid" => Self::Ellipsoid,
             other => Self::Unknown(other.to_owned()),
@@ -52,8 +54,8 @@ impl ElementKind {
     /// The tag name as it appears in source XML.
     pub fn as_tag(&self) -> &str {
         match self {
-            Self::Scene => "scene",
-            Self::Group => "group",
+            Self::Svg => "svg",
+            Self::Group => "g",
             Self::Cube => "cube",
             Self::Ellipsoid => "ellipsoid",
             Self::Unknown(t) => t.as_str(),
@@ -103,10 +105,10 @@ pub struct Node {
     pub children: Vec<NodeId>,
 }
 
-/// A parsed SVG3 document.
+/// A parsed svg3 document.
 ///
 /// Nodes live in a flat arena, addressed by [`NodeId`]. The root is always
-/// a `<scene>` element.
+/// an `<svg>` element (svg3 inherits SVG 1.1's root; see [SPEC.md](../SPEC.md)).
 #[derive(Debug, Clone)]
 pub struct Document {
     nodes: Vec<Node>,
@@ -114,19 +116,19 @@ pub struct Document {
 }
 
 impl Document {
-    /// Create an empty document containing just a `<scene>` root.
+    /// Create an empty document containing just an `<svg>` root.
     pub fn new() -> Self {
-        let scene = Node {
-            element: Element::new(ElementKind::Scene),
+        let svg = Node {
+            element: Element::new(ElementKind::Svg),
             children: Vec::new(),
         };
         Self {
-            nodes: vec![scene],
+            nodes: vec![svg],
             root: NodeId(0),
         }
     }
 
-    /// The id of the root `<scene>` node.
+    /// The id of the root `<svg>` node.
     pub fn root(&self) -> NodeId {
         self.root
     }
@@ -182,14 +184,14 @@ impl Default for Document {
     }
 }
 
-/// Errors that can occur while parsing an SVG3 document.
+/// Errors that can occur while parsing an svg3 document.
 #[derive(Debug, Error)]
 pub enum ParseError {
     /// The document contained no element.
     #[error("the document is empty")]
     EmptyDocument,
-    /// The root element was not `<scene>`.
-    #[error("expected `<scene>` root element, found `<{found}>`")]
+    /// The root element was not `<svg>`.
+    #[error("expected `<svg>` root element, found `<{found}>`")]
     UnexpectedRoot {
         /// The tag name found at the document root.
         found: String,
@@ -211,13 +213,14 @@ pub enum ParseError {
     Utf8(#[from] std::str::Utf8Error),
 }
 
-/// Parse an SVG3 document from XML text.
+/// Parse an svg3 document from XML text.
 ///
-/// The root element must be `<scene>`. Tag names are mapped via
+/// The root element must be `<svg>` (svg3 is an extension of SVG 1.1;
+/// see [SPEC.md](../SPEC.md)). Tag names are mapped via
 /// [`ElementKind::from_tag`]; unknown tags become [`ElementKind::Unknown`]
-/// so the document round-trips even when it contains non-svg3 elements.
-/// Attribute values are XML-unescape-normalised and stored verbatim on the
-/// owning [`Element`].
+/// so SVG 1.1 markup not yet specialised by svg3 (paths, basic shapes, …)
+/// still round-trips. Attribute values are XML-unescape-normalised and
+/// stored verbatim on the owning [`Element`].
 pub fn parse(input: &str) -> Result<Document, ParseError> {
     let mut reader = Reader::from_str(input);
     let mut arena: Vec<Node> = Vec::new();
@@ -260,7 +263,7 @@ pub fn parse(input: &str) -> Result<Document, ParseError> {
 
     let root = root.ok_or(ParseError::EmptyDocument)?;
     let root_kind = &arena[root.0 as usize].element.kind;
-    if *root_kind != ElementKind::Scene {
+    if *root_kind != ElementKind::Svg {
         return Err(ParseError::UnexpectedRoot {
             found: root_kind.as_tag().to_owned(),
         });
@@ -306,12 +309,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tag_mapping_recognises_3d_elements() {
+    fn tag_mapping_recognises_svg3_elements() {
+        assert_eq!(ElementKind::from_tag("svg"), ElementKind::Svg);
+        assert_eq!(ElementKind::from_tag("g"), ElementKind::Group);
         assert_eq!(ElementKind::from_tag("cube"), ElementKind::Cube);
         assert_eq!(ElementKind::from_tag("ellipsoid"), ElementKind::Ellipsoid);
-        assert_eq!(ElementKind::from_tag("scene"), ElementKind::Scene);
-        assert_eq!(ElementKind::from_tag("g"), ElementKind::Group);
-        assert_eq!(ElementKind::from_tag("group"), ElementKind::Group);
+        // `<group>` is not in SPEC.md; only `<g>` from SVG 1.1 is the
+        // canonical grouping element.
+        assert_eq!(
+            ElementKind::from_tag("group"),
+            ElementKind::Unknown("group".to_owned())
+        );
+        // Similarly, `<scene>` (an earlier draft name) is no longer
+        // recognised — it round-trips as Unknown.
+        assert_eq!(
+            ElementKind::from_tag("scene"),
+            ElementKind::Unknown("scene".to_owned())
+        );
         assert_eq!(
             ElementKind::from_tag("widget"),
             ElementKind::Unknown("widget".to_owned())
@@ -323,33 +337,33 @@ mod tests {
         let mut doc = Document::new();
         let cube_id = doc.append_child(doc.root(), ElementKind::Cube);
 
-        assert_eq!(doc.element(doc.root()).kind, ElementKind::Scene);
+        assert_eq!(doc.element(doc.root()).kind, ElementKind::Svg);
         assert_eq!(doc.node(doc.root()).children, vec![cube_id]);
         assert_eq!(doc.element(cube_id).kind, ElementKind::Cube);
         assert_eq!(doc.len(), 2);
     }
 
     #[test]
-    fn parse_empty_scene() {
-        let doc = parse("<scene/>").unwrap();
+    fn parse_empty_svg() {
+        let doc = parse("<svg/>").unwrap();
         let root = doc.element(doc.root());
-        assert_eq!(root.kind, ElementKind::Scene);
+        assert_eq!(root.kind, ElementKind::Svg);
         assert!(root.attributes.is_empty());
         assert!(doc.node(doc.root()).children.is_empty());
         assert_eq!(doc.len(), 1);
     }
 
     #[test]
-    fn parse_scene_with_explicit_close() {
-        let doc = parse("<scene></scene>").unwrap();
-        assert_eq!(doc.element(doc.root()).kind, ElementKind::Scene);
+    fn parse_svg_with_explicit_close() {
+        let doc = parse("<svg></svg>").unwrap();
+        assert_eq!(doc.element(doc.root()).kind, ElementKind::Svg);
         assert!(doc.node(doc.root()).children.is_empty());
     }
 
     #[test]
     fn parse_single_cube() {
-        let doc = parse("<scene><cube/></scene>").unwrap();
-        assert_eq!(doc.element(doc.root()).kind, ElementKind::Scene);
+        let doc = parse("<svg><cube/></svg>").unwrap();
+        assert_eq!(doc.element(doc.root()).kind, ElementKind::Svg);
         let children = &doc.node(doc.root()).children;
         assert_eq!(children.len(), 1);
         assert_eq!(doc.element(children[0]).kind, ElementKind::Cube);
@@ -358,7 +372,7 @@ mod tests {
 
     #[test]
     fn parse_nested_groups() {
-        let xml = "<scene><group><cube/><ellipsoid/></group></scene>";
+        let xml = "<svg><g><cube/><ellipsoid/></g></svg>";
         let doc = parse(xml).unwrap();
         let group_id = doc.node(doc.root()).children[0];
         let group = doc.node(group_id);
@@ -370,7 +384,7 @@ mod tests {
 
     #[test]
     fn parse_preserves_attributes_and_unescapes_values() {
-        let xml = r#"<scene><cube id="a" class="b" size="2" label="a&amp;b"/></scene>"#;
+        let xml = r#"<svg><cube id="a" class="b" size="2" label="a&amp;b"/></svg>"#;
         let doc = parse(xml).unwrap();
         let cube_id = doc.node(doc.root()).children[0];
         let cube = doc.element(cube_id);
@@ -386,7 +400,7 @@ mod tests {
 
     #[test]
     fn parse_unknown_elements_kept_verbatim() {
-        let doc = parse("<scene><widget/></scene>").unwrap();
+        let doc = parse("<svg><widget/></svg>").unwrap();
         let widget_id = doc.node(doc.root()).children[0];
         assert_eq!(
             doc.element(widget_id).kind,
@@ -409,10 +423,21 @@ mod tests {
     }
 
     #[test]
-    fn parse_unclosed_element_errors() {
-        let err = parse("<scene>").unwrap_err();
+    fn parse_scene_rooted_document_errors() {
+        // `<scene>` was an earlier draft root; it is no longer recognised
+        // and must surface as UnexpectedRoot.
+        let err = parse("<scene/>").unwrap_err();
         match err {
-            ParseError::UnclosedElement { tag } => assert_eq!(tag, "scene"),
+            ParseError::UnexpectedRoot { found } => assert_eq!(found, "scene"),
+            other => panic!("expected UnexpectedRoot, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_unclosed_element_errors() {
+        let err = parse("<svg>").unwrap_err();
+        match err {
+            ParseError::UnclosedElement { tag } => assert_eq!(tag, "svg"),
             other => panic!("expected UnclosedElement, got {other:?}"),
         }
     }
