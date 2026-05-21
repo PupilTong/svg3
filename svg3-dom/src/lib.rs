@@ -27,6 +27,8 @@ pub enum ElementKind {
     Svg,
     /// Grouping / transform container (SVG 1.1 `<g>`).
     Group,
+    /// Axis-aligned rectangle (SVG 1.1 `<rect>` basic shape).
+    Rect,
     /// Axis-aligned box primitive.
     Cube,
     /// Ellipsoid primitive.
@@ -45,6 +47,7 @@ impl ElementKind {
         match tag {
             "svg" => Self::Svg,
             "g" => Self::Group,
+            "rect" => Self::Rect,
             "cube" => Self::Cube,
             "ellipsoid" => Self::Ellipsoid,
             other => Self::Unknown(other.to_owned()),
@@ -56,6 +59,7 @@ impl ElementKind {
         match self {
             Self::Svg => "svg",
             Self::Group => "g",
+            Self::Rect => "rect",
             Self::Cube => "cube",
             Self::Ellipsoid => "ellipsoid",
             Self::Unknown(t) => t.as_str(),
@@ -312,8 +316,11 @@ mod tests {
     fn tag_mapping_recognises_svg3_elements() {
         assert_eq!(ElementKind::from_tag("svg"), ElementKind::Svg);
         assert_eq!(ElementKind::from_tag("g"), ElementKind::Group);
+        assert_eq!(ElementKind::from_tag("rect"), ElementKind::Rect);
         assert_eq!(ElementKind::from_tag("cube"), ElementKind::Cube);
         assert_eq!(ElementKind::from_tag("ellipsoid"), ElementKind::Ellipsoid);
+        // `as_tag` round-trips a recognised kind back to its source name.
+        assert_eq!(ElementKind::Rect.as_tag(), "rect");
         // `<group>` is not in SPEC.md; only `<g>` from SVG 1.1 is the
         // canonical grouping element.
         assert_eq!(
@@ -368,6 +375,27 @@ mod tests {
         assert_eq!(children.len(), 1);
         assert_eq!(doc.element(children[0]).kind, ElementKind::Cube);
         assert_eq!(doc.len(), 2);
+    }
+
+    #[test]
+    fn parse_rect_preserves_geometry_attributes() {
+        let xml = r#"<svg><rect x="10" y="20" width="50" height="40" rx="8" fill="blue"/></svg>"#;
+        let doc = parse(xml).unwrap();
+        let rect_id = doc.node(doc.root()).children[0];
+        let rect = doc.element(rect_id);
+        assert_eq!(rect.kind, ElementKind::Rect);
+        assert_eq!(rect.attributes.get("x").map(String::as_str), Some("10"));
+        assert_eq!(rect.attributes.get("y").map(String::as_str), Some("20"));
+        assert_eq!(rect.attributes.get("width").map(String::as_str), Some("50"));
+        assert_eq!(
+            rect.attributes.get("height").map(String::as_str),
+            Some("40")
+        );
+        assert_eq!(rect.attributes.get("rx").map(String::as_str), Some("8"));
+        assert_eq!(
+            rect.attributes.get("fill").map(String::as_str),
+            Some("blue")
+        );
     }
 
     #[test]

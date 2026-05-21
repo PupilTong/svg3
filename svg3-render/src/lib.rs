@@ -1,15 +1,30 @@
-//! `svg3-render` — GPU rendering for styled SVG3 scenes.
+//! `svg3-render` — GPU rendering for SVG3 scenes.
 //!
-//! Turns a styled [`svg3_dom`] document into GPU draw calls with
-//! [wgpu](https://crates.io/crates/wgpu).
+//! Turns a parsed [`svg3_dom`] document into GPU geometry and rasterises it
+//! with [wgpu](https://crates.io/crates/wgpu).
 //!
-//! Status: scaffolding. wgpu is wired as a dependency and the public types are
-//! in place, but no device/surface is created and nothing is drawn yet.
+//! This milestone implements the SVG 1.1 `<rect>` basic shape:
+//! [`build_scene`] tessellates every `<rect>` in a document into a [`Mesh`],
+//! and [`Renderer::render_to_image`] rasterises that mesh headlessly — no
+//! window or swapchain — into an [`Image`]. `<rect>` is two-dimensional, so
+//! geometry is placed on the default surface through the orthographic
+//! [`RenderConfig::projection`] ("the default camera") rather than the 3D
+//! perspective [`Camera`], which is reserved for `<cube>`/`<ellipsoid>`.
+
+mod rect;
 
 use glam::{Mat4, Vec3};
-use svg3_dom::Document;
-use svg3_style::StyleEngine;
+use svg3_dom::{Document, ElementKind};
 use thiserror::Error;
+use wgpu::util::DeviceExt;
+
+/// Texture format the headless renderer draws into. sRGB-encoded so linear
+/// vertex colours are stored correctly; read back as `RGBA8`.
+const TARGET_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+
+/// Vertex buffer layout: object-space position then linear RGBA colour.
+const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 2] =
+    wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4];
 
 /// A single GPU vertex: position + linear RGBA colour.
 #[repr(C)]
@@ -24,7 +39,9 @@ pub struct Vertex {
 /// Target-surface configuration for a render pass.
 #[derive(Debug, Clone, Copy)]
 pub struct RenderConfig {
-    /// Swapchain / texture format to render into.
+    /// Swapchain / texture format to render into. Reserved for the future
+    /// windowed path; [`Renderer::render_to_image`] always targets an
+    /// sRGB `RGBA8` texture.
     pub format: wgpu::TextureFormat,
     /// Target width, in physical pixels.
     pub width: u32,
@@ -42,7 +59,22 @@ impl Default for RenderConfig {
     }
 }
 
+impl RenderConfig {
+    /// The default 2D camera: an orthographic projection mapping SVG user
+    /// space — origin top-left, y-down, spanning `0..width × 0..height` — to
+    /// wgpu normalized device coordinates.
+    ///
+    /// Assumes 1 user unit = 1 device pixel; the outer `<svg>`'s `viewBox`
+    /// and `preserveAspectRatio` are not consulted yet.
+    pub fn projection(&self) -> Mat4 {
+        Mat4::orthographic_rh(0.0, self.width as f32, self.height as f32, 0.0, -1.0, 1.0)
+    }
+}
+
 /// A right-handed perspective camera.
+///
+/// Used by the 3D primitives (`<cube>`, `<ellipsoid>`); 2D content such as
+/// `<rect>` is projected by [`RenderConfig::projection`] instead.
 #[derive(Debug, Clone, Copy)]
 pub struct Camera {
     /// Eye position in world space.
@@ -62,9 +94,88 @@ impl Camera {
     }
 }
 
-/// Renders styled SVG3 documents onto a GPU surface.
+/// A combined triangle mesh: a vertex list plus a triangle index list.
+#[derive(Debug, Default, Clone)]
+pub struct Mesh {
+    /// Vertices, in SVG user space (origin top-left, y-down, `z = 0`).
+    pub vertices: Vec<Vertex>,
+    /// Triangle indices into [`Mesh::vertices`].
+    pub indices: Vec<u32>,
+}
+
+impl Mesh {
+    /// Append `other`'s geometry, offsetting its indices to stay valid.
+    fn append(&mut self, other: Mesh) {
+        let base = self.vertices.len() as u32;
+        self.vertices.extend(other.vertices);
+        self.indices
+            .extend(other.indices.into_iter().map(|i| i + base));
+    }
+
+    /// Whether the mesh contains no triangles.
+    pub fn is_empty(&self) -> bool {
+        self.indices.is_empty()
+    }
+}
+
+/// An RGBA8 image produced by a headless render.
+#[derive(Debug, Clone)]
+pub struct Image {
+    /// Width, in pixels.
+    pub width: u32,
+    /// Height, in pixels.
+    pub height: u32,
+    /// Row-major `RGBA8` pixels: `4 * width * height` bytes, no row padding.
+    pub pixels: Vec<u8>,
+}
+
+impl Image {
+    /// The `RGBA8` bytes of the pixel at `(x, y)`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `(x, y)` is outside the image.
+    pub fn pixel(&self, x: u32, y: u32) -> [u8; 4] {
+        assert!(x < self.width && y < self.height, "pixel out of bounds");
+        let i = ((y * self.width + x) * 4) as usize;
+        [
+            self.pixels[i],
+            self.pixels[i + 1],
+            self.pixels[i + 2],
+            self.pixels[i + 3],
+        ]
+    }
+}
+
+/// Walk `document` and tessellate every `<rect>` into one combined [`Mesh`].
 ///
-/// Status: scaffolding — holds no GPU state yet.
+/// The mesh is in SVG user space (origin top-left, y-down, `z = 0`).
+/// Rectangles are appended in document order, so a later `<rect>` paints
+/// over an earlier one. A `<rect>` that is not rendered — zero/negative
+/// size, or `fill="none"` — contributes nothing. `transform` and grouping
+/// are not applied yet, so a `<rect>` is placed at its own `x`/`y`
+/// regardless of any ancestor `<g>`.
+pub fn build_scene(document: &Document) -> Mesh {
+    let mut mesh = Mesh::default();
+    // Pre-order DFS; children pushed in reverse so they pop in document
+    // order, giving the painter's-algorithm draw order.
+    let mut stack = vec![document.root()];
+    while let Some(id) = stack.pop() {
+        let node = document.node(id);
+        if node.element.kind == ElementKind::Rect {
+            if let (Some(geo), Some(color)) = (
+                rect::resolve_rect(&node.element),
+                rect::resolve_fill(&node.element),
+            ) {
+                mesh.append(rect::tessellate_rect(&geo, color));
+            }
+        }
+        stack.extend(node.children.iter().rev().copied());
+    }
+    mesh
+}
+
+/// Renders SVG3 documents to GPU images.
 #[derive(Debug, Default)]
 pub struct Renderer;
 
@@ -74,26 +185,242 @@ impl Renderer {
         Self
     }
 
-    /// Render `document` (styled by `styles`) into the configured target.
+    /// Render every `<rect>` in `document` headlessly into an [`Image`] of
+    /// `config.width × config.height` pixels.
     ///
-    /// Not implemented yet — returns [`RenderError::NotImplemented`].
-    pub fn render(
+    /// Brings up a wgpu device with no surface, rasterises the tessellated
+    /// scene into an offscreen sRGB texture, and reads the pixels back. The
+    /// surface is cleared to transparent before drawing.
+    ///
+    /// Returns [`RenderError::NoAdapter`] when the machine exposes no GPU
+    /// adapter — callers should treat that as "skip", not "fail".
+    pub fn render_to_image(
         &self,
-        _document: &Document,
-        _styles: &StyleEngine,
-        _config: RenderConfig,
-    ) -> Result<(), RenderError> {
-        log::debug!("svg3-render: render() called on the scaffold (not implemented)");
-        Err(RenderError::NotImplemented)
+        document: &Document,
+        config: RenderConfig,
+    ) -> Result<Image, RenderError> {
+        let width = config.width.max(1);
+        let height = config.height.max(1);
+        let mesh = build_scene(document);
+
+        let (device, queue) = acquire_gpu()?;
+
+        let extent = wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        };
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("svg3 headless target"),
+            size: extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: TARGET_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let pipeline = build_pipeline(&device);
+
+        // Project to clip space on the CPU so the shader is a pass-through;
+        // skip buffer creation entirely when there is nothing to draw.
+        let projection = config.projection();
+        let buffers = (!mesh.is_empty()).then(|| {
+            let vertices: Vec<Vertex> = mesh
+                .vertices
+                .iter()
+                .map(|v| Vertex {
+                    position: projection.project_point3(Vec3::from(v.position)).into(),
+                    color: v.color,
+                })
+                .collect();
+            let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("svg3 vertex buffer"),
+                contents: bytemuck::cast_slice(&vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+            let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("svg3 index buffer"),
+                contents: bytemuck::cast_slice(&mesh.indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+            (vertex_buffer, index_buffer)
+        });
+
+        let bytes_per_row = width * 4;
+        let padded_bytes_per_row = bytes_per_row.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+            * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("svg3 readback buffer"),
+            size: padded_bytes_per_row as u64 * height as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("svg3 headless encoder"),
+        });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("svg3 rect pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+            if let Some((vertex_buffer, index_buffer)) = &buffers {
+                pass.set_pipeline(&pipeline);
+                pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+                pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..mesh.indices.len() as u32, 0, 0..1);
+            }
+        }
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_bytes_per_row),
+                    rows_per_image: Some(height),
+                },
+            },
+            extent,
+        );
+        queue.submit(std::iter::once(encoder.finish()));
+
+        let pixels = read_back(&device, &readback, width, height, padded_bytes_per_row)?;
+        Ok(Image {
+            width,
+            height,
+            pixels,
+        })
     }
+}
+
+/// Acquire a headless wgpu device, or [`RenderError::NoAdapter`] if none.
+fn acquire_gpu() -> Result<(wgpu::Device, wgpu::Queue), RenderError> {
+    let instance = wgpu::Instance::default();
+    pollster::block_on(async {
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::default(),
+                force_fallback_adapter: false,
+                compatible_surface: None,
+            })
+            .await
+            .map_err(|_| {
+                log::debug!("svg3-render: no compatible GPU adapter; render skipped");
+                RenderError::NoAdapter
+            })?;
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("svg3 headless device"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::default(),
+                ..Default::default()
+            })
+            .await?;
+        Ok((device, queue))
+    })
+}
+
+/// Build the 2D pass-through render pipeline.
+fn build_pipeline(device: &wgpu::Device) -> wgpu::RenderPipeline {
+    let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("svg3 rect pipeline"),
+        layout: None,
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &[wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &VERTEX_ATTRIBUTES,
+            }],
+        },
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: TARGET_FORMAT,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+/// Map the readback buffer and copy its rows into a tightly-packed
+/// (unpadded) row-major `RGBA8` buffer.
+fn read_back(
+    device: &wgpu::Device,
+    buffer: &wgpu::Buffer,
+    width: u32,
+    height: u32,
+    padded_bytes_per_row: u32,
+) -> Result<Vec<u8>, RenderError> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    buffer
+        .slice(..)
+        .map_async(wgpu::MapMode::Read, move |result| {
+            let _ = sender.send(result);
+        });
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .map_err(|e| RenderError::Readback(format!("GPU poll failed: {e:?}")))?;
+    receiver
+        .recv()
+        .map_err(|e| RenderError::Readback(e.to_string()))?
+        .map_err(|e| RenderError::Readback(e.to_string()))?;
+
+    let row_bytes = (width * 4) as usize;
+    let mut pixels = Vec::with_capacity(row_bytes * height as usize);
+    {
+        let mapped = buffer.slice(..).get_mapped_range();
+        for row in 0..height as usize {
+            let start = row * padded_bytes_per_row as usize;
+            pixels.extend_from_slice(&mapped[start..start + row_bytes]);
+        }
+    }
+    buffer.unmap();
+    Ok(pixels)
 }
 
 /// Errors that can occur during rendering.
 #[derive(Debug, Error)]
 pub enum RenderError {
-    /// The wgpu rendering path is not implemented yet (scaffolding).
-    #[error("rendering is not implemented yet")]
-    NotImplemented,
+    /// No GPU adapter is available (e.g. a headless machine with no
+    /// software fallback). Treat as "skip rendering", not a hard failure.
+    #[error("no compatible GPU adapter is available")]
+    NoAdapter,
+    /// A GPU device could not be acquired from the adapter.
+    #[error("could not acquire a GPU device: {0}")]
+    DeviceUnavailable(#[from] wgpu::RequestDeviceError),
+    /// Reading the rendered texture back to CPU memory failed.
+    #[error("reading the rendered image back from the GPU failed: {0}")]
+    Readback(String),
 }
 
 #[cfg(test)]
@@ -120,13 +447,84 @@ mod tests {
     }
 
     #[test]
-    fn render_is_not_implemented_yet() {
-        let r = Renderer::new();
-        let doc = Document::new();
-        let styles = StyleEngine::new();
-        assert!(matches!(
-            r.render(&doc, &styles, RenderConfig::default()),
-            Err(RenderError::NotImplemented)
-        ));
+    fn projection_maps_surface_corners_to_ndc() {
+        let config = RenderConfig {
+            width: 200,
+            height: 100,
+            ..RenderConfig::default()
+        };
+        let proj = config.projection();
+        let at = |x, y| proj.project_point3(Vec3::new(x, y, 0.0));
+        // SVG origin (top-left) -> NDC top-left; far corner -> bottom-right;
+        // the surface centre -> the NDC origin.
+        let tl = at(0.0, 0.0);
+        let br = at(200.0, 100.0);
+        let mid = at(100.0, 50.0);
+        assert!((tl.x + 1.0).abs() < 1e-5 && (tl.y - 1.0).abs() < 1e-5);
+        assert!((br.x - 1.0).abs() < 1e-5 && (br.y + 1.0).abs() < 1e-5);
+        assert!(mid.x.abs() < 1e-5 && mid.y.abs() < 1e-5);
+    }
+
+    #[test]
+    fn build_scene_tessellates_each_rect_in_document() {
+        // Two rects: one renderable, one zero-width and skipped
+        // (WPT `shapes/rect-05`).
+        let document = svg3_dom::parse(
+            r#"<svg><rect width="10" height="10"/><rect width="0" height="10"/></svg>"#,
+        )
+        .unwrap();
+        let mesh = build_scene(&document);
+        // Only the first rect contributes: one sharp quad.
+        assert_eq!(mesh.vertices.len(), 4);
+        assert_eq!(mesh.indices, vec![0, 1, 2, 0, 2, 3]);
+    }
+
+    #[test]
+    fn build_scene_offsets_indices_across_rects() {
+        let document = svg3_dom::parse(
+            r#"<svg><rect width="10" height="10"/><rect x="20" width="10" height="10"/></svg>"#,
+        )
+        .unwrap();
+        let mesh = build_scene(&document);
+        assert_eq!(mesh.vertices.len(), 8);
+        // The second quad's indices are offset past the first quad's vertices.
+        assert_eq!(mesh.indices, vec![0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7]);
+    }
+
+    #[test]
+    fn build_scene_is_empty_without_rects() {
+        let document = svg3_dom::parse("<svg><g/></svg>").unwrap();
+        assert!(build_scene(&document).is_empty());
+    }
+
+    #[test]
+    fn render_to_image_draws_blue_rect() {
+        // WPT `shapes/rect-01`: a blue rect on an otherwise empty surface.
+        let document = svg3_dom::parse(
+            r#"<svg><rect x="16" y="16" width="32" height="32" fill="blue"/></svg>"#,
+        )
+        .unwrap();
+        let config = RenderConfig {
+            width: 64,
+            height: 64,
+            ..RenderConfig::default()
+        };
+        let image = match Renderer::new().render_to_image(&document, config) {
+            Ok(image) => image,
+            Err(RenderError::NoAdapter) => {
+                eprintln!("skipping render_to_image_draws_blue_rect: no GPU adapter");
+                return;
+            }
+            Err(e) => panic!("headless render failed: {e}"),
+        };
+        assert_eq!((image.width, image.height), (64, 64));
+        // The rect covers x,y in 16..48: its centre pixel is blue.
+        let centre = image.pixel(32, 32);
+        assert!(
+            centre[2] > 200 && centre[0] < 60 && centre[1] < 60,
+            "centre pixel not blue: {centre:?}"
+        );
+        // A pixel outside the rect keeps the transparent clear colour.
+        assert_eq!(image.pixel(2, 2)[3], 0, "background should be transparent");
     }
 }
