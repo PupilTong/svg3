@@ -75,12 +75,12 @@ so a bench file just writes `use criterion::*;` and both `cargo bench` and
 - **Run locally:** `cargo bench --workspace` (or `-p svg3-dom` / `-p svg3-render`).
 - **Build the instrumented binaries:** `cargo codspeed build` (install
   the cargo subcommand once with `cargo install cargo-codspeed`).
-- **CI:** the `ci` job in `.github/workflows/ci.yml` runs `cargo
-  codspeed build --workspace --exclude app-macos` and then
-  `CodSpeedHQ/action@…` in `mode: walltime` on `macos-latest`. (Simulation
-  mode uses Valgrind, which is Linux-only and cannot run on the macOS
-  runner; walltime trades some measurement stability for single-runner
-  CI.) CodSpeed posts per-benchmark deltas on PRs.
+- **CI:** the `ci` job in `.github/workflows/ci.yml` runs `cargo codspeed
+  build --workspace --exclude app-macos -m walltime` and then
+  `CodSpeedHQ/action@…` in `mode: walltime` on `macos-latest`. (The build
+  mode must match the run mode; simulation mode uses Valgrind, which is
+  Linux-only and cannot run on the macOS runner, so both are walltime.)
+  CodSpeed posts per-benchmark deltas on PRs.
 
 Only crates with real work to measure ship benches. Today that is
 `svg3-dom`'s `parse` (XML parsing) and `svg3-render`'s `tessellate`
