@@ -84,6 +84,15 @@ impl Length {
             Self::Percent(percent) => percent / 100.0 * basis,
         }
     }
+
+    /// Whether the length's numeric value is below zero. A `<rect>`'s
+    /// `rx`/`ry` treats a negative value as "not properly specified", i.e.
+    /// auto ([SVG11] §9.2).
+    pub(crate) fn is_negative(self) -> bool {
+        match self {
+            Self::Px(value) | Self::Percent(value) => value < 0.0,
+        }
+    }
 }
 
 /// The SVG viewport that percentage lengths resolve against.

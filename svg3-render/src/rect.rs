@@ -47,10 +47,11 @@ pub(crate) struct RectGeometry {
 /// Returns `None` when the rectangle is not rendered — a missing, zero, or
 /// negative `width`/`height` ([SVG11] §9.2; WPT `shapes/rect-05`).
 ///
-/// `x`/`y` default to `0`. Corner radii follow the `rx`/`ry` "auto" rules:
-/// if only one is given the other mirrors it; if neither is given both are
-/// `0`; a negative radius is treated as auto. Each radius is then clamped
-/// to half its side, independently (WPT `import/shapes-rect-06`).
+/// `x`/`y` default to `0`. Corner radii follow the `rx`/`ry` "auto" rules
+/// ([SVG11] §9.2): if only one is given the other mirrors its `<length>`
+/// (so a percentage radius still resolves against its own axis); if
+/// neither is given both are `0`; a negative radius is treated as auto.
+/// Each radius is then clamped to half its side (WPT `import/shapes-rect-06`).
 pub(crate) fn resolve_rect(element: &Element, viewport: Viewport) -> Option<RectGeometry> {
     let length = |name: &str, basis: f32| {
         element
@@ -70,16 +71,27 @@ pub(crate) fn resolve_rect(element: &Element, viewport: Viewport) -> Option<Rect
         return None;
     }
 
-    // A negative or unparseable radius is "auto"; an auto axis mirrors the
-    // other; if both are auto the corners are sharp.
-    let rx_attr = length("rx", viewport.width).filter(|v| *v >= 0.0);
-    let ry_attr = length("ry", viewport.height).filter(|v| *v >= 0.0);
-    let (rx, ry) = match (rx_attr, ry_attr) {
+    // A negative or unparseable radius is "auto". Per [SVG11] §9.2 an auto
+    // axis mirrors the other's `<length>` — the length token, not its
+    // resolved pixels — so each radius then resolves against its own axis:
+    // `rx` against viewport width, `ry` against height ([SVG11] §7.10).
+    // Both auto => sharp corners.
+    let radius = |name: &str| {
+        element
+            .attributes
+            .get(name)
+            .map(String::as_str)
+            .and_then(Length::parse)
+            .filter(|len| !len.is_negative())
+    };
+    let (rx_len, ry_len) = match (radius("rx"), radius("ry")) {
         (Some(rx), Some(ry)) => (rx, ry),
         (Some(rx), None) => (rx, rx),
         (None, Some(ry)) => (ry, ry),
-        (None, None) => (0.0, 0.0),
+        (None, None) => (Length::Px(0.0), Length::Px(0.0)),
     };
+    let rx = rx_len.resolve(viewport.width);
+    let ry = ry_len.resolve(viewport.height);
 
     Some(RectGeometry {
         x,
@@ -278,6 +290,31 @@ mod tests {
         // Neither => sharp; a negative radius is treated as auto.
         assert_eq!(radii(&[]), (0.0, 0.0));
         assert_eq!(radii(&[("rx", "-4")]), (0.0, 0.0));
+    }
+
+    #[test]
+    fn resolve_rect_aliases_percentage_radius_per_axis() {
+        // An auto radius mirrors the *length* of the other, not its resolved
+        // pixels: `rx="25%"` with no `ry` sets `ry` to the length `25%`,
+        // which resolves against viewport *height* ([SVG11] §9.2, §7.10) —
+        // so a 200×100 viewport yields `rx=50`, `ry=25`, not `ry=50`.
+        let viewport = Viewport {
+            width: 200.0,
+            height: 100.0,
+        };
+        let geo = resolve_rect(
+            &rect(&[("width", "200"), ("height", "100"), ("rx", "25%")]),
+            viewport,
+        )
+        .unwrap();
+        assert_eq!((geo.rx, geo.ry), (50.0, 25.0));
+        // Symmetric: an auto `rx` mirrors `ry`'s length.
+        let geo = resolve_rect(
+            &rect(&[("width", "200"), ("height", "100"), ("ry", "25%")]),
+            viewport,
+        )
+        .unwrap();
+        assert_eq!((geo.rx, geo.ry), (50.0, 25.0));
     }
 
     #[test]
