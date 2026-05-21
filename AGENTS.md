@@ -25,18 +25,18 @@ This repository supports LLM-based assistants. The working language is English.
 ## CI / supply chain
 
 - **GitHub Actions are pinned to full 40-char commit SHAs, never tags or branches.** When adding or bumping an action, resolve the release tag to its commit SHA (e.g. `gh api repos/<owner>/<repo>/commits/<tag> --jq .sha`) and pin that, with a trailing `# vX.Y.Z` comment for readability.
-- CI is split between two runners:
-  - **`ubuntu-latest`** (`linux` job): `cargo fmt --check`, `cargo clippy --workspace --exclude app-macos --all-targets --all-features -- -D warnings`, `cargo llvm-cov --workspace --exclude app-macos --all-features --lcov --output-path lcov.info` (runs tests under coverage instrumentation), `codecov/codecov-action` upload, then `cargo codspeed build --workspace --exclude app-macos` + the `CodSpeedHQ/action` in `mode: simulation`. CodSpeed's simulation mode uses Valgrind (Linux-only), so benches must run here.
-  - **`macos-latest`** (`macos` job): `cargo clippy -p app-macos`, `cargo build -p app-macos`, `cargo test -p app-macos`. The only crate that needs Apple frameworks is `app-macos` (winit → Cocoa, wgpu → Metal); the library crates compile fine on Linux and are checked there.
+- CI is split between two runners. `svg3-render` rasterises with wgpu and its tests need a real GPU adapter, which the `ubuntu-latest` runner lacks — so lint, tests, and coverage run on macOS (Metal), and the Linux runner is kept only for the CodSpeed benchmark job:
+  - **`macos-latest`** (`macos` job): `cargo fmt --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo llvm-cov --workspace --exclude app-macos --all-features --lcov --output-path lcov.info` (runs the tests under coverage instrumentation — the headless `svg3-render` render test exercises Metal here), `codecov/codecov-action` upload, and `cargo build -p app-macos` + `cargo test -p app-macos`.
+  - **`ubuntu-latest`** (`linux` job): `cargo codspeed build --workspace --exclude app-macos` + the `CodSpeedHQ/action` in `mode: simulation`. CodSpeed's simulation mode uses Valgrind (Linux-only), so the benches must run here; they are pure CPU and need no GPU.
 - **Coverage:** `cargo llvm-cov` produces `lcov.info`, uploaded to Codecov by `codecov/codecov-action`. The project threshold is 3% (see `codecov.yml`); patch coverage is informational only. `app-macos` is excluded — its windowed event loop is not unit-testable, and counting it would create a permanent 0% drag. `fail_ci_if_error: false` so a missing/broken Codecov token does not break CI; add a `CODECOV_TOKEN` repo secret if uploads need to be reliable on private mirrors.
 
 ## Repository structure
 
-- `svg3-dom/`: runtime svg3 XML parsing (`quick-xml`) and the mutable element tree. svg3 is specified as an extension to SVG 1.1 ([`SPEC.md`](SPEC.md)) — the document root is `<svg>` and the v0 parser recognises `<g>` (SVG 1.1 grouping), `<cube>`, and `<ellipsoid>` (svg3 3D primitives); other SVG 1.1 elements round-trip as `ElementKind::Unknown` until they are specialised. Pure Rust, no GPU dependencies.
+- `svg3-dom/`: runtime svg3 XML parsing (`quick-xml`) and the mutable element tree. svg3 is specified as an extension to SVG 1.1 ([`SPEC.md`](SPEC.md)) — the document root is `<svg>` and the parser recognises `<g>` (SVG 1.1 grouping), `<rect>` (SVG 1.1 basic shape), `<cube>`, and `<ellipsoid>` (svg3 3D primitives); other SVG 1.1 elements round-trip as `ElementKind::Unknown` until they are specialised. Pure Rust, no GPU dependencies.
 - `svg3-style/`: runtime CSS parsing + style resolution via [Stylo](https://crates.io/crates/stylo). The planned integration implements Stylo's `TElement`/`TNode`/`TDocument` traits over `svg3-dom`; **[Blitz (`blitz-dom`)](https://github.com/DioxusLabs/blitz) is the canonical reference** for driving Stylo over a custom DOM. Currently a skeleton.
-- `svg3-render/`: Turns a styled scene into GPU draw calls with [wgpu](https://crates.io/crates/wgpu). Currently a skeleton.
+- `svg3-render/`: turns a parsed scene into GPU geometry with [wgpu](https://crates.io/crates/wgpu) — `build_scene` tessellates `<rect>` into a `Mesh`, and `Renderer::render_to_image` rasterises it headlessly to an `Image`. The Stylo-driven styled-scene path and the windowed-surface path are still to come.
 - `svg3/`: Umbrella crate. Re-exports the layers and exposes the public `parse → render` facade.
-- `app-macos/`: native macOS demo binary (`svg3-macos`). A winit 0.30 event loop driving a wgpu (Metal) surface that clears to a solid colour. Plus `app-macos/macos/Info.plist` and `scripts/bundle-macos.sh` for assembling a `.app`. Does **not** depend on `svg3` yet (the parse → render path is unimplemented).
+- `app-macos/`: native macOS demo binary (`svg3-macos`). A winit 0.30 event loop driving a wgpu (Metal) surface that clears to a solid colour. Plus `app-macos/macos/Info.plist` and `scripts/bundle-macos.sh` for assembling a `.app`. Does **not** depend on `svg3` yet — wiring the demo window to render real documents is a later milestone.
 
 ## Project design overview
 
@@ -60,7 +60,7 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo run -p app-macos                        # native macOS window (clears to a colour)
 bash scripts/bundle-macos.sh                  # assemble target/release/bundle/svg3-macos.app
 
-cargo bench -p svg3-dom                       # criterion benches (codspeed-instrumented)
+cargo bench --workspace                       # criterion benches (codspeed-instrumented)
 cargo codspeed build                          # build the CodSpeed-instrumented bench binaries
 ```
 
@@ -73,7 +73,7 @@ the criterion API, instrumented for CodSpeed. It is declared in the root
 so a bench file just writes `use criterion::*;` and both `cargo bench` and
 `cargo codspeed build` produce the right binary.
 
-- **Run locally:** `cargo bench -p svg3-dom`.
+- **Run locally:** `cargo bench --workspace` (or `-p svg3-dom` / `-p svg3-render`).
 - **Build the instrumented binaries:** `cargo codspeed build` (install
   the cargo subcommand once with `cargo install cargo-codspeed`).
 - **CI:** the `linux` job in `.github/workflows/ci.yml` runs `cargo
@@ -83,9 +83,9 @@ so a bench file just writes `use criterion::*;` and both `cargo bench` and
   per-benchmark deltas on PRs.
 
 Only crates with real work to measure ship benches. Today that is
-`svg3-dom::parse` only — the style and render crates are still skeletons,
-so benches for them are out of scope until the cascade and the GPU
-pipeline land.
+`svg3-dom`'s `parse` (XML parsing) and `svg3-render`'s `tessellate`
+(`<rect>` tessellation via `build_scene`). The style crate is still a
+skeleton, so benches for it are out of scope until the Stylo cascade lands.
 
 ## Maintaining this file
 

@@ -2825,10 +2825,11 @@ name = "svg3-render"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "codspeed-criterion-compat",
  "glam",
  "log",
+ "pollster",
  "svg3-dom",
- "svg3-style",
  "thiserror 2.0.18",
  "wgpu",
 ]

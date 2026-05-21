@@ -6,10 +6,10 @@
 //! - [`style`] — resolve computed styles via Stylo.
 //! - [`render`] — paint the styled scene with wgpu.
 //!
-//! Status: early scaffolding. [`render_str`] wires the layers; the parser in
-//! [`dom`] is now implemented (it produces a real element tree), but [`style`]
-//! and [`render`] are still skeletons, so `render_str` currently surfaces the
-//! style stage's "not implemented" error.
+//! Status: early scaffolding. [`render_str`] wires the layers. [`dom`]
+//! parsing and [`render`]'s `<rect>` path are implemented, but [`style`] is
+//! still a skeleton, so `render_str` currently surfaces the style stage's
+//! "not implemented" error.
 
 pub use svg3_dom as dom;
 pub use svg3_render as render;
@@ -33,15 +33,17 @@ pub enum Error {
 
 /// Parse, style and render an SVG3 document from XML text.
 ///
-/// This is the intended public entry point. The pipeline is fully wired, but
-/// each stage is still a scaffold, so this currently returns the first stage's
-/// "not implemented" error.
-pub fn render_str(input: &str, config: render::RenderConfig) -> Result<(), Error> {
+/// This is the intended public entry point. The parse and render stages are
+/// implemented, but style resolution is still a scaffold, so the full
+/// pipeline currently returns [`style::StyleError::NotImplemented`]. To
+/// render `<rect>` geometry today, use [`render::build_scene`] /
+/// [`render::Renderer::render_to_image`] directly.
+pub fn render_str(input: &str, config: render::RenderConfig) -> Result<render::Image, Error> {
     let document = dom::parse(input)?;
     let styles = style::StyleEngine::new();
     styles.resolve(&document)?;
-    render::Renderer::new().render(&document, &styles, config)?;
-    Ok(())
+    let image = render::Renderer::new().render_to_image(&document, config)?;
+    Ok(image)
 }
 
 #[cfg(test)]
@@ -58,5 +60,15 @@ mod tests {
             err,
             Error::Style(style::StyleError::NotImplemented)
         ));
+    }
+
+    #[test]
+    fn build_scene_renders_rect_across_crates() {
+        // The render stage works without the (still-skeleton) style stage:
+        // parse a `<rect>` and tessellate it through the re-exported render
+        // API, exercising the dom -> render path end to end.
+        let document = dom::parse(r#"<svg><rect width="20" height="10"/></svg>"#).unwrap();
+        let mesh = render::build_scene(&document);
+        assert!(!mesh.is_empty());
     }
 }
