@@ -1,7 +1,7 @@
 //! Full-renderer benchmarks for `Renderer::render_to_image`.
 //!
-//! These benches exercise `Renderer::render_to_image` as it exists today:
-//! per-call GPU adapter/device acquisition, pipeline creation, scene
+//! These benches exercise repeated `Renderer::render_to_image` calls after
+//! the renderer has warmed its reusable GPU device and pipeline: scene
 //! tessellation, vertex upload, render pass, and readback. They are intended
 //! for GPU-capable macOS runners and self-skip when no adapter is available,
 //! so CI treats them as a timing smoke check rather than tracked CodSpeed data.
@@ -56,7 +56,7 @@ fn render_or_panic(renderer: &Renderer, document: &Document, config: RenderConfi
     }
 }
 
-fn gpu_available(renderer: &Renderer) -> bool {
+fn warm_gpu(renderer: &Renderer) -> bool {
     let document = parse(r#"<svg><rect width="1" height="1"/></svg>"#)
         .expect("smoke benchmark fixture should parse");
     match renderer.render_to_image(
@@ -78,7 +78,7 @@ fn gpu_available(renderer: &Renderer) -> bool {
 
 fn bench_render(c: &mut Criterion) {
     let renderer = Renderer::new();
-    if !gpu_available(&renderer) {
+    if !warm_gpu(&renderer) {
         eprintln!("skipping full-renderer benchmarks: no GPU adapter available");
         return;
     }
