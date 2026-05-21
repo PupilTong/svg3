@@ -15,7 +15,7 @@ use std::hint::black_box;
 
 use criterion::{criterion_group, criterion_main, Criterion};
 use svg3_dom::{Document, ElementKind};
-use svg3_render::build_scene;
+use svg3_render::{build_scene, Viewport};
 
 /// A document of `n` sibling `<rect>`s under the root, optionally rounded.
 fn document_of_rects(n: usize, rounded: bool) -> Document {
@@ -57,17 +57,25 @@ fn bench_tessellate(c: &mut Criterion) {
     let rounded = document_of_rects(100, true);
     let single = document_of_rects(1, true);
     let circles = document_of_circles(100);
+    // The fixtures use absolute coordinates, so the viewport only needs to be
+    // a valid percentage basis.
+    let viewport = Viewport {
+        width: 256.0,
+        height: 256.0,
+    };
 
     let mut group = c.benchmark_group("tessellate");
-    group.bench_function("sharp_100", |b| b.iter(|| build_scene(black_box(&sharp))));
+    group.bench_function("sharp_100", |b| {
+        b.iter(|| build_scene(black_box(&sharp), viewport))
+    });
     group.bench_function("rounded_100", |b| {
-        b.iter(|| build_scene(black_box(&rounded)))
+        b.iter(|| build_scene(black_box(&rounded), viewport))
     });
     group.bench_function("single_rounded", |b| {
-        b.iter(|| build_scene(black_box(&single)))
+        b.iter(|| build_scene(black_box(&single), viewport))
     });
     group.bench_function("circle_100", |b| {
-        b.iter(|| build_scene(black_box(&circles)))
+        b.iter(|| build_scene(black_box(&circles), viewport))
     });
     group.finish();
 }

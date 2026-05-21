@@ -43,14 +43,79 @@ pub(crate) fn vertex(x: f32, y: f32, color: [f32; 4]) -> Vertex {
     }
 }
 
-/// Parse an SVG length value into user units. Accepts a plain number or a
-/// `px`-suffixed number (1px = 1 user unit). Percentages and other units
-/// are not handled yet and yield `None`.
+/// Parse an absolute SVG length into user units. Accepts a plain number or a
+/// `px`-suffixed number (1px = 1 user unit). Percentages are handled by
+/// [`Length`]; other units are not handled yet and yield `None`.
 pub(crate) fn parse_length(value: &str) -> Option<f32> {
     let trimmed = value.trim();
     let number = trimmed.strip_suffix("px").unwrap_or(trimmed).trim();
     let parsed: f32 = number.parse().ok()?;
     parsed.is_finite().then_some(parsed)
+}
+
+/// An SVG 1.1 `<length>`: an absolute value in user units, or a percentage
+/// resolved against a viewport extent at use time ([SVG11] §7.10).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum Length {
+    /// An absolute length, already in user units.
+    Px(f32),
+    /// A percentage — `Percent(50.0)` is `"50%"` — resolved by [`Length::resolve`].
+    Percent(f32),
+}
+
+impl Length {
+    /// Parse an SVG length. A trailing `%` yields [`Length::Percent`];
+    /// otherwise the absolute grammar of [`parse_length`] applies, yielding
+    /// [`Length::Px`]. Returns `None` for an unparseable value.
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        let trimmed = value.trim();
+        if let Some(percent) = trimmed.strip_suffix('%') {
+            let parsed: f32 = percent.trim().parse().ok()?;
+            return parsed.is_finite().then_some(Self::Percent(parsed));
+        }
+        parse_length(trimmed).map(Self::Px)
+    }
+
+    /// Resolve the length to user units. A percentage is taken relative to
+    /// `basis` (the relevant viewport extent); an absolute length ignores it.
+    pub(crate) fn resolve(self, basis: f32) -> f32 {
+        match self {
+            Self::Px(value) => value,
+            Self::Percent(percent) => percent / 100.0 * basis,
+        }
+    }
+
+    /// Whether the length's numeric value is below zero. A `<rect>`'s
+    /// `rx`/`ry` treats a negative value as "not properly specified", i.e.
+    /// auto ([SVG11] §9.2).
+    pub(crate) fn is_negative(self) -> bool {
+        match self {
+            Self::Px(value) | Self::Percent(value) => value < 0.0,
+        }
+    }
+}
+
+/// The SVG viewport that percentage lengths resolve against.
+///
+/// In the current model the viewport is the render target — 1 user unit =
+/// 1 device pixel — so the outer `<svg>`'s own `width`/`height`/`viewBox`
+/// are not consulted ([`crate::RenderConfig::projection`] makes the same
+/// assumption).
+#[derive(Debug, Clone, Copy)]
+pub struct Viewport {
+    /// Viewport width in user units.
+    pub width: f32,
+    /// Viewport height in user units.
+    pub height: f32,
+}
+
+impl Viewport {
+    /// The percentage basis for a length that is neither purely horizontal
+    /// nor vertical — e.g. a `<circle>`'s `r` ([SVG11] §7.10): the viewport
+    /// diagonal divided by `√2`.
+    pub(crate) fn diagonal(&self) -> f32 {
+        self.width.hypot(self.height) * std::f32::consts::FRAC_1_SQRT_2
+    }
 }
 
 /// Parse an sRGB colour — `#rgb`, `#rrggbb`, or a named colour — into
@@ -184,5 +249,37 @@ mod tests {
             resolve_fill(&element(&[("fill", "bogus")])),
             Some([0.0, 0.0, 0.0, 1.0])
         );
+    }
+
+    #[test]
+    fn length_parse_distinguishes_absolute_and_percentage() {
+        assert_eq!(Length::parse("50"), Some(Length::Px(50.0)));
+        assert_eq!(Length::parse("50px"), Some(Length::Px(50.0)));
+        assert_eq!(Length::parse("1e2"), Some(Length::Px(100.0)));
+        assert_eq!(Length::parse("100%"), Some(Length::Percent(100.0)));
+        assert_eq!(Length::parse("12.5%"), Some(Length::Percent(12.5)));
+        // Unparseable values — including a bare `%` — yield `None`.
+        assert_eq!(Length::parse("abc"), None);
+        assert_eq!(Length::parse("%"), None);
+    }
+
+    #[test]
+    fn length_resolve_applies_percentage_basis() {
+        // An absolute length ignores the basis.
+        assert_eq!(Length::Px(40.0).resolve(1000.0), 40.0);
+        // A percentage scales the basis.
+        assert_eq!(Length::Percent(100.0).resolve(300.0), 300.0);
+        assert_eq!(Length::Percent(50.0).resolve(200.0), 100.0);
+        assert_eq!(Length::Percent(0.0).resolve(200.0), 0.0);
+    }
+
+    #[test]
+    fn viewport_diagonal_is_the_normalized_diagonal() {
+        // For a square viewport the normalized diagonal equals the side.
+        let vp = Viewport {
+            width: 100.0,
+            height: 100.0,
+        };
+        assert!((vp.diagonal() - 100.0).abs() < 1e-3);
     }
 }

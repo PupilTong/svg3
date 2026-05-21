@@ -16,6 +16,8 @@ mod circle;
 mod rect;
 mod shape;
 
+pub use shape::Viewport;
+
 use glam::{Mat4, Vec3};
 use svg3_dom::{Document, ElementKind};
 use thiserror::Error;
@@ -162,13 +164,14 @@ impl Image {
 /// Walk `document` and tessellate every `<rect>` and `<circle>` into one
 /// combined [`Mesh`].
 ///
-/// The mesh is in SVG user space (origin top-left, y-down, `z = 0`).
-/// Shapes are appended in document order, so a later shape paints over an
-/// earlier one. A shape that is not rendered — a degenerate size, or
-/// `fill="none"` — contributes nothing. `transform` and grouping are not
-/// applied yet, so a shape is placed at its own coordinates regardless of
-/// any ancestor `<g>`.
-pub fn build_scene(document: &Document) -> Mesh {
+/// `viewport` is the basis for percentage lengths (e.g. `width="100%"`); in
+/// the current model it is the render-target size. The mesh is in SVG user
+/// space (origin top-left, y-down, `z = 0`). Shapes are appended in document
+/// order, so a later shape paints over an earlier one. A shape that is not
+/// rendered — a degenerate size, or `fill="none"` — contributes nothing.
+/// `transform` and grouping are not applied yet, so a shape is placed at its
+/// own coordinates regardless of any ancestor `<g>`.
+pub fn build_scene(document: &Document, viewport: Viewport) -> Mesh {
     let mut mesh = Mesh::default();
     // Pre-order DFS; children pushed in reverse so they pop in document
     // order, giving the painter's-algorithm draw order.
@@ -178,7 +181,7 @@ pub fn build_scene(document: &Document) -> Mesh {
         match &node.element.kind {
             ElementKind::Rect => {
                 if let (Some(geo), Some(color)) = (
-                    rect::resolve_rect(&node.element),
+                    rect::resolve_rect(&node.element, viewport),
                     shape::resolve_fill(&node.element),
                 ) {
                     mesh.append(rect::tessellate_rect(&geo, color));
@@ -186,7 +189,7 @@ pub fn build_scene(document: &Document) -> Mesh {
             }
             ElementKind::Circle => {
                 if let (Some(geo), Some(color)) = (
-                    circle::resolve_circle(&node.element),
+                    circle::resolve_circle(&node.element, viewport),
                     shape::resolve_fill(&node.element),
                 ) {
                     mesh.append(circle::tessellate_circle(&geo, color));
@@ -225,7 +228,13 @@ impl Renderer {
     ) -> Result<Image, RenderError> {
         let width = config.width.max(1);
         let height = config.height.max(1);
-        let mesh = build_scene(document);
+        let mesh = build_scene(
+            document,
+            Viewport {
+                width: width as f32,
+                height: height as f32,
+            },
+        );
 
         let (device, queue) = acquire_gpu()?;
 
@@ -451,6 +460,15 @@ pub enum RenderError {
 mod tests {
     use super::*;
 
+    /// A 100×100 viewport for `build_scene` tests, whose fixtures use
+    /// absolute lengths (so the viewport value does not affect the result).
+    fn vp() -> Viewport {
+        Viewport {
+            width: 100.0,
+            height: 100.0,
+        }
+    }
+
     #[test]
     fn vertex_layout_is_tightly_packed() {
         assert_eq!(
@@ -510,7 +528,7 @@ mod tests {
             r#"<svg><rect width="10" height="10"/><rect width="0" height="10"/></svg>"#,
         )
         .unwrap();
-        let mesh = build_scene(&document);
+        let mesh = build_scene(&document, vp());
         // Only the first rect contributes: one sharp quad.
         assert_eq!(mesh.vertices.len(), 4);
         assert_eq!(mesh.indices, vec![0, 1, 2, 0, 2, 3]);
@@ -522,7 +540,7 @@ mod tests {
             r#"<svg><rect width="10" height="10"/><rect x="20" width="10" height="10"/></svg>"#,
         )
         .unwrap();
-        let mesh = build_scene(&document);
+        let mesh = build_scene(&document, vp());
         assert_eq!(mesh.vertices.len(), 8);
         // The second quad's indices are offset past the first quad's vertices.
         assert_eq!(mesh.indices, vec![0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7]);
@@ -531,7 +549,7 @@ mod tests {
     #[test]
     fn build_scene_is_empty_without_shapes() {
         let document = svg3_dom::parse("<svg><g/></svg>").unwrap();
-        assert!(build_scene(&document).is_empty());
+        assert!(build_scene(&document, vp()).is_empty());
     }
 
     #[test]
@@ -539,7 +557,7 @@ mod tests {
         // A `<circle>` is dispatched to the circle tessellator and
         // contributes a centre-pivoted triangle fan to the combined mesh.
         let document = svg3_dom::parse(r#"<svg><circle cx="20" cy="20" r="10"/></svg>"#).unwrap();
-        let mesh = build_scene(&document);
+        let mesh = build_scene(&document, vp());
         assert!(!mesh.is_empty());
         // Fan topology: a centre vertex plus one vertex per fan triangle.
         assert_eq!(mesh.vertices.len(), mesh.indices.len() / 3 + 1);
@@ -603,5 +621,39 @@ mod tests {
         );
         // A corner pixel lies outside the disc — the transparent clear colour.
         assert_eq!(image.pixel(2, 2)[3], 0, "background should be transparent");
+    }
+
+    #[test]
+    fn render_to_image_fills_target_with_percent_sized_rect() {
+        // `<rect width="100%" height="100%">` resolves against the render
+        // target and covers it edge to edge — including a non-square target.
+        let document =
+            svg3_dom::parse(r#"<svg><rect width="100%" height="100%" fill="blue"/></svg>"#)
+                .unwrap();
+        let config = RenderConfig {
+            width: 40,
+            height: 24,
+            ..RenderConfig::default()
+        };
+        let image = match Renderer::new().render_to_image(&document, config) {
+            Ok(image) => image,
+            Err(RenderError::NoAdapter) => {
+                eprintln!(
+                    "skipping render_to_image_fills_target_with_percent_sized_rect: no GPU adapter"
+                );
+                return;
+            }
+            Err(e) => panic!("headless render failed: {e}"),
+        };
+        assert_eq!((image.width, image.height), (40, 24));
+        // Every corner and the centre are blue — the percentage rect bled to
+        // all four edges of the non-square target.
+        for (x, y) in [(0, 0), (39, 0), (0, 23), (39, 23), (20, 12)] {
+            let px = image.pixel(x, y);
+            assert!(
+                px[2] > 200 && px[0] < 60 && px[1] < 60,
+                "pixel ({x}, {y}) not blue: {px:?}"
+            );
+        }
     }
 }

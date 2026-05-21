@@ -64,7 +64,7 @@ cargo bench --workspace                      # criterion benches (codspeed-instr
 
 1. **(done)** winit event loop + wgpu surface — a window that clears to a colour (the `app-macos` crate).
 2. **(done)** svg3 XML parsing → element tree (`<svg>` root with `<g>`, `<cube>`, `<ellipsoid>`; per [SPEC.md](SPEC.md)).
-3. **(done)** 2D basic shapes — tessellate `<rect>` and `<circle>` and render them headlessly to an image (`svg3-render`).
+3. **(done)** 2D basic shapes — tessellate `<rect>` and `<circle>` (with percentage lengths) and render them headlessly to an image (`svg3-render`).
 4. 3D primitive mesh generation; render a single `<cube>`.
 5. Real Stylo integration (computed styles drive material/transform).
 6. Multi-platform native demos (Windows, Linux) + Linux/Windows CI.

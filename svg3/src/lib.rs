@@ -68,7 +68,13 @@ mod tests {
         // parse a `<rect>` and tessellate it through the re-exported render
         // API, exercising the dom -> render path end to end.
         let document = dom::parse(r#"<svg><rect width="20" height="10"/></svg>"#).unwrap();
-        let mesh = render::build_scene(&document);
+        let mesh = render::build_scene(
+            &document,
+            render::Viewport {
+                width: 20.0,
+                height: 10.0,
+            },
+        );
         assert!(!mesh.is_empty());
     }
 }
