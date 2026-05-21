@@ -25,7 +25,7 @@ This repository supports LLM-based assistants. The working language is English.
 ## Testing
 
 - `cargo test --workspace` runs the unit and integration tests. The GPU-backed tests in `svg3-render` — the headless render test and the `tests/snapshot.rs` E2E suite — self-skip when no GPU adapter is available, so they run on macOS but not on a GPU-less host.
-- **Snapshot tests:** `svg3-render/tests/snapshot.rs` renders `<rect>` documents headlessly and compares them against the committed golden PNGs in `svg3-render/tests/snapshots/` (the reviewable images). After an intentional rendering change, regenerate the goldens with `SVG3_UPDATE_SNAPSHOTS=1 cargo test -p svg3-render --test snapshot` and review the updated PNGs in the diff. On a mismatch the test writes the actual render as `<name>.actual.png` (git-ignored) next to the golden for inspection.
+- **Snapshot tests:** `svg3-render/tests/snapshot.rs` renders `<rect>` and `<circle>` documents headlessly and compares them against the committed golden PNGs in `svg3-render/tests/snapshots/` (the reviewable images). After an intentional rendering change, regenerate the goldens with `SVG3_UPDATE_SNAPSHOTS=1 cargo test -p svg3-render --test snapshot` and review the updated PNGs in the diff. On a mismatch the test writes the actual render as `<name>.actual.png` (git-ignored) next to the golden for inspection.
 
 ## CI / supply chain
 
@@ -37,9 +37,9 @@ This repository supports LLM-based assistants. The working language is English.
 
 ## Repository structure
 
-- `svg3-dom/`: runtime svg3 XML parsing (`quick-xml`) and the mutable element tree. svg3 is specified as an extension to SVG 1.1 ([`SPEC.md`](SPEC.md)) — the document root is `<svg>` and the parser recognises `<g>` (SVG 1.1 grouping), `<rect>` (SVG 1.1 basic shape), `<cube>`, and `<ellipsoid>` (svg3 3D primitives); other SVG 1.1 elements round-trip as `ElementKind::Unknown` until they are specialised. Pure Rust, no GPU dependencies.
+- `svg3-dom/`: runtime svg3 XML parsing (`quick-xml`) and the mutable element tree. svg3 is specified as an extension to SVG 1.1 ([`SPEC.md`](SPEC.md)) — the document root is `<svg>` and the parser recognises `<g>` (SVG 1.1 grouping), `<rect>` and `<circle>` (SVG 1.1 basic shapes), `<cube>`, and `<ellipsoid>` (svg3 3D primitives); other SVG 1.1 elements round-trip as `ElementKind::Unknown` until they are specialised. Pure Rust, no GPU dependencies.
 - `svg3-style/`: runtime CSS parsing + style resolution via [Stylo](https://crates.io/crates/stylo). The planned integration implements Stylo's `TElement`/`TNode`/`TDocument` traits over `svg3-dom`; **[Blitz (`blitz-dom`)](https://github.com/DioxusLabs/blitz) is the canonical reference** for driving Stylo over a custom DOM. Currently a skeleton.
-- `svg3-render/`: turns a parsed scene into GPU geometry with [wgpu](https://crates.io/crates/wgpu) — `build_scene` tessellates `<rect>` into a `Mesh`, and `Renderer::render_to_image` rasterises it headlessly to an `Image`. The Stylo-driven styled-scene path and the windowed-surface path are still to come.
+- `svg3-render/`: turns a parsed scene into GPU geometry with [wgpu](https://crates.io/crates/wgpu) — `build_scene` tessellates `<rect>` and `<circle>` into a `Mesh`, and `Renderer::render_to_image` rasterises it headlessly to an `Image`. Length parsing and `fill` resolution shared by the basic-shape modules live in `shape.rs`. The Stylo-driven styled-scene path and the windowed-surface path are still to come.
 - `svg3/`: Umbrella crate. Re-exports the layers and exposes the public `parse → render` facade.
 - `app-macos/`: native macOS demo binary (`svg3-macos`). A winit 0.30 event loop driving a wgpu (Metal) surface that clears to a solid colour. Plus `app-macos/macos/Info.plist` and `scripts/bundle-macos.sh` for assembling a `.app`. Does **not** depend on `svg3` yet — wiring the demo window to render real documents is a later milestone.
 
@@ -89,8 +89,9 @@ so a bench file just writes `use criterion::*;` and both `cargo bench` and
 
 Only crates with real work to measure ship benches. Today that is
 `svg3-dom`'s `parse` (XML parsing) and `svg3-render`'s `tessellate`
-(`<rect>` tessellation via `build_scene`). The style crate is still a
-skeleton, so benches for it are out of scope until the Stylo cascade lands.
+(`<rect>` and `<circle>` tessellation via `build_scene`). The style crate
+is still a skeleton, so benches for it are out of scope until the Stylo
+cascade lands.
 
 ## Maintaining this file
 

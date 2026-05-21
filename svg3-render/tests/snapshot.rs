@@ -1,10 +1,11 @@
-//! End-to-end snapshot tests for `<rect>` rendering.
+//! End-to-end snapshot tests for `<rect>` and `<circle>` rendering.
 //!
 //! Each case parses an svg3 document modeled on the SVG WPT `shapes/rect-*`
-//! reference tests, renders it headlessly with [`Renderer::render_to_image`],
-//! and compares the result against a committed golden PNG in
-//! `tests/snapshots/`. Those PNGs are the reviewable snapshots — open them in
-//! a pull request to see what the renderer produces.
+//! and `shapes/circle-*` reference tests, renders it headlessly with
+//! [`Renderer::render_to_image`], and compares the result against a
+//! committed golden PNG in `tests/snapshots/`. Those PNGs are the
+//! reviewable snapshots — open them in a pull request to see what the
+//! renderer produces.
 //!
 //! After an intentional rendering change, regenerate the goldens and review
 //! the updated images in the diff:
@@ -73,10 +74,35 @@ const CASES: &[Case] = &[
         name: "rect-hex-fill",
         svg: r##"<svg><rect x="18" y="18" width="64" height="64" fill="#11aa55"/></svg>"##,
     },
+    // WPT `shapes/circle-*`: a basic filled circle.
+    Case {
+        name: "circle-fill",
+        svg: r#"<svg><circle cx="50" cy="50" r="40" fill="blue"/></svg>"#,
+    },
+    // A circle with no `fill` — SVG 1.1's initial value is opaque black.
+    Case {
+        name: "circle-default-fill",
+        svg: r#"<svg><circle cx="50" cy="50" r="35"/></svg>"#,
+    },
+    // [SVG11] §9.3: a zero-radius circle is not rendered.
+    Case {
+        name: "circle-zero-radius",
+        svg: r#"<svg><circle cx="50" cy="50" r="0" fill="blue"/></svg>"#,
+    },
+    // Painter's order: a later `<circle>` paints over an earlier one.
+    Case {
+        name: "circle-overlap",
+        svg: r#"<svg><circle cx="38" cy="38" r="32" fill="blue"/><circle cx="62" cy="62" r="32" fill="red"/></svg>"#,
+    },
+    // A hexadecimal `fill` colour.
+    Case {
+        name: "circle-hex-fill",
+        svg: r##"<svg><circle cx="50" cy="50" r="38" fill="#11aa55"/></svg>"##,
+    },
 ];
 
 #[test]
-fn rect_snapshots_match_references() {
+fn shape_snapshots_match_references() {
     let renderer = Renderer::new();
     let config = RenderConfig {
         width: CANVAS,

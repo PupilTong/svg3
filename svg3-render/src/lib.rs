@@ -3,15 +3,18 @@
 //! Turns a parsed [`svg3_dom`] document into GPU geometry and rasterises it
 //! with [wgpu](https://crates.io/crates/wgpu).
 //!
-//! This milestone implements the SVG 1.1 `<rect>` basic shape:
-//! [`build_scene`] tessellates every `<rect>` in a document into a [`Mesh`],
-//! and [`Renderer::render_to_image`] rasterises that mesh headlessly — no
-//! window or swapchain — into an [`Image`]. `<rect>` is two-dimensional, so
-//! geometry is placed on the default surface through the orthographic
-//! [`RenderConfig::projection`] ("the default camera") rather than the 3D
-//! perspective [`Camera`], which is reserved for `<cube>`/`<ellipsoid>`.
+//! This milestone implements the SVG 1.1 `<rect>` and `<circle>` basic
+//! shapes: [`build_scene`] tessellates every such shape in a document into
+//! a [`Mesh`], and [`Renderer::render_to_image`] rasterises that mesh
+//! headlessly — no window or swapchain — into an [`Image`]. Basic shapes
+//! are two-dimensional, so geometry is placed on the default surface
+//! through the orthographic [`RenderConfig::projection`] ("the default
+//! camera") rather than the 3D perspective [`Camera`], which is reserved
+//! for `<cube>`/`<ellipsoid>`.
 
+mod circle;
 mod rect;
+mod shape;
 
 use glam::{Mat4, Vec3};
 use svg3_dom::{Document, ElementKind};
@@ -156,14 +159,15 @@ impl Image {
     }
 }
 
-/// Walk `document` and tessellate every `<rect>` into one combined [`Mesh`].
+/// Walk `document` and tessellate every `<rect>` and `<circle>` into one
+/// combined [`Mesh`].
 ///
 /// The mesh is in SVG user space (origin top-left, y-down, `z = 0`).
-/// Rectangles are appended in document order, so a later `<rect>` paints
-/// over an earlier one. A `<rect>` that is not rendered — zero/negative
-/// size, or `fill="none"` — contributes nothing. `transform` and grouping
-/// are not applied yet, so a `<rect>` is placed at its own `x`/`y`
-/// regardless of any ancestor `<g>`.
+/// Shapes are appended in document order, so a later shape paints over an
+/// earlier one. A shape that is not rendered — a degenerate size, or
+/// `fill="none"` — contributes nothing. `transform` and grouping are not
+/// applied yet, so a shape is placed at its own coordinates regardless of
+/// any ancestor `<g>`.
 pub fn build_scene(document: &Document) -> Mesh {
     let mut mesh = Mesh::default();
     // Pre-order DFS; children pushed in reverse so they pop in document
@@ -171,13 +175,24 @@ pub fn build_scene(document: &Document) -> Mesh {
     let mut stack = vec![document.root()];
     while let Some(id) = stack.pop() {
         let node = document.node(id);
-        if node.element.kind == ElementKind::Rect {
-            if let (Some(geo), Some(color)) = (
-                rect::resolve_rect(&node.element),
-                rect::resolve_fill(&node.element),
-            ) {
-                mesh.append(rect::tessellate_rect(&geo, color));
+        match &node.element.kind {
+            ElementKind::Rect => {
+                if let (Some(geo), Some(color)) = (
+                    rect::resolve_rect(&node.element),
+                    shape::resolve_fill(&node.element),
+                ) {
+                    mesh.append(rect::tessellate_rect(&geo, color));
+                }
             }
+            ElementKind::Circle => {
+                if let (Some(geo), Some(color)) = (
+                    circle::resolve_circle(&node.element),
+                    shape::resolve_fill(&node.element),
+                ) {
+                    mesh.append(circle::tessellate_circle(&geo, color));
+                }
+            }
+            _ => {}
         }
         stack.extend(node.children.iter().rev().copied());
     }
@@ -194,8 +209,8 @@ impl Renderer {
         Self
     }
 
-    /// Render every `<rect>` in `document` headlessly into an [`Image`] of
-    /// `config.width × config.height` pixels.
+    /// Render every `<rect>` and `<circle>` in `document` headlessly into an
+    /// [`Image`] of `config.width × config.height` pixels.
     ///
     /// Brings up a wgpu device with no surface, rasterises the tessellated
     /// scene into an offscreen sRGB texture, and reads the pixels back. The
@@ -273,7 +288,7 @@ impl Renderer {
         });
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("svg3 rect pass"),
+                label: Some("svg3 shape pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     depth_slice: None,
@@ -351,7 +366,7 @@ fn acquire_gpu() -> Result<(wgpu::Device, wgpu::Queue), RenderError> {
 fn build_pipeline(device: &wgpu::Device) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("svg3 rect pipeline"),
+        label: Some("svg3 shape pipeline"),
         layout: None,
         vertex: wgpu::VertexState {
             module: &shader,
@@ -514,9 +529,20 @@ mod tests {
     }
 
     #[test]
-    fn build_scene_is_empty_without_rects() {
+    fn build_scene_is_empty_without_shapes() {
         let document = svg3_dom::parse("<svg><g/></svg>").unwrap();
         assert!(build_scene(&document).is_empty());
+    }
+
+    #[test]
+    fn build_scene_tessellates_circle() {
+        // A `<circle>` is dispatched to the circle tessellator and
+        // contributes a centre-pivoted triangle fan to the combined mesh.
+        let document = svg3_dom::parse(r#"<svg><circle cx="20" cy="20" r="10"/></svg>"#).unwrap();
+        let mesh = build_scene(&document);
+        assert!(!mesh.is_empty());
+        // Fan topology: a centre vertex plus one vertex per fan triangle.
+        assert_eq!(mesh.vertices.len(), mesh.indices.len() / 3 + 1);
     }
 
     #[test]
@@ -547,6 +573,35 @@ mod tests {
             "centre pixel not blue: {centre:?}"
         );
         // A pixel outside the rect keeps the transparent clear colour.
+        assert_eq!(image.pixel(2, 2)[3], 0, "background should be transparent");
+    }
+
+    #[test]
+    fn render_to_image_draws_circle() {
+        // A blue circle centred on an otherwise empty surface.
+        let document =
+            svg3_dom::parse(r#"<svg><circle cx="32" cy="32" r="20" fill="blue"/></svg>"#).unwrap();
+        let config = RenderConfig {
+            width: 64,
+            height: 64,
+            ..RenderConfig::default()
+        };
+        let image = match Renderer::new().render_to_image(&document, config) {
+            Ok(image) => image,
+            Err(RenderError::NoAdapter) => {
+                eprintln!("skipping render_to_image_draws_circle: no GPU adapter");
+                return;
+            }
+            Err(e) => panic!("headless render failed: {e}"),
+        };
+        assert_eq!((image.width, image.height), (64, 64));
+        // The circle's centre pixel is blue.
+        let centre = image.pixel(32, 32);
+        assert!(
+            centre[2] > 200 && centre[0] < 60 && centre[1] < 60,
+            "centre pixel not blue: {centre:?}"
+        );
+        // A corner pixel lies outside the disc — the transparent clear colour.
         assert_eq!(image.pixel(2, 2)[3], 0, "background should be transparent");
     }
 }

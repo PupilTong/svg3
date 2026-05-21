@@ -7,9 +7,9 @@
 //! - [`render`] — paint the styled scene with wgpu.
 //!
 //! Status: early scaffolding. [`render_str`] wires the layers. [`dom`]
-//! parsing and [`render`]'s `<rect>` path are implemented, but [`style`] is
-//! still a skeleton, so `render_str` currently surfaces the style stage's
-//! "not implemented" error.
+//! parsing and [`render`]'s `<rect>`/`<circle>` path are implemented, but
+//! [`style`] is still a skeleton, so `render_str` currently surfaces the
+//! style stage's "not implemented" error.
 
 pub use svg3_dom as dom;
 pub use svg3_render as render;
@@ -36,7 +36,7 @@ pub enum Error {
 /// This is the intended public entry point. The parse and render stages are
 /// implemented, but style resolution is still a scaffold, so the full
 /// pipeline currently returns [`style::StyleError::NotImplemented`]. To
-/// render `<rect>` geometry today, use [`render::build_scene`] /
+/// render `<rect>`/`<circle>` geometry today, use [`render::build_scene`] /
 /// [`render::Renderer::render_to_image`] directly.
 pub fn render_str(input: &str, config: render::RenderConfig) -> Result<render::Image, Error> {
     let document = dom::parse(input)?;
