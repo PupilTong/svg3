@@ -20,7 +20,7 @@
 use std::path::{Path, PathBuf};
 
 use svg3_dom::parse;
-use svg3_render::{Image, RenderConfig, RenderError, Renderer};
+use svg3_render::{Camera, Image, RenderConfig, RenderError, Renderer};
 
 /// Side length of the default square render target, in pixels.
 const CANVAS: u32 = 100;
@@ -40,6 +40,8 @@ struct Case {
     width: u32,
     /// Render-target height, in pixels.
     height: u32,
+    /// Optional 3D camera; `None` renders 2D content flat.
+    camera: Option<Camera>,
 }
 
 impl Case {
@@ -50,6 +52,7 @@ impl Case {
             svg,
             width: CANVAS,
             height: CANVAS,
+            camera: None,
         }
     }
 
@@ -60,87 +63,124 @@ impl Case {
             svg,
             width,
             height,
+            camera: None,
         }
+    }
+
+    /// The same case viewed through `camera` instead of drawn flat.
+    fn with_camera(mut self, camera: Camera) -> Self {
+        self.camera = Some(camera);
+        self
     }
 }
 
-const CASES: &[Case] = &[
-    // WPT `shapes/rect-01`: a basic filled rectangle.
-    Case::square(
-        "rect-fill",
-        r#"<svg><rect x="10" y="10" width="80" height="80" fill="blue"/></svg>"#,
-    ),
-    // A rectangle with no `fill` — SVG 1.1's initial value is opaque black.
-    Case::square(
-        "rect-default-fill",
-        r#"<svg><rect x="20" y="20" width="60" height="50"/></svg>"#,
-    ),
-    // WPT `shapes/rect-03`: rounded corners via `rx`/`ry`.
-    Case::square(
-        "rect-rounded",
-        r#"<svg><rect x="10" y="10" width="80" height="80" rx="16" ry="16" fill="blue"/></svg>"#,
-    ),
-    // WPT `import/shapes-rect-06`: `rx`/`ry` over half the side are clamped —
-    // here to a fully-rounded "stadium".
-    Case::square(
-        "rect-rounded-clamped",
-        r#"<svg><rect x="15" y="30" width="70" height="40" rx="80" ry="80" fill="blue"/></svg>"#,
-    ),
-    // WPT `shapes/rect-05`: a zero-width rectangle is not rendered.
-    Case::square(
-        "rect-zero-size",
-        r#"<svg><rect x="30" y="30" width="0" height="40" fill="blue"/></svg>"#,
-    ),
-    // Painter's order: a later `<rect>` paints over an earlier one.
-    Case::square(
-        "rect-overlap",
-        r#"<svg><rect x="10" y="10" width="55" height="55" fill="blue"/><rect x="40" y="40" width="50" height="50" fill="red"/></svg>"#,
-    ),
-    // A hexadecimal `fill` colour.
-    Case::square(
-        "rect-hex-fill",
-        r##"<svg><rect x="18" y="18" width="64" height="64" fill="#11aa55"/></svg>"##,
-    ),
-    // WPT `shapes/circle-*`: a basic filled circle.
-    Case::square(
-        "circle-fill",
-        r#"<svg><circle cx="50" cy="50" r="40" fill="blue"/></svg>"#,
-    ),
-    // A circle with no `fill` — SVG 1.1's initial value is opaque black.
-    Case::square(
-        "circle-default-fill",
-        r#"<svg><circle cx="50" cy="50" r="35"/></svg>"#,
-    ),
-    // [SVG11] §9.3: a zero-radius circle is not rendered.
-    Case::square(
-        "circle-zero-radius",
-        r#"<svg><circle cx="50" cy="50" r="0" fill="blue"/></svg>"#,
-    ),
-    // Painter's order: a later `<circle>` paints over an earlier one.
-    Case::square(
-        "circle-overlap",
-        r#"<svg><circle cx="38" cy="38" r="32" fill="blue"/><circle cx="62" cy="62" r="32" fill="red"/></svg>"#,
-    ),
-    // A hexadecimal `fill` colour.
-    Case::square(
-        "circle-hex-fill",
-        r##"<svg><circle cx="50" cy="50" r="38" fill="#11aa55"/></svg>"##,
-    ),
-    // The canonical SVG sample, rendered at its declared 300×200 size. The
-    // `<rect width="100%">` exercises percentage lengths; the `<text>` is
-    // parsed but not yet rendered (text rendering is a separate milestone),
-    // so the golden shows a red ground with a centred green disc.
-    Case::sized(
-        "svg-rect-circle-text",
-        r#"<svg version="1.1" width="300" height="200" xmlns="http://www.w3.org/2000/svg">
+/// All snapshot cases: the 2D shape references, then the 3D camera views.
+fn cases() -> Vec<Case> {
+    // A deliberately asymmetric scene — a yellow disc near the top-left and
+    // a red panel near the bottom-right over a navy ground — so a camera
+    // view's orientation (upright? mirrored?) is unambiguous.
+    const CAMERA_SCENE: &str = r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><circle cx="30" cy="28" r="18" fill="#f2c14e"/><rect x="52" y="56" width="36" height="32" fill="#c14b2b"/></svg>"##;
+
+    // Straight-on reference view, framing the document head-on.
+    let front = Camera::facing(100, 100);
+    // Pan: slide the eye and its target together along +X — the scene
+    // translates across the frame without foreshortening.
+    let mut pan = Camera::facing(100, 100);
+    pan.eye.x += 24.0;
+    pan.target.x += 24.0;
+    // Angled: move the eye to one side, still aimed at the document centre —
+    // an oblique view with visible perspective foreshortening.
+    let mut angled = Camera::facing(100, 100);
+    angled.eye.x += 60.0;
+    // Dolly: push the eye toward the scene along -Z — a perspective zoom-in.
+    let mut dolly = Camera::facing(100, 100);
+    dolly.eye.z *= 0.6;
+
+    vec![
+        // WPT `shapes/rect-01`: a basic filled rectangle.
+        Case::square(
+            "rect-fill",
+            r#"<svg><rect x="10" y="10" width="80" height="80" fill="blue"/></svg>"#,
+        ),
+        // A rectangle with no `fill` — SVG 1.1's initial value is opaque black.
+        Case::square(
+            "rect-default-fill",
+            r#"<svg><rect x="20" y="20" width="60" height="50"/></svg>"#,
+        ),
+        // WPT `shapes/rect-03`: rounded corners via `rx`/`ry`.
+        Case::square(
+            "rect-rounded",
+            r#"<svg><rect x="10" y="10" width="80" height="80" rx="16" ry="16" fill="blue"/></svg>"#,
+        ),
+        // WPT `import/shapes-rect-06`: `rx`/`ry` over half the side are clamped —
+        // here to a fully-rounded "stadium".
+        Case::square(
+            "rect-rounded-clamped",
+            r#"<svg><rect x="15" y="30" width="70" height="40" rx="80" ry="80" fill="blue"/></svg>"#,
+        ),
+        // WPT `shapes/rect-05`: a zero-width rectangle is not rendered.
+        Case::square(
+            "rect-zero-size",
+            r#"<svg><rect x="30" y="30" width="0" height="40" fill="blue"/></svg>"#,
+        ),
+        // Painter's order: a later `<rect>` paints over an earlier one.
+        Case::square(
+            "rect-overlap",
+            r#"<svg><rect x="10" y="10" width="55" height="55" fill="blue"/><rect x="40" y="40" width="50" height="50" fill="red"/></svg>"#,
+        ),
+        // A hexadecimal `fill` colour.
+        Case::square(
+            "rect-hex-fill",
+            r##"<svg><rect x="18" y="18" width="64" height="64" fill="#11aa55"/></svg>"##,
+        ),
+        // WPT `shapes/circle-*`: a basic filled circle.
+        Case::square(
+            "circle-fill",
+            r#"<svg><circle cx="50" cy="50" r="40" fill="blue"/></svg>"#,
+        ),
+        // A circle with no `fill` — SVG 1.1's initial value is opaque black.
+        Case::square(
+            "circle-default-fill",
+            r#"<svg><circle cx="50" cy="50" r="35"/></svg>"#,
+        ),
+        // [SVG11] §9.3: a zero-radius circle is not rendered.
+        Case::square(
+            "circle-zero-radius",
+            r#"<svg><circle cx="50" cy="50" r="0" fill="blue"/></svg>"#,
+        ),
+        // Painter's order: a later `<circle>` paints over an earlier one.
+        Case::square(
+            "circle-overlap",
+            r#"<svg><circle cx="38" cy="38" r="32" fill="blue"/><circle cx="62" cy="62" r="32" fill="red"/></svg>"#,
+        ),
+        // A hexadecimal `fill` colour.
+        Case::square(
+            "circle-hex-fill",
+            r##"<svg><circle cx="50" cy="50" r="38" fill="#11aa55"/></svg>"##,
+        ),
+        // The canonical SVG sample, rendered at its declared 300×200 size. The
+        // `<rect width="100%">` exercises percentage lengths; the `<text>` is
+        // parsed but not yet rendered (text rendering is a separate milestone),
+        // so the golden shows a red ground with a centred green disc.
+        Case::sized(
+            "svg-rect-circle-text",
+            r#"<svg version="1.1" width="300" height="200" xmlns="http://www.w3.org/2000/svg">
   <rect width="100%" height="100%" fill="red" />
   <circle cx="150" cy="100" r="80" fill="green" />
   <text x="150" y="125" font-size="60" text-anchor="middle" fill="white">SVG</text>
 </svg>"#,
-        300,
-        200,
-    ),
-];
+            300,
+            200,
+        ),
+        // The movable 3D camera: one asymmetric scene viewed from four
+        // positions. `camera-front` is the upright, head-on reference; the
+        // others pan, tilt and dolly the eye through 3D space.
+        Case::square("camera-front", CAMERA_SCENE).with_camera(front),
+        Case::square("camera-pan", CAMERA_SCENE).with_camera(pan),
+        Case::square("camera-angled", CAMERA_SCENE).with_camera(angled),
+        Case::square("camera-dolly", CAMERA_SCENE).with_camera(dolly),
+    ]
+}
 
 #[test]
 fn shape_snapshots_match_references() {
@@ -150,11 +190,12 @@ fn shape_snapshots_match_references() {
     let mut updated: Vec<&str> = Vec::new();
     let mut failures: Vec<String> = Vec::new();
 
-    for case in CASES {
+    for case in cases() {
         let document = parse(case.svg).expect("snapshot fixture should parse");
         let config = RenderConfig {
             width: case.width,
             height: case.height,
+            camera: case.camera,
             ..RenderConfig::default()
         };
         let image = match renderer.render_to_image(&document, config) {
