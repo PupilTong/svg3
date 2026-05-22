@@ -2,9 +2,10 @@
 //!
 //! Each case parses an svg3 document — the SVG WPT `shapes/rect-*`,
 //! `shapes/circle-*`, `shapes/ellipse-*`, and `shapes/polygon-*` reference
-//! tests, plus polyline fill, line, path, mixed-shape, and canonical SVG samples —
-//! renders it headlessly with [`Renderer::render_to_image`], and compares
-//! the result against a committed golden PNG in `tests/snapshots/`. Those
+//! tests, plus polyline fill, line, path, Gaussian blur filters, mixed-shape,
+//! and canonical SVG samples — renders it headlessly with
+//! [`Renderer::render_to_image`], and compares the result against a committed
+//! golden PNG in `tests/snapshots/`. Those
 //! PNGs are the reviewable snapshots — open them in a pull request to see
 //! what the renderer produces.
 //!
@@ -268,6 +269,57 @@ fn cases() -> Vec<Case> {
         Case::square(
             "basic-shapes-overlap",
             r##"<svg><rect x="8" y="8" width="84" height="84" fill="#13294b"/><circle cx="36" cy="36" r="22" fill="#f2c14e"/><ellipse cx="62" cy="62" rx="28" ry="18" fill="#c14b2b"/><line x1="18" y1="80" x2="82" y2="20" stroke="#ffffff" stroke-width="6"/></svg>"##,
+        ),
+        // SVG filters: referenced `<filter>` definitions with
+        // `<feGaussianBlur>` render their target subtree into an offscreen GPU
+        // texture, blur it, and composite it back in painter order.
+        Case::square(
+            "filter-blur-rect",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="soft"><feGaussianBlur stdDeviation="4"/></filter><rect x="30" y="30" width="40" height="40" fill="#f2c14e" filter="url(#soft)"/></svg>"##,
+        ),
+        Case::square(
+            "filter-blur-circle",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="soft"><feGaussianBlur stdDeviation="5"/></filter><circle cx="50" cy="50" r="24" fill="#11aa55" filter="url(#soft)"/></svg>"##,
+        ),
+        Case::square(
+            "filter-blur-ellipse",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="soft"><feGaussianBlur stdDeviation="3"/></filter><ellipse cx="50" cy="50" rx="34" ry="18" fill="#c14b2b" filter="url(#soft)"/></svg>"##,
+        ),
+        Case::square(
+            "filter-blur-path",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="soft"><feGaussianBlur stdDeviation="3"/></filter><path d="M 22 74 C 22 22 78 22 78 74 Q 50 90 22 74 Z" fill="#2563eb" filter="url(#soft)"/></svg>"##,
+        ),
+        Case::square(
+            "filter-blur-line",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="soft"><feGaussianBlur stdDeviation="3"/></filter><line x1="18" y1="78" x2="82" y2="22" stroke="#ffffff" stroke-width="8" filter="url(#soft)"/></svg>"##,
+        ),
+        Case::square(
+            "filter-blur-horizontal",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="wide"><feGaussianBlur stdDeviation="8 0"/></filter><rect x="38" y="30" width="24" height="40" fill="#f2c14e" filter="url(#wide)"/></svg>"##,
+        ),
+        Case::square(
+            "filter-blur-vertical",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="tall"><feGaussianBlur stdDeviation="0 8"/></filter><rect x="30" y="38" width="40" height="24" fill="#f2c14e" filter="url(#tall)"/></svg>"##,
+        ),
+        Case::square(
+            "filter-blur-two-axis",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="wide-soft"><feGaussianBlur stdDeviation="7 2"/></filter><circle cx="50" cy="50" r="19" fill="#c14b2b" filter="url(#wide-soft)"/></svg>"##,
+        ),
+        Case::square(
+            "filter-blur-group",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="soft"><feGaussianBlur stdDeviation="4"/></filter><g filter="url(#soft)"><rect x="24" y="24" width="26" height="46" fill="#c14b2b"/><circle cx="62" cy="42" r="18" fill="#2563eb"/></g></svg>"##,
+        ),
+        Case::square(
+            "filter-blur-painter-order",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="soft"><feGaussianBlur stdDeviation="5"/></filter><circle cx="44" cy="50" r="26" fill="#c14b2b" filter="url(#soft)"/><rect x="48" y="26" width="30" height="48" fill="#11aa55"/></svg>"##,
+        ),
+        Case::square(
+            "filter-blur-quoted-url",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="soft"><feGaussianBlur stdDeviation="4"/></filter><rect x="28" y="28" width="44" height="44" fill="#2563eb" filter='url("#soft")'/></svg>"##,
+        ),
+        Case::square(
+            "filter-blur-zero",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="none"><feGaussianBlur stdDeviation="0"/></filter><rect x="26" y="26" width="48" height="48" fill="#f2c14e" filter="url(#none)"/></svg>"##,
         ),
         // The canonical SVG sample, rendered at its declared 300×200 size. The
         // `<rect width="100%">` exercises percentage lengths; the `<text>` is

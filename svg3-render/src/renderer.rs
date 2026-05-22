@@ -1,23 +1,28 @@
 //! The wgpu [`Renderer`] and its render paths.
 //!
-//! The [`Renderer`] owns and caches the wgpu device, queue, render pipeline
-//! and bind-group layout. It drives two paths over the same GPU state: the
+//! The [`Renderer`] owns and caches the wgpu device, queue, render pipelines
+//! and bind-group layouts. It drives two paths over the same GPU state: the
 //! headless [`Renderer::render_to_image`], which rasterises a document into
-//! an [`Image`], and the caller-owned windowed pass built from
-//! [`Renderer::create_scene`] + [`Renderer::draw`]. A tessellated scene's
-//! GPU buffers live in [`GpuScene`].
+//! an [`Image`] and applies supported filter passes, and the caller-owned
+//! windowed pass built from [`Renderer::create_scene`] + [`Renderer::draw`].
+//! A tessellated scene's GPU buffers live in [`GpuScene`].
 
 use glam::Mat4;
 use svg3_dom::Document;
 use thiserror::Error;
 use wgpu::util::DeviceExt;
 
+use crate::filters::GaussianBlur;
 use crate::mesh::VERTEX_ATTRIBUTES;
-use crate::{build_scene, document_viewport, Mesh, RenderConfig, Vertex, Viewport};
+use crate::scene::{build_render_plan, RenderOp};
+use crate::{document_viewport, Mesh, RenderConfig, Vertex, Viewport};
 
 /// Texture format the headless renderer draws into. sRGB-encoded so linear
 /// vertex colours are stored correctly; read back as `RGBA8`.
 const TARGET_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+
+/// Largest one-sided kernel radius used by the GPU Gaussian blur pass.
+const MAX_BLUR_RADIUS: u32 = 64;
 
 /// Uniform data consumed by `shader.wgsl`.
 #[repr(C)]
@@ -25,6 +30,45 @@ const TARGET_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 struct TransformUniform {
     /// Column-major view-projection matrix, matching WGSL matrix layout.
     view_projection: [[f32; 4]; 4],
+}
+
+/// Uniform data consumed by `filter.wgsl`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct FilterUniform {
+    /// One source texel in normalised texture coordinates.
+    texel_size: [f32; 2],
+    /// Blur axis: `[1, 0]` for horizontal, `[0, 1]` for vertical.
+    direction: [f32; 2],
+    /// Gaussian standard deviation for this axis, in render pixels.
+    sigma: f32,
+    /// One-sided sample radius, derived from `sigma`.
+    radius: u32,
+    /// Explicit padding so the Rust and WGSL uniform layouts stay aligned.
+    _pad: [u32; 2],
+}
+
+impl FilterUniform {
+    fn blur(width: u32, height: u32, direction: [f32; 2], sigma: f32) -> Self {
+        let radius = (sigma * 3.0).ceil().clamp(0.0, MAX_BLUR_RADIUS as f32) as u32;
+        Self {
+            texel_size: [1.0 / width as f32, 1.0 / height as f32],
+            direction,
+            sigma,
+            radius,
+            _pad: [0; 2],
+        }
+    }
+
+    fn composite(width: u32, height: u32) -> Self {
+        Self {
+            texel_size: [1.0 / width as f32, 1.0 / height as f32],
+            direction: [0.0, 0.0],
+            sigma: 0.0,
+            radius: 0,
+            _pad: [0; 2],
+        }
+    }
 }
 
 impl TransformUniform {
@@ -79,6 +123,12 @@ pub struct GpuScene {
     index_count: u32,
 }
 
+/// One offscreen texture used by the GPU filter passes.
+struct FilterTexture {
+    _texture: wgpu::Texture,
+    view: wgpu::TextureView,
+}
+
 /// Renders SVG3 documents to GPU images and into caller-owned render passes.
 ///
 /// Owns and caches the wgpu device, queue, render pipeline and bind-group
@@ -90,6 +140,10 @@ pub struct Renderer {
     queue: wgpu::Queue,
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
+    filter_bind_group_layout: wgpu::BindGroupLayout,
+    blur_pipeline: wgpu::RenderPipeline,
+    composite_pipeline: wgpu::RenderPipeline,
+    filter_sampler: wgpu::Sampler,
     format: wgpu::TextureFormat,
 }
 
@@ -121,11 +175,42 @@ impl Renderer {
     ) -> Self {
         let pipeline = build_pipeline(&device, format);
         let bind_group_layout = pipeline.get_bind_group_layout(0);
+        let filter_bind_group_layout = build_filter_bind_group_layout(&device);
+        let blur_pipeline = build_filter_pipeline(
+            &device,
+            format,
+            &filter_bind_group_layout,
+            "svg3 Gaussian blur pipeline",
+            "fs_blur",
+            None,
+        );
+        let composite_pipeline = build_filter_pipeline(
+            &device,
+            format,
+            &filter_bind_group_layout,
+            "svg3 filter composite pipeline",
+            "fs_composite",
+            Some(premultiplied_alpha_blend()),
+        );
+        let filter_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("svg3 filter sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
         Self {
             device,
             queue,
             pipeline,
             bind_group_layout,
+            filter_bind_group_layout,
+            blur_pipeline,
+            composite_pipeline,
+            filter_sampler,
             format,
         }
     }
@@ -242,8 +327,8 @@ impl Renderer {
             width: width as f32,
             height: height as f32,
         };
-        let mesh = build_scene(document, document_viewport(document, target_viewport));
-        let scene = self.create_scene(&mesh, config.view_projection());
+        let plan = build_render_plan(document, document_viewport(document, target_viewport));
+        let view_projection = config.view_projection();
 
         let extent = wgpu::Extent3d {
             width,
@@ -278,8 +363,10 @@ impl Renderer {
                 label: Some("svg3 headless encoder"),
             });
         {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("svg3 shape pass"),
+            // Execute the target clear once before replaying the render plan;
+            // later direct and filtered ops load from this cleared texture.
+            let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("svg3 target clear pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     depth_slice: None,
@@ -291,8 +378,24 @@ impl Renderer {
                 })],
                 ..Default::default()
             });
-            if let Some(scene) = &scene {
-                self.draw(&mut pass, scene);
+        }
+        for op in &plan {
+            match op {
+                RenderOp::Mesh(mesh) => {
+                    if let Some(scene) = self.create_scene(mesh, view_projection) {
+                        self.encode_scene_draw(&mut encoder, &view, &scene, "svg3 shape pass");
+                    }
+                }
+                RenderOp::GaussianBlur { mesh, blur } => {
+                    self.encode_gaussian_blur(
+                        &mut encoder,
+                        &view,
+                        mesh,
+                        *blur,
+                        view_projection,
+                        extent,
+                    );
+                }
             }
         }
         encoder.copy_texture_to_buffer(
@@ -320,6 +423,195 @@ impl Renderer {
             height,
             pixels,
         })
+    }
+
+    fn encode_scene_draw(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        scene: &GpuScene,
+        label: &str,
+    ) {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some(label),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            ..Default::default()
+        });
+        self.draw(&mut pass, scene);
+    }
+
+    fn encode_gaussian_blur(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        mesh: &Mesh,
+        blur: GaussianBlur,
+        view_projection: Mat4,
+        extent: wgpu::Extent3d,
+    ) {
+        let source = self.create_filter_texture(extent, "svg3 filter source");
+        let ping = self.create_filter_texture(extent, "svg3 filter ping");
+
+        if let Some(scene) = self.create_scene(mesh, view_projection) {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("svg3 filtered shape pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &source.view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+            self.draw(&mut pass, &scene);
+        }
+
+        let mut current = &source;
+        let mut wrote_ping = false;
+        if blur.std_deviation_x > 0.0 {
+            self.encode_blur_pass(
+                encoder,
+                &source.view,
+                &ping.view,
+                extent,
+                [1.0, 0.0],
+                blur.std_deviation_x,
+            );
+            current = &ping;
+            wrote_ping = true;
+        }
+        if blur.std_deviation_y > 0.0 {
+            let destination = if wrote_ping { &source } else { &ping };
+            self.encode_blur_pass(
+                encoder,
+                &current.view,
+                &destination.view,
+                extent,
+                [0.0, 1.0],
+                blur.std_deviation_y,
+            );
+            current = destination;
+        }
+        self.encode_composite_pass(encoder, &current.view, target, extent);
+    }
+
+    fn encode_blur_pass(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        source: &wgpu::TextureView,
+        destination: &wgpu::TextureView,
+        extent: wgpu::Extent3d,
+        direction: [f32; 2],
+        sigma: f32,
+    ) {
+        let uniform = FilterUniform::blur(extent.width, extent.height, direction, sigma);
+        let bind_group = self.create_filter_bind_group(source, &uniform, "svg3 blur bind group");
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("svg3 Gaussian blur pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: destination,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            ..Default::default()
+        });
+        pass.set_pipeline(&self.blur_pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.draw(0..3, 0..1);
+    }
+
+    fn encode_composite_pass(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        source: &wgpu::TextureView,
+        destination: &wgpu::TextureView,
+        extent: wgpu::Extent3d,
+    ) {
+        let uniform = FilterUniform::composite(extent.width, extent.height);
+        let bind_group =
+            self.create_filter_bind_group(source, &uniform, "svg3 filter composite bind group");
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("svg3 filter composite pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: destination,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            ..Default::default()
+        });
+        pass.set_pipeline(&self.composite_pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.draw(0..3, 0..1);
+    }
+
+    fn create_filter_bind_group(
+        &self,
+        source: &wgpu::TextureView,
+        uniform: &FilterUniform,
+        label: &str,
+    ) -> wgpu::BindGroup {
+        let uniform_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("svg3 filter uniform"),
+                contents: bytemuck::bytes_of(uniform),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some(label),
+            layout: &self.filter_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(source),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.filter_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+            ],
+        })
+    }
+
+    fn create_filter_texture(&self, extent: wgpu::Extent3d, label: &str) -> FilterTexture {
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        FilterTexture {
+            _texture: texture,
+            view,
+        }
     }
 }
 
@@ -382,6 +674,96 @@ fn build_pipeline(device: &wgpu::Device, format: wgpu::TextureFormat) -> wgpu::R
         multiview_mask: None,
         cache: None,
     })
+}
+
+fn build_filter_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("svg3 filter bind group layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ],
+    })
+}
+
+fn build_filter_pipeline(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    bind_group_layout: &wgpu::BindGroupLayout,
+    label: &str,
+    fragment_entry_point: &str,
+    blend: Option<wgpu::BlendState>,
+) -> wgpu::RenderPipeline {
+    let shader = device.create_shader_module(wgpu::include_wgsl!("filter.wgsl"));
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("svg3 filter pipeline layout"),
+        bind_group_layouts: &[Some(bind_group_layout)],
+        immediate_size: 0,
+    });
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(label),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_fullscreen"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &[],
+        },
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some(fragment_entry_point),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+fn premultiplied_alpha_blend() -> wgpu::BlendState {
+    wgpu::BlendState {
+        color: wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+            operation: wgpu::BlendOperation::Add,
+        },
+        alpha: wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+            operation: wgpu::BlendOperation::Add,
+        },
+    }
 }
 
 /// Map the readback buffer and copy its rows into a tightly-packed
@@ -468,6 +850,14 @@ mod tests {
     }
 
     #[test]
+    fn filter_uniform_matches_wgsl_layout() {
+        assert_eq!(
+            std::mem::size_of::<FilterUniform>(),
+            8 * std::mem::size_of::<f32>()
+        );
+    }
+
+    #[test]
     fn render_to_image_draws_blue_rect() {
         // WPT `shapes/rect-01`: a blue rect on an otherwise empty surface.
         let document = svg3_dom::parse(
@@ -494,6 +884,114 @@ mod tests {
         );
         // A pixel outside the rect keeps the transparent clear colour.
         assert_eq!(image.pixel(2, 2)[3], 0, "background should be transparent");
+    }
+
+    #[test]
+    fn render_to_image_applies_gaussian_blur_filter() {
+        let filtered = svg3_dom::parse(
+            r##"<svg><filter id="soft"><feGaussianBlur stdDeviation="4"/></filter><rect x="24" y="24" width="16" height="16" fill="blue" filter="url(#soft)"/></svg>"##,
+        )
+        .unwrap();
+        let unfiltered = svg3_dom::parse(
+            r#"<svg><rect x="24" y="24" width="16" height="16" fill="blue"/></svg>"#,
+        )
+        .unwrap();
+        let config = RenderConfig {
+            width: 64,
+            height: 64,
+            ..RenderConfig::default()
+        };
+        let Some(renderer) = skip_or_renderer("render_to_image_applies_gaussian_blur_filter")
+        else {
+            return;
+        };
+
+        let blurred = renderer
+            .render_to_image(&filtered, config)
+            .expect("filtered render failed");
+        let sharp = renderer
+            .render_to_image(&unfiltered, config)
+            .expect("unfiltered render failed");
+
+        assert_eq!(
+            sharp.pixel(20, 32)[3],
+            0,
+            "control pixel is outside the rect"
+        );
+        let halo = blurred.pixel(20, 32);
+        assert!(
+            halo[3] > 8 && halo[2] > 8,
+            "blurred rect should create a blue alpha halo outside the sharp edge: {halo:?}"
+        );
+
+        let centre = blurred.pixel(32, 32);
+        assert!(
+            centre[3] > 150 && centre[2] > 80,
+            "blurred rect centre should remain visibly blue: {centre:?}"
+        );
+        assert!(
+            blurred.pixel(4, 4)[3] < 4,
+            "far-away pixels should remain transparent"
+        );
+    }
+
+    #[test]
+    fn render_to_image_applies_filter_to_group_as_one_surface() {
+        let document = svg3_dom::parse(
+            r##"<svg><filter id="soft"><feGaussianBlur stdDeviation="3"/></filter><g filter="url(#soft)"><rect x="22" y="22" width="10" height="20" fill="red"/><rect x="32" y="22" width="10" height="20" fill="blue"/></g></svg>"##,
+        )
+        .unwrap();
+        let config = RenderConfig {
+            width: 64,
+            height: 64,
+            ..RenderConfig::default()
+        };
+        let Some(renderer) =
+            skip_or_renderer("render_to_image_applies_filter_to_group_as_one_surface")
+        else {
+            return;
+        };
+        let image = renderer
+            .render_to_image(&document, config)
+            .expect("filtered render failed");
+
+        let left_halo = image.pixel(18, 32);
+        let right_halo = image.pixel(46, 32);
+        assert!(
+            left_halo[3] > 4 && left_halo[0] > left_halo[2],
+            "group blur should carry the red side outward: {left_halo:?}"
+        );
+        assert!(
+            right_halo[3] > 4 && right_halo[2] > right_halo[0],
+            "group blur should carry the blue side outward: {right_halo:?}"
+        );
+    }
+
+    #[test]
+    fn render_to_image_ignores_filter_definitions_as_paint() {
+        let document = svg3_dom::parse(
+            r##"<svg><filter id="soft"><rect width="64" height="64" fill="red"/><feGaussianBlur stdDeviation="4"/></filter></svg>"##,
+        )
+        .unwrap();
+        let config = RenderConfig {
+            width: 64,
+            height: 64,
+            ..RenderConfig::default()
+        };
+        let Some(renderer) =
+            skip_or_renderer("render_to_image_ignores_filter_definitions_as_paint")
+        else {
+            return;
+        };
+        let image = renderer
+            .render_to_image(&document, config)
+            .expect("headless render failed");
+
+        assert_eq!(
+            image.pixel(32, 32)[3],
+            0,
+            "filter definition contents should not render directly"
+        );
     }
 
     #[test]

@@ -6,8 +6,11 @@
 //! This milestone implements the SVG 1.1 `<rect>`, `<circle>`, `<ellipse>`,
 //! `<polygon>`, `<polyline>`, `<line>`, and `<path>` shapes: [`build_scene`]
 //! tessellates every such shape in a document into a [`Mesh`], and
-//! [`Renderer::render_to_image`] rasterises that mesh headlessly — no window
-//! or swapchain — into an [`Image`]. The same [`Renderer`] also drives a
+//! [`Renderer::render_to_image`] rasterises them headlessly — no window or
+//! swapchain — into an [`Image`]. Headless rendering also supports referenced
+//! `<filter>` elements whose first supported primitive is `<feGaussianBlur>`,
+//! applying the blur on the GPU with offscreen render/composite passes. The
+//! same [`Renderer`] also drives a
 //! caller-owned windowed render pass via [`Renderer::create_scene`] and
 //! [`Renderer::draw`] — see the `app-macos` demo. Basic shapes are
 //! two-dimensional, so geometry lies in the world plane `z = 0`: by default
@@ -21,10 +24,12 @@
 //! [`Mesh`] geometry model that shapes tessellate into; `shapes` resolves
 //! and tessellates each supported element; `scene` walks the document
 //! ([`build_scene`]); `camera` holds [`RenderConfig`] and the movable 3D
-//! [`Camera`]; and `renderer` owns the wgpu [`Renderer`], its [`GpuScene`]
-//! GPU buffers, and headless [`Image`] readback.
+//! [`Camera`]; `filters` resolves supported SVG filter definitions; and
+//! `renderer` owns the wgpu [`Renderer`], its [`GpuScene`] GPU buffers,
+//! filter post-processing pipelines, and headless [`Image`] readback.
 
 mod camera;
+mod filters;
 mod mesh;
 mod renderer;
 mod scene;
