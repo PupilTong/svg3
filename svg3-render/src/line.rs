@@ -177,6 +177,18 @@ mod tests {
     }
 
     #[test]
+    fn resolve_line_resolves_percentage_stroke_width_against_diagonal() {
+        // `stroke-width` is neither horizontal nor vertical, so percentages
+        // resolve against the normalized viewport diagonal ([SVG11] §7.10).
+        let viewport = Viewport {
+            width: 300.0,
+            height: 400.0,
+        };
+        let geo = resolve_line(&line(&[("x2", "100"), ("stroke-width", "10%")]), viewport).unwrap();
+        assert_close(geo.stroke_width, 35.355_34);
+    }
+
+    #[test]
     fn resolve_line_skips_degenerate_geometry() {
         // Missing endpoints produce a zero-length segment, which the default
         // butt cap cannot render.
@@ -266,6 +278,50 @@ mod tests {
         );
     }
 
+    #[test]
+    fn tessellate_diagonal_line_keeps_winding_when_reversed() {
+        let forward = resolve_line(
+            &line(&[
+                ("x1", "10"),
+                ("y1", "20"),
+                ("x2", "40"),
+                ("y2", "60"),
+                ("stroke-width", "10"),
+            ]),
+            vp(),
+        )
+        .unwrap();
+        let reverse = LineGeometry {
+            x1: forward.x2,
+            y1: forward.y2,
+            x2: forward.x1,
+            y2: forward.y1,
+            stroke_width: forward.stroke_width,
+        };
+
+        for mesh in [
+            tessellate_line(&forward, [1.0; 4]),
+            tessellate_line(&reverse, [1.0; 4]),
+        ] {
+            for triangle in mesh.indices.chunks_exact(3) {
+                let a = mesh.vertices[triangle[0] as usize].position;
+                let b = mesh.vertices[triangle[1] as usize].position;
+                let c = mesh.vertices[triangle[2] as usize].position;
+                assert!(
+                    signed_twice_area(a, b, c) > 0.0,
+                    "line triangle should keep rect/circle winding"
+                );
+            }
+        }
+    }
+
+    fn assert_close(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() < 1e-4,
+            "expected {expected}, got {actual}"
+        );
+    }
+
     fn assert_positions_close(actual: &[[f32; 3]], expected: &[[f32; 3]]) {
         assert_eq!(actual.len(), expected.len());
         for (actual, expected) in actual.iter().zip(expected) {
@@ -276,5 +332,9 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn signed_twice_area(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> f32 {
+        (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
     }
 }

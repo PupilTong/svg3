@@ -916,10 +916,12 @@ mod tests {
 
     #[test]
     fn build_scene_tessellates_line() {
-        // A `<line>` needs stroke paint; the un-stroked second line is
-        // skipped because SVG's initial `stroke` value is `none`.
+        // A `<line>` needs renderable stroke paint; the other lines are
+        // skipped because SVG's initial `stroke` value is `none`, explicit
+        // `none` also paints nothing, and invalid stroke paint falls back to
+        // the initial `none`.
         let document = svg3_dom::parse(
-            r#"<svg><line x1="10" y1="20" x2="50" y2="20" stroke="blue" stroke-width="4"/><line x1="10" y1="40" x2="50" y2="40"/></svg>"#,
+            r#"<svg><line x1="10" y1="20" x2="50" y2="20" stroke="blue" stroke-width="4"/><line x1="10" y1="40" x2="50" y2="40"/><line x1="10" y1="50" x2="50" y2="50" stroke="none"/><line x1="10" y1="60" x2="50" y2="60" stroke="bogus"/></svg>"#,
         )
         .unwrap();
         let mesh = build_scene(&document, vp());
