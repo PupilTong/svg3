@@ -1,13 +1,12 @@
-//! End-to-end snapshot tests for `<rect>`, `<circle>`, `<ellipse>`,
-//! `<polygon>` and filled `<polyline>` rendering.
+//! End-to-end snapshot tests for basic-shape rendering.
 //!
 //! Each case parses an svg3 document — the SVG WPT `shapes/rect-*`,
-//! `shapes/circle-*`, `shapes/ellipse-*` and `shapes/polygon-*` reference
-//! tests, plus polyline fill cases and the canonical SVG sample — renders it
-//! headlessly with [`Renderer::render_to_image`], and compares the result
-//! against a committed golden PNG in `tests/snapshots/`. Those PNGs are the
-//! reviewable snapshots — open them in a pull request to see what the
-//! renderer produces.
+//! `shapes/circle-*`, `shapes/ellipse-*`, and `shapes/polygon-*` reference
+//! tests, plus polyline fill, line stroke, and canonical SVG samples —
+//! renders it headlessly with [`Renderer::render_to_image`], and compares
+//! the result against a committed golden PNG in `tests/snapshots/`. Those
+//! PNGs are the reviewable snapshots — open them in a pull request to see
+//! what the renderer produces.
 //!
 //! After an intentional rendering change, regenerate the goldens and review
 //! the updated images in the diff:
@@ -227,6 +226,12 @@ fn cases() -> Vec<Case> {
         Case::square(
             "polyline-invalid-points-skipped",
             r##"<svg><rect width="100%" height="100%" fill="#666666"/><polyline points="18,82 50%,18 82,82" fill="red"/></svg>"##,
+        ),
+        // WPT `shapes/line-*`: a stroked horizontal line. SVG's initial
+        // stroke is `none`, so this fixture declares stroke paint explicitly.
+        Case::square(
+            "line-stroke",
+            r##"<svg><line x1="10" y1="50" x2="90" y2="50" stroke="#11aa55" stroke-width="8"/></svg>"##,
         ),
         // The canonical SVG sample, rendered at its declared 300×200 size. The
         // `<rect width="100%">` exercises percentage lengths; the `<text>` is

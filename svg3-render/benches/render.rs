@@ -34,6 +34,15 @@ fn many_shapes_document() -> Document {
         svg.push_str(&format!(
             r##"<circle cx="{cx}" cy="{cy}" r="{r}" fill="#f97316"/>"##
         ));
+
+        let x1 = 4 + (i * 17) % 300;
+        let y1 = 4 + (i * 23) % 220;
+        let x2 = 4 + (i * 37) % 300;
+        let y2 = 4 + (i * 41) % 220;
+        let stroke_width = 1 + (i % 4);
+        svg.push_str(&format!(
+            r##"<line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" stroke="#e2e8f0" stroke-width="{stroke_width}"/>"##
+        ));
     }
     svg.push_str("</svg>");
     parse(&svg).expect("benchmark fixture should parse")

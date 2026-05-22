@@ -63,11 +63,11 @@ mod tests {
     }
 
     #[test]
-    fn build_scene_renders_rect_across_crates() {
+    fn build_scene_renders_line_across_crates() {
         // The render stage works without the (still-skeleton) style stage:
-        // parse a `<rect>` and tessellate it through the re-exported render
+        // parse a `<line>` and tessellate it through the re-exported render
         // API, exercising the dom -> render path end to end.
-        let document = dom::parse(r#"<svg><rect width="20" height="10"/></svg>"#).unwrap();
+        let document = dom::parse(r#"<svg><line x2="20" y2="10" stroke="blue"/></svg>"#).unwrap();
         let mesh = render::build_scene(
             &document,
             render::Viewport {

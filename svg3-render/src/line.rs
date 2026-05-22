@@ -1,0 +1,236 @@
+//! SVG 1.1 `<line>` — geometry resolution and stroke tessellation.
+//!
+//! `<line>` is a two-dimensional basic shape; per [`SPEC.md`](../../SPEC.md)
+//! §3.1 it lies in the plane `z = 0`. This module turns a parsed `<line>`
+//! [`Element`] into a stroked quad in SVG user space, applying the SVG 1.1
+//! geometry rules ([SVG11] §9.4) with the default butt line cap.
+//!
+//! Length parsing and stroke paint resolution are shared with the other
+//! basic shapes — see [`crate::shape`]. `transform`, grouping, dashed
+//! strokes, joins, caps other than the default butt cap, and CSS cascade
+//! input are not handled yet — see the crate roadmap.
+
+use svg3_dom::Element;
+
+use crate::shape::{vertex, Length, Viewport};
+use crate::Mesh;
+
+/// A `<line>`'s geometry after SVG 1.1 defaulting. All values are in SVG
+/// user units.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct LineGeometry {
+    /// Start x coordinate.
+    pub x1: f32,
+    /// Start y coordinate.
+    pub y1: f32,
+    /// End x coordinate.
+    pub x2: f32,
+    /// End y coordinate.
+    pub y2: f32,
+    /// Stroke width — always `> 0` for a resolved geometry.
+    pub stroke_width: f32,
+}
+
+/// Resolve a `<line>`'s raw attributes into a [`LineGeometry`].
+///
+/// Percentage lengths resolve against `viewport` — `x1`/`x2` against its
+/// width, `y1`/`y2` against its height, and `stroke-width` against its
+/// normalized diagonal ([SVG11] §7.10). Coordinate attributes default to
+/// `0`; `stroke-width` defaults to `1`.
+///
+/// Returns `None` when the line is not rendered: zero length, or a
+/// non-positive `stroke-width`.
+pub(crate) fn resolve_line(element: &Element, viewport: Viewport) -> Option<LineGeometry> {
+    let length = |name: &str, basis: f32| {
+        element
+            .attributes
+            .get(name)
+            .map(String::as_str)
+            .and_then(Length::parse)
+            .map(|len| len.resolve(basis))
+    };
+
+    let x1 = length("x1", viewport.width).unwrap_or(0.0);
+    let y1 = length("y1", viewport.height).unwrap_or(0.0);
+    let x2 = length("x2", viewport.width).unwrap_or(0.0);
+    let y2 = length("y2", viewport.height).unwrap_or(0.0);
+    let stroke_width = element
+        .attributes
+        .get("stroke-width")
+        .map(String::as_str)
+        .and_then(Length::parse)
+        .map(|len| len.resolve(viewport.diagonal()))
+        .unwrap_or(1.0);
+
+    if stroke_width <= 0.0 || (x2 - x1).hypot(y2 - y1) == 0.0 {
+        return None;
+    }
+
+    Some(LineGeometry {
+        x1,
+        y1,
+        x2,
+        y2,
+        stroke_width,
+    })
+}
+
+/// Tessellate a resolved line into a stroked quad [`Mesh`].
+///
+/// SVG's default `stroke-linecap` is `butt`, so the quad is not extended
+/// beyond either endpoint. Positions are in SVG user space with `z = 0`.
+pub(crate) fn tessellate_line(geo: &LineGeometry, color: [f32; 4]) -> Mesh {
+    let dx = geo.x2 - geo.x1;
+    let dy = geo.y2 - geo.y1;
+    let length = dx.hypot(dy);
+    let half_width = geo.stroke_width / 2.0;
+    let nx = -dy / length * half_width;
+    let ny = dx / length * half_width;
+
+    Mesh {
+        vertices: vec![
+            vertex(geo.x1 + nx, geo.y1 + ny, color),
+            vertex(geo.x2 + nx, geo.y2 + ny, color),
+            vertex(geo.x2 - nx, geo.y2 - ny, color),
+            vertex(geo.x1 - nx, geo.y1 - ny, color),
+        ],
+        indices: vec![0, 1, 2, 0, 2, 3],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use svg3_dom::ElementKind;
+
+    /// Build a `<line>` element carrying the given raw attributes.
+    fn line(attrs: &[(&str, &str)]) -> Element {
+        let mut element = Element::new(ElementKind::Line);
+        for (key, value) in attrs {
+            element
+                .attributes
+                .insert((*key).to_owned(), (*value).to_owned());
+        }
+        element
+    }
+
+    /// A 100×100 viewport. The geometry tests below use absolute lengths, so
+    /// the viewport value only matters for the percentage case.
+    fn vp() -> Viewport {
+        Viewport {
+            width: 100.0,
+            height: 100.0,
+        }
+    }
+
+    #[test]
+    fn resolve_line_applies_geometry_defaults() {
+        // x1/y1/x2/y2 default to 0 and stroke-width defaults to 1
+        // ([SVG11] §9.4, §11.4).
+        let geo = resolve_line(&line(&[("x2", "20"), ("y2", "10")]), vp()).unwrap();
+        assert_eq!(
+            geo,
+            LineGeometry {
+                x1: 0.0,
+                y1: 0.0,
+                x2: 20.0,
+                y2: 10.0,
+                stroke_width: 1.0,
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_line_resolves_percentage_geometry() {
+        // x coordinates resolve against viewport width; y coordinates
+        // against viewport height ([SVG11] §7.10).
+        let viewport = Viewport {
+            width: 200.0,
+            height: 100.0,
+        };
+        let geo = resolve_line(
+            &line(&[
+                ("x1", "10%"),
+                ("y1", "25%"),
+                ("x2", "50%"),
+                ("y2", "75%"),
+                ("stroke-width", "4"),
+            ]),
+            viewport,
+        )
+        .unwrap();
+        assert_eq!(
+            geo,
+            LineGeometry {
+                x1: 20.0,
+                y1: 25.0,
+                x2: 100.0,
+                y2: 75.0,
+                stroke_width: 4.0,
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_line_skips_degenerate_geometry() {
+        // Missing endpoints produce a zero-length segment, which the default
+        // butt cap cannot render.
+        assert_eq!(resolve_line(&line(&[]), vp()), None);
+        assert_eq!(
+            resolve_line(
+                &line(&[("x1", "10"), ("y1", "10"), ("x2", "10"), ("y2", "10")]),
+                vp(),
+            ),
+            None
+        );
+        assert_eq!(
+            resolve_line(
+                &line(&[
+                    ("x1", "10"),
+                    ("y1", "10"),
+                    ("x2", "30"),
+                    ("y2", "10"),
+                    ("stroke-width", "0"),
+                ]),
+                vp(),
+            ),
+            None
+        );
+        assert_eq!(
+            resolve_line(
+                &line(&[
+                    ("x1", "10"),
+                    ("y1", "10"),
+                    ("x2", "30"),
+                    ("y2", "10"),
+                    ("stroke-width", "-1"),
+                ]),
+                vp(),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn tessellate_line_is_a_butt_cap_quad() {
+        let geo = resolve_line(
+            &line(&[
+                ("x1", "10"),
+                ("y1", "20"),
+                ("x2", "50"),
+                ("y2", "20"),
+                ("stroke-width", "4"),
+            ]),
+            vp(),
+        )
+        .unwrap();
+        let mesh = tessellate_line(&geo, [0.0, 0.0, 1.0, 1.0]);
+        assert_eq!(mesh.vertices.len(), 4);
+        assert_eq!(mesh.indices, vec![0, 1, 2, 0, 2, 3]);
+        assert_eq!(mesh.vertices[0].position, [10.0, 22.0, 0.0]);
+        assert_eq!(mesh.vertices[1].position, [50.0, 22.0, 0.0]);
+        assert_eq!(mesh.vertices[2].position, [50.0, 18.0, 0.0]);
+        assert_eq!(mesh.vertices[3].position, [10.0, 18.0, 0.0]);
+        assert_eq!(mesh.vertices[0].color, [0.0, 0.0, 1.0, 1.0]);
+    }
+}
