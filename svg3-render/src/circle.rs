@@ -10,16 +10,10 @@
 //! shapes — see [`crate::shape`]. `transform` and grouping are not handled
 //! yet — see the crate roadmap.
 
-use std::f32::consts::TAU;
-
 use svg3_dom::Element;
 
-use crate::shape::{vertex, Length, Viewport};
+use crate::shape::{sdf_quad, Length, Viewport, KIND_ELLIPSE, SDF_PAD};
 use crate::Mesh;
-
-/// Segments approximating the circle's perimeter. Fixed so a circle's
-/// vertex count is deterministic.
-const CIRCLE_SEGMENTS: usize = 64;
 
 /// A `<circle>`'s geometry after SVG 1.1 defaulting. All values are in SVG
 /// user units.
@@ -63,30 +57,28 @@ pub(crate) fn resolve_circle(element: &Element, viewport: Viewport) -> Option<Ci
     Some(CircleGeometry { cx, cy, r })
 }
 
-/// Tessellate a resolved circle into a filled triangle [`Mesh`].
+/// Tessellate a resolved circle into an SDF-covered bounding quad [`Mesh`].
 ///
-/// The disc is a triangle fan from its centre over `CIRCLE_SEGMENTS`
-/// evenly-spaced perimeter points. Positions are in SVG user space with
-/// `z = 0`.
+/// The disc is a four-vertex quad padded past the radius by [`SDF_PAD`]; the
+/// fragment shader computes analytic, anti-aliased coverage from the
+/// [`KIND_ELLIPSE`] signed-distance function. Positions are in SVG user space
+/// with `z = 0`.
 pub(crate) fn tessellate_circle(geo: &CircleGeometry, color: [f32; 4]) -> Mesh {
-    // Vertex 0 is the centre; the fan pivots on it.
-    let mut vertices = Vec::with_capacity(CIRCLE_SEGMENTS + 1);
-    vertices.push(vertex(geo.cx, geo.cy, color));
-    for step in 0..CIRCLE_SEGMENTS {
-        let t = TAU * (step as f32 / CIRCLE_SEGMENTS as f32);
-        vertices.push(vertex(
-            geo.cx + geo.r * t.cos(),
-            geo.cy + geo.r * t.sin(),
-            color,
-        ));
-    }
-
-    let n = CIRCLE_SEGMENTS as u32;
-    let mut indices = Vec::with_capacity(CIRCLE_SEGMENTS * 3);
-    for i in 0..n {
-        indices.extend_from_slice(&[0, i + 1, (i + 1) % n + 1]);
-    }
-    Mesh { vertices, indices }
+    // The quad spans the radius plus the anti-aliasing pad; each corner's
+    // `local` is its offset from the centre, which the shader compares
+    // against the radius carried in `params`.
+    let ext = geo.r + SDF_PAD;
+    sdf_quad(
+        [
+            ([geo.cx - ext, geo.cy - ext], [-ext, -ext]),
+            ([geo.cx + ext, geo.cy - ext], [ext, -ext]),
+            ([geo.cx + ext, geo.cy + ext], [ext, ext]),
+            ([geo.cx - ext, geo.cy + ext], [-ext, ext]),
+        ],
+        [geo.r, geo.r, 0.0, 0.0],
+        KIND_ELLIPSE,
+        color,
+    )
 }
 
 #[cfg(test)]
@@ -155,22 +147,23 @@ mod tests {
     }
 
     #[test]
-    fn tessellate_circle_fans_within_bounds() {
+    fn tessellate_circle_is_an_sdf_quad() {
         let geo =
             resolve_circle(&circle(&[("cx", "50"), ("cy", "40"), ("r", "30")]), vp()).unwrap();
         let mesh = tessellate_circle(&geo, [0.0, 0.0, 1.0, 1.0]);
-        // Centre + one perimeter point per segment; one fan triangle per edge.
-        assert_eq!(mesh.vertices.len(), CIRCLE_SEGMENTS + 1);
-        assert_eq!(mesh.indices.len(), CIRCLE_SEGMENTS * 3);
-        // The fan pivot is the circle centre.
-        assert_eq!(mesh.vertices[0].position, [50.0, 40.0, 0.0]);
-        assert_eq!(mesh.vertices[0].color, [0.0, 0.0, 1.0, 1.0]);
-        // Every perimeter vertex sits on the circle (distance `r` from the
-        // centre), hence inside the bounding box, in the plane `z = 0`.
-        for v in &mesh.vertices[1..] {
-            let (dx, dy) = (v.position[0] - 50.0, v.position[1] - 40.0);
-            assert!((dx.hypot(dy) - 30.0).abs() < 1e-3);
+        // An SDF circle is a four-vertex bounding quad, two triangles.
+        assert_eq!(mesh.vertices.len(), 4);
+        assert_eq!(mesh.indices, vec![0, 1, 2, 0, 2, 3]);
+        for v in &mesh.vertices {
+            // The radius drives the ellipse SDF via `params`; the fill colour
+            // and the `z = 0` plane are carried on every corner.
+            assert_eq!(v.kind, KIND_ELLIPSE);
+            assert_eq!(v.params, [30.0, 30.0, 0.0, 0.0]);
+            assert_eq!(v.color, [0.0, 0.0, 1.0, 1.0]);
             assert_eq!(v.position[2], 0.0);
+            // Each corner's `local` is its offset from the circle centre —
+            // the coordinate the shader feeds to the SDF.
+            assert_eq!(v.local, [v.position[0] - 50.0, v.position[1] - 40.0]);
         }
     }
 }

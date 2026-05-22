@@ -12,7 +12,7 @@
 
 use svg3_dom::Element;
 
-use crate::shape::{resolve_stroke_width, vertex, Length, Viewport};
+use crate::shape::{resolve_stroke_width, sdf_quad, Length, Viewport, KIND_SEGMENT, SDF_PAD};
 use crate::Mesh;
 
 /// A `<line>`'s geometry after SVG 1.1 defaulting. All values are in SVG
@@ -70,31 +70,52 @@ pub(crate) fn resolve_line(element: &Element, viewport: Viewport) -> Option<Line
     })
 }
 
-/// Tessellate a resolved line into a stroked quad [`Mesh`].
+/// Tessellate a resolved line into an SDF-covered bounding quad [`Mesh`].
 ///
-/// SVG's default `stroke-linecap` is `butt`, so the quad is not extended
-/// beyond either endpoint. Positions are in SVG user space with `z = 0`.
+/// The stroke is the rotated stroke rectangle padded by [`SDF_PAD`]; the
+/// fragment shader computes analytic, anti-aliased coverage from the
+/// [`KIND_SEGMENT`] box signed-distance function. SVG's default
+/// `stroke-linecap` is `butt`, which the box SDF reproduces — square ends,
+/// no extension past either endpoint. Positions are in SVG user space with
+/// `z = 0`.
 pub(crate) fn tessellate_line(geo: &LineGeometry, color: [f32; 4]) -> Mesh {
     let dx = geo.x2 - geo.x1;
     let dy = geo.y2 - geo.y1;
     let length = dx.hypot(dy);
+    // Unit axis along the segment, and the unit perpendicular.
+    let (ux, uy) = (dx / length, dy / length);
+    let (px, py) = (-uy, ux);
+    let mid_x = (geo.x1 + geo.x2) / 2.0;
+    let mid_y = (geo.y1 + geo.y2) / 2.0;
+    let half_len = length / 2.0;
     let half_width = geo.stroke_width / 2.0;
-    let nx = -dy / length * half_width;
-    let ny = dx / length * half_width;
-
-    // Order the quad to match the rect/circle winding in SVG user space.
-    // The current pipeline disables culling, but keeping winding consistent
-    // avoids direction-sensitive surprises if basic shapes share a culled
-    // pipeline later.
-    Mesh {
-        vertices: vec![
-            vertex(geo.x1 - nx, geo.y1 - ny, color),
-            vertex(geo.x2 - nx, geo.y2 - ny, color),
-            vertex(geo.x2 + nx, geo.y2 + ny, color),
-            vertex(geo.x1 + nx, geo.y1 + ny, color),
+    // Local half-extents, padded so the anti-aliasing band stays inside the
+    // quad. `params` carries the unpadded half-extents the box SDF tests
+    // against; a corner's `local` is its `(along, perpendicular)` offset.
+    let ext_l = half_len + SDF_PAD;
+    let ext_w = half_width + SDF_PAD;
+    let corner = |along: f32, perp: f32| -> ([f32; 2], [f32; 2]) {
+        (
+            [
+                mid_x + along * ux + perp * px,
+                mid_y + along * uy + perp * py,
+            ],
+            [along, perp],
+        )
+    };
+    // Corner winding matches the other basic shapes: the pipeline disables
+    // culling, but a consistent winding avoids direction-sensitive surprises.
+    sdf_quad(
+        [
+            corner(-ext_l, -ext_w),
+            corner(ext_l, -ext_w),
+            corner(ext_l, ext_w),
+            corner(-ext_l, ext_w),
         ],
-        indices: vec![0, 1, 2, 0, 2, 3],
-    }
+        [half_len, half_width, 0.0, 0.0],
+        KIND_SEGMENT,
+        color,
+    )
 }
 
 #[cfg(test)]
@@ -223,7 +244,7 @@ mod tests {
     }
 
     #[test]
-    fn tessellate_line_is_a_butt_cap_quad() {
+    fn tessellate_line_is_an_sdf_box_quad() {
         let geo = resolve_line(
             &line(&[
                 ("x1", "10"),
@@ -236,13 +257,17 @@ mod tests {
         )
         .unwrap();
         let mesh = tessellate_line(&geo, [0.0, 0.0, 1.0, 1.0]);
+        // A line is a four-vertex SDF bounding quad, two triangles.
         assert_eq!(mesh.vertices.len(), 4);
         assert_eq!(mesh.indices, vec![0, 1, 2, 0, 2, 3]);
-        assert_eq!(mesh.vertices[0].position, [10.0, 18.0, 0.0]);
-        assert_eq!(mesh.vertices[1].position, [50.0, 18.0, 0.0]);
-        assert_eq!(mesh.vertices[2].position, [50.0, 22.0, 0.0]);
-        assert_eq!(mesh.vertices[3].position, [10.0, 22.0, 0.0]);
-        assert_eq!(mesh.vertices[0].color, [0.0, 0.0, 1.0, 1.0]);
+        for v in &mesh.vertices {
+            // `params` carries the box half-length then the stroke
+            // half-width — a butt-cap rectangle 40 long and 4 wide.
+            assert_eq!(v.kind, KIND_SEGMENT);
+            assert_eq!(v.params, [20.0, 2.0, 0.0, 0.0]);
+            assert_eq!(v.color, [0.0, 0.0, 1.0, 1.0]);
+            assert_eq!(v.position[2], 0.0);
+        }
     }
 
     #[test]
@@ -260,14 +285,23 @@ mod tests {
         .unwrap();
         let mesh = tessellate_line(&geo, [1.0; 4]);
         assert_eq!(mesh.indices, vec![0, 1, 2, 0, 2, 3]);
+        // The box SDF works in the line's local `(along, perpendicular)`
+        // frame — `params` is the half-length then the stroke half-width.
+        for v in &mesh.vertices {
+            assert_eq!(v.kind, KIND_SEGMENT);
+            assert_eq!(v.params, [25.0, 5.0, 0.0, 0.0]);
+        }
+        // The quad is rotated into world space, so a diagonal line offsets
+        // its corners on both axes. The padded local corners `(±26, ±6)`
+        // rotate to these world positions (assumes `SDF_PAD == 1.0`).
         let positions: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.position).collect();
         assert_positions_close(
             &positions,
             &[
-                [14.0, 17.0, 0.0],
-                [44.0, 57.0, 0.0],
-                [36.0, 63.0, 0.0],
-                [6.0, 23.0, 0.0],
+                [14.2, 15.6, 0.0],
+                [45.4, 57.2, 0.0],
+                [35.8, 64.4, 0.0],
+                [4.6, 22.8, 0.0],
             ],
         );
     }

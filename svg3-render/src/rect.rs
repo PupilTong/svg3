@@ -10,16 +10,10 @@
 //! shapes — see [`crate::shape`]. `transform` and grouping are not handled
 //! yet — see the crate roadmap.
 
-use std::f32::consts::{FRAC_PI_2, PI};
-
 use svg3_dom::Element;
 
-use crate::shape::{vertex, Length, Viewport};
+use crate::shape::{sdf_quad, vertex, Length, Viewport, KIND_ROUND_BOX, SDF_PAD};
 use crate::Mesh;
-
-/// Segments approximating each rounded corner's quarter-arc. Fixed so a
-/// rounded rect's vertex count is deterministic.
-const CORNER_SEGMENTS: usize = 8;
 
 /// A `<rect>`'s geometry after SVG 1.1 defaulting and corner-radius
 /// clamping. All values are in SVG user units.
@@ -103,12 +97,12 @@ pub(crate) fn resolve_rect(element: &Element, viewport: Viewport) -> Option<Rect
     })
 }
 
-/// Tessellate a resolved rectangle into a filled triangle [`Mesh`].
+/// Tessellate a resolved rectangle into a filled [`Mesh`].
 ///
-/// A sharp rectangle becomes two triangles (4 vertices). A rounded
-/// rectangle is a triangle fan from its centroid over a clockwise outline
-/// of `4 * (CORNER_SEGMENTS + 1)` perimeter points. Positions are in SVG
-/// user space with `z = 0`.
+/// A sharp rectangle becomes two solid triangles (4 vertices). A rounded
+/// rectangle becomes an SDF-covered bounding quad whose fragment-shader
+/// signed-distance function gives analytic, anti-aliased elliptical corners.
+/// Positions are in SVG user space with `z = 0`.
 pub(crate) fn tessellate_rect(geo: &RectGeometry, color: [f32; 4]) -> Mesh {
     if geo.rx == 0.0 || geo.ry == 0.0 {
         sharp_mesh(geo, color)
@@ -129,55 +123,33 @@ fn sharp_mesh(geo: &RectGeometry, color: [f32; 4]) -> Mesh {
     }
 }
 
+/// Tessellate a resolved rounded rectangle into an SDF-covered bounding quad.
+///
+/// The rectangle is a four-vertex quad padded past its bounds by [`SDF_PAD`];
+/// the fragment shader computes analytic, anti-aliased coverage from the
+/// [`KIND_ROUND_BOX`] signed-distance function, whose corners are
+/// quarter-ellipses of radii `rx`/`ry`.
 fn rounded_mesh(geo: &RectGeometry, color: [f32; 4]) -> Mesh {
-    let perimeter = rounded_outline(geo);
-    let n = perimeter.len() as u32;
-
-    // Vertex 0 is the centroid; the fan pivots on it.
-    let mut vertices = Vec::with_capacity(perimeter.len() + 1);
-    vertices.push(vertex(
-        geo.x + geo.width / 2.0,
-        geo.y + geo.height / 2.0,
+    let half_w = geo.width / 2.0;
+    let half_h = geo.height / 2.0;
+    let cx = geo.x + half_w;
+    let cy = geo.y + half_h;
+    // The quad spans the half-extents plus the anti-aliasing pad; a corner's
+    // `local` is its offset from the rect centre, which the shader compares
+    // against the half-extents and corner radii carried in `params`.
+    let ex = half_w + SDF_PAD;
+    let ey = half_h + SDF_PAD;
+    sdf_quad(
+        [
+            ([cx - ex, cy - ey], [-ex, -ey]),
+            ([cx + ex, cy - ey], [ex, -ey]),
+            ([cx + ex, cy + ey], [ex, ey]),
+            ([cx - ex, cy + ey], [-ex, ey]),
+        ],
+        [half_w, half_h, geo.rx, geo.ry],
+        KIND_ROUND_BOX,
         color,
-    ));
-    vertices.extend(perimeter.into_iter().map(|(px, py)| vertex(px, py, color)));
-
-    let mut indices = Vec::with_capacity(n as usize * 3);
-    for i in 0..n {
-        indices.extend_from_slice(&[0, i + 1, (i + 1) % n + 1]);
-    }
-    Mesh { vertices, indices }
-}
-
-/// Clockwise outline of a rounded rectangle: four quarter-arcs of
-/// `CORNER_SEGMENTS + 1` points each, joined by the straight edges
-/// (implicit chords between consecutive arcs).
-fn rounded_outline(geo: &RectGeometry) -> Vec<(f32, f32)> {
-    let RectGeometry {
-        x,
-        y,
-        width,
-        height,
-        rx,
-        ry,
-    } = *geo;
-    // (centre_x, centre_y, start_angle), clockwise from the top-right
-    // corner; each arc sweeps a quarter-turn. The ellipse sample at angle
-    // `t` is `(cx + rx*cos t, cy + ry*sin t)` in the y-down user space.
-    let corners = [
-        (x + width - rx, y + ry, -FRAC_PI_2),
-        (x + width - rx, y + height - ry, 0.0),
-        (x + rx, y + height - ry, FRAC_PI_2),
-        (x + rx, y + ry, PI),
-    ];
-    let mut points = Vec::with_capacity(4 * (CORNER_SEGMENTS + 1));
-    for (cx, cy, start) in corners {
-        for step in 0..=CORNER_SEGMENTS {
-            let t = start + FRAC_PI_2 * (step as f32 / CORNER_SEGMENTS as f32);
-            points.push((cx + rx * t.cos(), cy + ry * t.sin()));
-        }
-    }
-    points
+    )
 }
 
 #[cfg(test)]
@@ -362,7 +334,7 @@ mod tests {
     }
 
     #[test]
-    fn tessellate_rounded_rect_fans_within_bounds() {
+    fn tessellate_rounded_rect_is_an_sdf_quad() {
         // WPT `shapes/rect-03`: <rect x=10 y=10 width=50 height=50 rx=8 ry=8>.
         let geo = resolve_rect(
             &rect(&[
@@ -377,16 +349,16 @@ mod tests {
         )
         .unwrap();
         let mesh = tessellate_rect(&geo, [1.0; 4]);
-        // Centroid + four quarter-arcs, one fan triangle per perimeter edge.
-        let perimeter = 4 * (CORNER_SEGMENTS + 1);
-        assert_eq!(mesh.vertices.len(), perimeter + 1);
-        assert_eq!(mesh.indices.len(), perimeter * 3);
-        // The fan pivot is the rect centroid.
-        assert_eq!(mesh.vertices[0].position, [35.0, 35.0, 0.0]);
-        // Every vertex stays inside the rect's bounding box.
+        // A rounded rect is a four-vertex SDF bounding quad, two triangles.
+        assert_eq!(mesh.vertices.len(), 4);
+        assert_eq!(mesh.indices, vec![0, 1, 2, 0, 2, 3]);
         for v in &mesh.vertices {
-            assert!(v.position[0] >= 10.0 - 1e-3 && v.position[0] <= 60.0 + 1e-3);
-            assert!(v.position[1] >= 10.0 - 1e-3 && v.position[1] <= 60.0 + 1e-3);
+            // `params` carries the half-extents then the corner radii.
+            assert_eq!(v.kind, KIND_ROUND_BOX);
+            assert_eq!(v.params, [25.0, 25.0, 8.0, 8.0]);
+            assert_eq!(v.position[2], 0.0);
+            // Each corner's `local` is its offset from the rect centroid.
+            assert_eq!(v.local, [v.position[0] - 35.0, v.position[1] - 35.0]);
         }
     }
 }

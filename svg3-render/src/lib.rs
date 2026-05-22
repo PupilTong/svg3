@@ -38,11 +38,24 @@ use wgpu::util::DeviceExt;
 /// vertex colours are stored correctly; read back as `RGBA8`.
 const TARGET_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 
-/// Vertex buffer layout: object-space position then linear RGBA colour.
-const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 2] =
-    wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4];
+/// Vertex buffer layout: object-space position, linear RGBA colour, the
+/// shape-local SDF coordinate, the SDF parameters, and the shape-kind tag.
+const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
+    0 => Float32x3,
+    1 => Float32x4,
+    2 => Float32x2,
+    3 => Float32x4,
+    4 => Uint32,
+];
 
-/// A single GPU vertex: position + linear RGBA colour.
+/// A single GPU vertex.
+///
+/// Beyond `position` and `color`, every vertex carries SDF data so the
+/// fragment shader can compute analytic, anti-aliased coverage: `local` is
+/// the shape-local coordinate (interpolated across a bounding quad), `params`
+/// the SDF parameters (constant per quad), and `kind` the shape-kind tag.
+/// Solid triangle geometry tags `kind` as `KIND_SOLID` and leaves
+/// `local`/`params` zeroed — see the `KIND_*` constants in [`shape`].
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Vertex {
@@ -50,6 +63,13 @@ pub struct Vertex {
     pub position: [f32; 3],
     /// Linear RGBA colour in `[0, 1]`.
     pub color: [f32; 4],
+    /// Shape-local coordinate for the SDF, interpolated across the quad.
+    pub local: [f32; 2],
+    /// SDF parameters, constant across a shape's quad; meaning depends on
+    /// `kind`.
+    pub params: [f32; 4],
+    /// Shape-kind tag — one of the `shape::KIND_*` constants.
+    pub kind: u32,
 }
 
 /// Uniform data consumed by `shader.wgsl`.
@@ -729,6 +749,7 @@ pub enum RenderError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shape::{KIND_ELLIPSE, KIND_SEGMENT};
 
     /// A 100×100 viewport for `build_scene` tests, whose fixtures use
     /// absolute lengths (so the viewport value does not affect the result).
@@ -755,9 +776,12 @@ mod tests {
 
     #[test]
     fn vertex_layout_is_tightly_packed() {
+        // position(3) + color(4) + local(2) + params(4) + kind(1): fourteen
+        // 4-byte fields, no padding — the `vertex_attr_array!` offsets in
+        // `VERTEX_ATTRIBUTES` assume exactly this tight `#[repr(C)]` layout.
         assert_eq!(
             std::mem::size_of::<Vertex>(),
-            7 * std::mem::size_of::<f32>()
+            14 * std::mem::size_of::<f32>()
         );
     }
 
@@ -911,30 +935,30 @@ mod tests {
     #[test]
     fn build_scene_tessellates_circle() {
         // A `<circle>` is dispatched to the circle tessellator and
-        // contributes a centre-pivoted triangle fan to the combined mesh.
+        // contributes one SDF-covered bounding quad to the combined mesh.
         let document = svg3_dom::parse(r#"<svg><circle cx="20" cy="20" r="10"/></svg>"#).unwrap();
         let mesh = build_scene(&document, vp());
-        assert!(!mesh.is_empty());
-        // Fan topology: a centre vertex plus one vertex per fan triangle.
-        assert_eq!(mesh.vertices.len(), mesh.indices.len() / 3 + 1);
+        assert_eq!(mesh.vertices.len(), 4);
+        assert_eq!(mesh.indices, vec![0, 1, 2, 0, 2, 3]);
+        assert_eq!(mesh.vertices[0].kind, KIND_ELLIPSE);
     }
 
     #[test]
     fn build_scene_tessellates_ellipse() {
         // An `<ellipse>` is dispatched to the ellipse tessellator and
-        // contributes a centre-pivoted triangle fan to the combined mesh.
+        // contributes one SDF-covered bounding quad to the combined mesh.
         let document =
             svg3_dom::parse(r#"<svg><ellipse cx="20" cy="20" rx="15" ry="8"/></svg>"#).unwrap();
         let mesh = build_scene(&document, vp());
-        assert!(!mesh.is_empty());
-        // Fan topology: a centre vertex plus one vertex per fan triangle.
-        assert_eq!(mesh.vertices.len(), mesh.indices.len() / 3 + 1);
+        assert_eq!(mesh.vertices.len(), 4);
+        assert_eq!(mesh.indices, vec![0, 1, 2, 0, 2, 3]);
+        assert_eq!(mesh.vertices[0].kind, KIND_ELLIPSE);
     }
 
     #[test]
     fn build_scene_offsets_indices_across_ellipses() {
-        // Two `<ellipse>`s combine into one mesh; the second fan's indices
-        // are offset past the first fan's vertices so the triangle list
+        // Two `<ellipse>`s combine into one mesh; the second quad's indices
+        // are offset past the first quad's vertices so the triangle list
         // stays valid.
         let one = build_scene(
             &svg3_dom::parse(r#"<svg><ellipse cx="20" cy="20" rx="15" ry="8"/></svg>"#).unwrap(),
@@ -951,8 +975,8 @@ mod tests {
         // The combined mesh holds both fans.
         assert_eq!(two.vertices.len(), 2 * single);
         assert_eq!(two.indices.len(), 2 * one.indices.len());
-        // The first fan is copied verbatim; the second is that same fan with
-        // every index shifted by the first ellipse's vertex count.
+        // The first quad is copied verbatim; the second is that same quad
+        // with every index shifted by the first ellipse's vertex count.
         assert_eq!(two.indices[..one.indices.len()], one.indices[..]);
         let shifted: Vec<u32> = one.indices.iter().map(|i| i + single as u32).collect();
         assert_eq!(two.indices[one.indices.len()..], shifted[..]);
@@ -980,12 +1004,12 @@ mod tests {
         // Adding the ellipse only grows the mesh past the rect+circle prefix.
         assert!(full.vertices.len() > prefix.vertices.len());
         assert!(full.indices.len() > prefix.indices.len());
-        // The ellipse is last in document order, so its fan pivot — the
-        // ellipse centre — is the first vertex past that prefix.
-        assert_eq!(
-            full.vertices[prefix.vertices.len()].position,
-            [70.0, 30.0, 0.0]
-        );
+        // The ellipse is last in document order, so its SDF quad — tagged
+        // `KIND_ELLIPSE`, with `rx`/`ry` in `params` — starts past that
+        // rect+circle prefix.
+        let first = full.vertices[prefix.vertices.len()];
+        assert_eq!(first.kind, KIND_ELLIPSE);
+        assert_eq!(first.params, [18.0, 9.0, 0.0, 0.0]);
     }
 
     #[test]
@@ -997,9 +1021,9 @@ mod tests {
         )
         .unwrap();
         let mesh = build_scene(&document, vp());
-        assert!(!mesh.is_empty());
-        // The fan pivot is the ellipse centre, reached despite the wrappers.
-        assert_eq!(mesh.vertices[0].position, [25.0, 35.0, 0.0]);
+        // The ellipse, reached despite the `<g>` wrappers, is an SDF quad.
+        assert_eq!(mesh.vertices.len(), 4);
+        assert_eq!(mesh.vertices[0].kind, KIND_ELLIPSE);
     }
 
     #[test]
@@ -1011,12 +1035,12 @@ mod tests {
         )
         .unwrap();
         let mesh = build_scene(&document, vp());
-        assert!(!mesh.is_empty());
-        // Exactly one fan: `vertices == indices / 3 + 1` holds only for a
-        // single fan (two fans leave `2N + 2` vertices, not `2N + 1`).
-        assert_eq!(mesh.vertices.len(), mesh.indices.len() / 3 + 1);
-        // ...and that fan's pivot is the filled ellipse's centre.
-        assert_eq!(mesh.vertices[0].position, [40.0, 40.0, 0.0]);
+        // Exactly one SDF quad: the `fill="none"` ellipse contributes no
+        // geometry — only the second, blue-filled ellipse is tessellated.
+        assert_eq!(mesh.vertices.len(), 4);
+        assert_eq!(mesh.indices, vec![0, 1, 2, 0, 2, 3]);
+        assert_eq!(mesh.vertices[0].kind, KIND_ELLIPSE);
+        assert_eq!(mesh.vertices[0].color, [0.0, 0.0, 1.0, 1.0]);
     }
 
     #[test]
@@ -1061,10 +1085,12 @@ mod tests {
         )
         .unwrap();
         let mesh = build_scene(&document, vp());
+        // Exactly the one stroked line, as a four-vertex SDF box quad whose
+        // `params` carries the box half-length then the stroke half-width.
         assert_eq!(mesh.vertices.len(), 4);
         assert_eq!(mesh.indices, vec![0, 1, 2, 0, 2, 3]);
-        assert_eq!(mesh.vertices[0].position, [10.0, 18.0, 0.0]);
-        assert_eq!(mesh.vertices[2].position, [50.0, 22.0, 0.0]);
+        assert_eq!(mesh.vertices[0].kind, KIND_SEGMENT);
+        assert_eq!(mesh.vertices[0].params, [20.0, 2.0, 0.0, 0.0]);
     }
 
     #[test]

@@ -383,9 +383,11 @@ fn compare(golden: &Path, image: &Image) -> Result<(), String> {
                 .any(|(w, g)| w.abs_diff(*g) > CHANNEL_TOLERANCE)
         })
         .count();
-    // A small budget absorbs rounded-corner edge pixels a GPU may rasterise
-    // a hair differently; a real regression shifts far more than this.
-    let budget = (image.width * image.height) as usize / 200;
+    // A small budget absorbs the ~1px anti-aliasing rim that SDF shapes
+    // (circles, ellipses, rounded rects, lines) carry along their whole
+    // perimeter, which a different GPU may rasterise a hair differently; a
+    // real regression shifts far more than this.
+    let budget = (image.width * image.height) as usize / 100;
     if differing > budget {
         write_png(&golden.with_extension("actual.png"), image);
         return Err(format!(

@@ -15,16 +15,10 @@
 //! shapes — see [`crate::shape`]. `transform` and grouping are not handled
 //! yet — see the crate roadmap.
 
-use std::f32::consts::TAU;
-
 use svg3_dom::Element;
 
-use crate::shape::{vertex, Length, Viewport};
+use crate::shape::{sdf_quad, Length, Viewport, KIND_ELLIPSE, SDF_PAD};
 use crate::Mesh;
-
-/// Segments approximating the ellipse's perimeter. Fixed so an ellipse's
-/// vertex count is deterministic.
-const ELLIPSE_SEGMENTS: usize = 64;
 
 /// An `<ellipse>`'s geometry after SVG 1.1 defaulting. All values are in SVG
 /// user units.
@@ -73,31 +67,29 @@ pub(crate) fn resolve_ellipse(element: &Element, viewport: Viewport) -> Option<E
     Some(EllipseGeometry { cx, cy, rx, ry })
 }
 
-/// Tessellate a resolved ellipse into a filled triangle [`Mesh`].
+/// Tessellate a resolved ellipse into an SDF-covered bounding quad [`Mesh`].
 ///
-/// The disc is a triangle fan from its centre over `ELLIPSE_SEGMENTS`
-/// evenly-spaced perimeter points — sample `t` lands at
-/// `(cx + rx·cos t, cy + ry·sin t)`. Positions are in SVG user space with
-/// `z = 0`.
+/// The disc is a four-vertex quad padded past the radii by [`SDF_PAD`]; the
+/// fragment shader computes analytic, anti-aliased coverage from the
+/// [`KIND_ELLIPSE`] signed-distance function. Positions are in SVG user space
+/// with `z = 0`.
 pub(crate) fn tessellate_ellipse(geo: &EllipseGeometry, color: [f32; 4]) -> Mesh {
-    // Vertex 0 is the centre; the fan pivots on it.
-    let mut vertices = Vec::with_capacity(ELLIPSE_SEGMENTS + 1);
-    vertices.push(vertex(geo.cx, geo.cy, color));
-    for step in 0..ELLIPSE_SEGMENTS {
-        let t = TAU * (step as f32 / ELLIPSE_SEGMENTS as f32);
-        vertices.push(vertex(
-            geo.cx + geo.rx * t.cos(),
-            geo.cy + geo.ry * t.sin(),
-            color,
-        ));
-    }
-
-    let n = ELLIPSE_SEGMENTS as u32;
-    let mut indices = Vec::with_capacity(ELLIPSE_SEGMENTS * 3);
-    for i in 0..n {
-        indices.extend_from_slice(&[0, i + 1, (i + 1) % n + 1]);
-    }
-    Mesh { vertices, indices }
+    // The quad spans each radius plus the anti-aliasing pad; a corner's
+    // `local` is its offset from the centre, which the shader compares
+    // against the radii carried in `params`.
+    let ex = geo.rx + SDF_PAD;
+    let ey = geo.ry + SDF_PAD;
+    sdf_quad(
+        [
+            ([geo.cx - ex, geo.cy - ey], [-ex, -ey]),
+            ([geo.cx + ex, geo.cy - ey], [ex, -ey]),
+            ([geo.cx + ex, geo.cy + ey], [ex, ey]),
+            ([geo.cx - ex, geo.cy + ey], [-ex, ey]),
+        ],
+        [geo.rx, geo.ry, 0.0, 0.0],
+        KIND_ELLIPSE,
+        color,
+    )
 }
 
 #[cfg(test)]
@@ -184,27 +176,25 @@ mod tests {
     }
 
     #[test]
-    fn tessellate_ellipse_fans_within_bounds() {
+    fn tessellate_ellipse_is_an_sdf_quad() {
         let geo = resolve_ellipse(
             &ellipse(&[("cx", "50"), ("cy", "40"), ("rx", "30"), ("ry", "20")]),
             vp(),
         )
         .unwrap();
         let mesh = tessellate_ellipse(&geo, [0.0, 0.0, 1.0, 1.0]);
-        // Centre + one perimeter point per segment; one fan triangle per edge.
-        assert_eq!(mesh.vertices.len(), ELLIPSE_SEGMENTS + 1);
-        assert_eq!(mesh.indices.len(), ELLIPSE_SEGMENTS * 3);
-        // The fan pivot is the ellipse centre.
-        assert_eq!(mesh.vertices[0].position, [50.0, 40.0, 0.0]);
-        assert_eq!(mesh.vertices[0].color, [0.0, 0.0, 1.0, 1.0]);
-        // Every perimeter vertex satisfies the ellipse equation
-        // `((x-cx)/rx)² + ((y-cy)/ry)² == 1`, hence lies inside the bounding
-        // box, in the plane `z = 0`.
-        for v in &mesh.vertices[1..] {
-            let nx = (v.position[0] - 50.0) / 30.0;
-            let ny = (v.position[1] - 40.0) / 20.0;
-            assert!((nx * nx + ny * ny - 1.0).abs() < 1e-3);
+        // An SDF ellipse is a four-vertex bounding quad, two triangles.
+        assert_eq!(mesh.vertices.len(), 4);
+        assert_eq!(mesh.indices, vec![0, 1, 2, 0, 2, 3]);
+        for v in &mesh.vertices {
+            // `params` carries `rx` then `ry`, pinning each radius to its
+            // axis; the fill colour and `z = 0` plane ride on every corner.
+            assert_eq!(v.kind, KIND_ELLIPSE);
+            assert_eq!(v.params, [30.0, 20.0, 0.0, 0.0]);
+            assert_eq!(v.color, [0.0, 0.0, 1.0, 1.0]);
             assert_eq!(v.position[2], 0.0);
+            // Each corner's `local` is its offset from the ellipse centre.
+            assert_eq!(v.local, [v.position[0] - 50.0, v.position[1] - 40.0]);
         }
     }
 
@@ -251,41 +241,5 @@ mod tests {
         assert_eq!(geo.cy, 20.0); // 10% of viewport height 200
         assert_eq!(geo.rx, 100.0); // 25% of viewport width 400
         assert_eq!(geo.ry, 40.0); // absolute
-    }
-
-    #[test]
-    fn tessellate_ellipse_places_axis_extremes() {
-        // The perimeter is sampled from `t = 0`, so vertex 1 sits at the
-        // `+rx` extreme and every quarter-turn (the segment count is a
-        // multiple of four) lands on an axis. This pins `rx` to the x-axis
-        // and `ry` to the y-axis — a circle would put both at one radius.
-        let geo = EllipseGeometry {
-            cx: 50.0,
-            cy: 40.0,
-            rx: 30.0,
-            ry: 20.0,
-        };
-        let mesh = tessellate_ellipse(&geo, [1.0; 4]);
-        let quarter = ELLIPSE_SEGMENTS / 4;
-        let at = |i: usize| mesh.vertices[i].position;
-        let near = |p: [f32; 3], x: f32, y: f32| {
-            (p[0] - x).abs() < 1e-3 && (p[1] - y).abs() < 1e-3 && p[2] == 0.0
-        };
-        assert!(near(at(1), 80.0, 40.0), "+rx extreme: {:?}", at(1));
-        assert!(
-            near(at(1 + quarter), 50.0, 60.0),
-            "+ry extreme: {:?}",
-            at(1 + quarter)
-        );
-        assert!(
-            near(at(1 + 2 * quarter), 20.0, 40.0),
-            "-rx extreme: {:?}",
-            at(1 + 2 * quarter)
-        );
-        assert!(
-            near(at(1 + 3 * quarter), 50.0, 20.0),
-            "-ry extreme: {:?}",
-            at(1 + 3 * quarter)
-        );
     }
 }
