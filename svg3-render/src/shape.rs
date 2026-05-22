@@ -28,8 +28,10 @@ pub(crate) const KIND_ROUND_BOX: u32 = 2;
 pub(crate) const KIND_SEGMENT: u32 = 3;
 
 /// Per-side margin, in user units, by which an SDF shape's bounding quad is
-/// inflated past the shape — so the ~1px anti-aliasing band is not clipped
-/// where the shape meets its bounding box.
+/// inflated past the shape, giving the anti-aliasing band room beyond the
+/// shape edge. `shader.wgsl` mirrors this constant and clamps its coverage
+/// ramp to it, so the band never extends past the quad — even under heavy
+/// minification. Keep the two values in sync.
 pub(crate) const SDF_PAD: f32 = 1.0;
 
 /// Resolve a shape's solid fill as linear RGBA in `[0, 1]`.
