@@ -3,9 +3,10 @@
 //! Turns a parsed [`svg3_dom`] document into GPU geometry and rasterises it
 //! with [wgpu](https://crates.io/crates/wgpu).
 //!
-//! This milestone implements the SVG 1.1 `<rect>` and `<circle>` basic
-//! shapes: [`build_scene`] tessellates every such shape in a document into
-//! a [`Mesh`], and [`Renderer::render_to_image`] rasterises that mesh
+//! This milestone implements the SVG 1.1 `<rect>`, `<circle>` and
+//! `<ellipse>` basic shapes: [`build_scene`] tessellates every such shape
+//! in a document into a [`Mesh`], and [`Renderer::render_to_image`]
+//! rasterises that mesh
 //! headlessly — no window or swapchain — into an [`Image`]. Basic shapes
 //! are two-dimensional, so geometry lies in the world plane `z = 0`: by
 //! default it is drawn flat through the orthographic
@@ -16,6 +17,7 @@
 //! invalid, the render target dimension is used.
 
 mod circle;
+mod ellipse;
 mod rect;
 mod shape;
 
@@ -232,8 +234,8 @@ impl Image {
     }
 }
 
-/// Walk `document` and tessellate every `<rect>` and `<circle>` into one
-/// combined [`Mesh`].
+/// Walk `document` and tessellate every `<rect>`, `<circle>` and `<ellipse>`
+/// into one combined [`Mesh`].
 ///
 /// `viewport` is the basis for percentage lengths (e.g. `width="100%"`);
 /// callers that want SVG root sizing should pass [`document_viewport`]. The
@@ -264,6 +266,14 @@ pub fn build_scene(document: &Document, viewport: Viewport) -> Mesh {
                     shape::resolve_fill(&node.element),
                 ) {
                     mesh.append(circle::tessellate_circle(&geo, color));
+                }
+            }
+            ElementKind::Ellipse => {
+                if let (Some(geo), Some(color)) = (
+                    ellipse::resolve_ellipse(&node.element, viewport),
+                    shape::resolve_fill(&node.element),
+                ) {
+                    mesh.append(ellipse::tessellate_ellipse(&geo, color));
                 }
             }
             _ => {}
@@ -308,8 +318,8 @@ impl Renderer {
         Self
     }
 
-    /// Render every `<rect>` and `<circle>` in `document` headlessly into an
-    /// [`Image`] of `config.width × config.height` pixels.
+    /// Render every `<rect>`, `<circle>` and `<ellipse>` in `document`
+    /// headlessly into an [`Image`] of `config.width × config.height` pixels.
     ///
     /// Brings up a wgpu device with no surface, rasterises the tessellated
     /// scene into an offscreen sRGB texture, and reads the pixels back. The
@@ -745,6 +755,18 @@ mod tests {
     }
 
     #[test]
+    fn build_scene_tessellates_ellipse() {
+        // An `<ellipse>` is dispatched to the ellipse tessellator and
+        // contributes a centre-pivoted triangle fan to the combined mesh.
+        let document =
+            svg3_dom::parse(r#"<svg><ellipse cx="20" cy="20" rx="15" ry="8"/></svg>"#).unwrap();
+        let mesh = build_scene(&document, vp());
+        assert!(!mesh.is_empty());
+        // Fan topology: a centre vertex plus one vertex per fan triangle.
+        assert_eq!(mesh.vertices.len(), mesh.indices.len() / 3 + 1);
+    }
+
+    #[test]
     fn document_viewport_reads_root_width_and_height() {
         let document = svg3_dom::parse(r#"<svg width="300" height="200"/>"#).unwrap();
         let viewport = document_viewport(
@@ -851,6 +873,48 @@ mod tests {
         );
         // A corner pixel lies outside the disc — the transparent clear colour.
         assert_eq!(image.pixel(2, 2)[3], 0, "background should be transparent");
+    }
+
+    #[test]
+    fn render_to_image_draws_ellipse() {
+        // A blue ellipse centred on an otherwise empty surface — wider than
+        // it is tall, so it reaches along its x-axis but not its y-axis.
+        let document =
+            svg3_dom::parse(r#"<svg><ellipse cx="32" cy="32" rx="28" ry="14" fill="blue"/></svg>"#)
+                .unwrap();
+        let config = RenderConfig {
+            width: 64,
+            height: 64,
+            ..RenderConfig::default()
+        };
+        let image = match Renderer::new().render_to_image(&document, config) {
+            Ok(image) => image,
+            Err(RenderError::NoAdapter) => {
+                eprintln!("skipping render_to_image_draws_ellipse: no GPU adapter");
+                return;
+            }
+            Err(e) => panic!("headless render failed: {e}"),
+        };
+        assert_eq!((image.width, image.height), (64, 64));
+        // The ellipse's centre pixel is blue.
+        let centre = image.pixel(32, 32);
+        assert!(
+            centre[2] > 200 && centre[0] < 60 && centre[1] < 60,
+            "centre pixel not blue: {centre:?}"
+        );
+        // 22px along the x-axis is within `rx` and covered...
+        let on_x_axis = image.pixel(54, 32);
+        assert!(
+            on_x_axis[2] > 200 && on_x_axis[0] < 60 && on_x_axis[1] < 60,
+            "x-axis pixel not blue: {on_x_axis:?}"
+        );
+        // ...but the same distance along the y-axis is beyond `ry`, so it
+        // keeps the transparent clear colour — `rx`/`ry` apply independently.
+        assert_eq!(
+            image.pixel(32, 54)[3],
+            0,
+            "pixel beyond ry should be transparent"
+        );
     }
 
     #[test]
