@@ -1,5 +1,6 @@
 //! Shared support for the SVG 1.1 basic-shape modules ([`crate::rect`],
-//! [`crate::circle`], [`crate::ellipse`], [`crate::polygon`]).
+//! [`crate::circle`], [`crate::ellipse`], [`crate::polygon`] and
+//! [`crate::polyline`]).
 //!
 //! Each basic-shape module resolves its own geometry, but they share the
 //! `fill` paint resolution and the mesh [`Vertex`] constructor — and, for

@@ -3,12 +3,13 @@
 //! Turns a parsed [`svg3_dom`] document into GPU geometry and rasterises it
 //! with [wgpu](https://crates.io/crates/wgpu).
 //!
-//! This milestone implements the SVG 1.1 `<rect>`, `<circle>`, `<ellipse>`
-//! and `<polygon>` basic shapes: [`build_scene`] tessellates every such
-//! shape in a document into a [`Mesh`], and [`Renderer::render_to_image`]
-//! rasterises that mesh headlessly — no window or swapchain — into an
-//! [`Image`]. Basic shapes are two-dimensional, so geometry lies in the
-//! world plane `z = 0`: by default it is drawn flat through the orthographic
+//! This milestone implements the SVG 1.1 `<rect>`, `<circle>`, `<ellipse>`,
+//! `<polygon>`, and `<polyline>` basic shapes: [`build_scene`] tessellates
+//! every such shape in a document into a [`Mesh`], and
+//! [`Renderer::render_to_image`] rasterises that mesh headlessly — no window
+//! or swapchain — into an [`Image`]. Basic shapes are two-dimensional, so
+//! geometry lies in the world plane `z = 0`: by default it is drawn flat
+//! through the orthographic
 //! [`RenderConfig::projection`], but an optional [`Camera`] on
 //! [`RenderConfig`] instead views that plane through a movable 3D
 //! perspective camera. The root `<svg width>` / `<svg height>` set the
@@ -18,6 +19,7 @@
 mod circle;
 mod ellipse;
 mod polygon;
+mod polyline;
 mod rect;
 mod shape;
 
@@ -234,8 +236,8 @@ impl Image {
     }
 }
 
-/// Walk `document` and tessellate every `<rect>`, `<circle>`, `<ellipse>`
-/// and `<polygon>` into one combined [`Mesh`].
+/// Walk `document` and tessellate every supported 2D SVG shape into one
+/// combined [`Mesh`].
 ///
 /// `viewport` is the basis for percentage lengths (e.g. `width="100%"`);
 /// callers that want SVG root sizing should pass [`document_viewport`]. The
@@ -284,6 +286,14 @@ pub fn build_scene(document: &Document, viewport: Viewport) -> Mesh {
                     mesh.append(polygon::tessellate_polygon(&geo, color));
                 }
             }
+            ElementKind::Polyline => {
+                if let (Some(geo), Some(color)) = (
+                    polyline::resolve_polyline(&node.element, viewport),
+                    shape::resolve_fill(&node.element),
+                ) {
+                    mesh.append(polyline::tessellate_polyline(&geo, color));
+                }
+            }
             _ => {}
         }
         stack.extend(node.children.iter().rev().copied());
@@ -326,9 +336,8 @@ impl Renderer {
         Self
     }
 
-    /// Render every `<rect>`, `<circle>`, `<ellipse>` and `<polygon>` in
-    /// `document` headlessly into an [`Image`] of
-    /// `config.width × config.height` pixels.
+    /// Render every supported 2D SVG shape in `document` headlessly into an
+    /// [`Image`] of `config.width × config.height` pixels.
     ///
     /// Brings up a wgpu device with no surface, rasterises the tessellated
     /// scene into an offscreen sRGB texture, and reads the pixels back. The
@@ -874,6 +883,27 @@ mod tests {
     }
 
     #[test]
+    fn build_scene_tessellates_polyline_fill() {
+        let document =
+            svg3_dom::parse(r#"<svg><polyline points="10,10 50,10 30,40"/></svg>"#).unwrap();
+        let mesh = build_scene(&document, vp());
+        assert_eq!(mesh.vertices.len(), 3);
+        assert_eq!(mesh.indices.len(), 3);
+        assert_eq!(mesh.vertices[0].position, [10.0, 10.0, 0.0]);
+        assert_eq!(mesh.vertices[1].position, [50.0, 10.0, 0.0]);
+        assert_eq!(mesh.vertices[2].position, [30.0, 40.0, 0.0]);
+    }
+
+    #[test]
+    fn build_scene_skips_polyline_without_fill_geometry() {
+        let document = svg3_dom::parse(
+            r#"<svg><polyline points="10,10 50,10" fill="blue"/><polyline points="10,10 50,10 30,40" fill="none"/></svg>"#,
+        )
+        .unwrap();
+        assert!(build_scene(&document, vp()).is_empty());
+    }
+
+    #[test]
     fn document_viewport_reads_root_width_and_height() {
         let document = svg3_dom::parse(r#"<svg width="300" height="200"/>"#).unwrap();
         let viewport = document_viewport(
@@ -1060,6 +1090,38 @@ mod tests {
         );
         // A corner outside the triangle keeps the transparent clear colour.
         assert_eq!(image.pixel(2, 2)[3], 0, "background should be transparent");
+    }
+
+    #[test]
+    fn render_to_image_draws_polyline_fill() {
+        // The open point list is closed for SVG fill rendering.
+        let document =
+            svg3_dom::parse(r#"<svg><polyline points="16,48 32,16 48,48" fill="blue"/></svg>"#)
+                .unwrap();
+        let config = RenderConfig {
+            width: 64,
+            height: 64,
+            ..RenderConfig::default()
+        };
+        let image = match Renderer::new().render_to_image(&document, config) {
+            Ok(image) => image,
+            Err(RenderError::NoAdapter) => {
+                eprintln!("skipping render_to_image_draws_polyline_fill: no GPU adapter");
+                return;
+            }
+            Err(e) => panic!("headless render failed: {e}"),
+        };
+        assert_eq!((image.width, image.height), (64, 64));
+        let inside = image.pixel(32, 36);
+        assert!(
+            inside[2] > 200 && inside[0] < 60 && inside[1] < 60,
+            "inside pixel not blue: {inside:?}"
+        );
+        assert_eq!(
+            image.pixel(32, 56)[3],
+            0,
+            "background should be transparent"
+        );
     }
 
     #[test]
