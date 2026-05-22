@@ -925,8 +925,8 @@ mod tests {
         let mesh = build_scene(&document, vp());
         assert_eq!(mesh.vertices.len(), 4);
         assert_eq!(mesh.indices, vec![0, 1, 2, 0, 2, 3]);
-        assert_eq!(mesh.vertices[0].position, [10.0, 22.0, 0.0]);
-        assert_eq!(mesh.vertices[2].position, [50.0, 18.0, 0.0]);
+        assert_eq!(mesh.vertices[0].position, [10.0, 18.0, 0.0]);
+        assert_eq!(mesh.vertices[2].position, [50.0, 22.0, 0.0]);
     }
 
     #[test]

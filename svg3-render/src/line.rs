@@ -3,7 +3,7 @@
 //! `<line>` is a two-dimensional basic shape; per [`SPEC.md`](../../SPEC.md)
 //! §3.1 it lies in the plane `z = 0`. This module turns a parsed `<line>`
 //! [`Element`] into a stroked quad in SVG user space, applying the SVG 1.1
-//! geometry rules ([SVG11] §9.4) with the default butt line cap.
+//! geometry rules ([SVG11] §9.5) with the default butt line cap.
 //!
 //! Length parsing and stroke paint resolution are shared with the other
 //! basic shapes — see [`crate::shape`]. `transform`, grouping, dashed
@@ -16,7 +16,8 @@ use crate::shape::{vertex, Length, Viewport};
 use crate::Mesh;
 
 /// A `<line>`'s geometry after SVG 1.1 defaulting. All values are in SVG
-/// user units.
+/// user units. Resolved geometry is non-degenerate so tessellation can
+/// safely normalize the segment direction.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct LineGeometry {
     /// Start x coordinate.
@@ -62,7 +63,7 @@ pub(crate) fn resolve_line(element: &Element, viewport: Viewport) -> Option<Line
         .map(|len| len.resolve(viewport.diagonal()))
         .unwrap_or(1.0);
 
-    if stroke_width <= 0.0 || (x2 - x1).hypot(y2 - y1) == 0.0 {
+    if stroke_width <= 0.0 || (x1 == x2 && y1 == y2) {
         return None;
     }
 
@@ -87,12 +88,16 @@ pub(crate) fn tessellate_line(geo: &LineGeometry, color: [f32; 4]) -> Mesh {
     let nx = -dy / length * half_width;
     let ny = dx / length * half_width;
 
+    // Order the quad to match the rect/circle winding in SVG user space.
+    // The current pipeline disables culling, but keeping winding consistent
+    // avoids direction-sensitive surprises if basic shapes share a culled
+    // pipeline later.
     Mesh {
         vertices: vec![
-            vertex(geo.x1 + nx, geo.y1 + ny, color),
-            vertex(geo.x2 + nx, geo.y2 + ny, color),
-            vertex(geo.x2 - nx, geo.y2 - ny, color),
             vertex(geo.x1 - nx, geo.y1 - ny, color),
+            vertex(geo.x2 - nx, geo.y2 - ny, color),
+            vertex(geo.x2 + nx, geo.y2 + ny, color),
+            vertex(geo.x1 + nx, geo.y1 + ny, color),
         ],
         indices: vec![0, 1, 2, 0, 2, 3],
     }
@@ -126,7 +131,7 @@ mod tests {
     #[test]
     fn resolve_line_applies_geometry_defaults() {
         // x1/y1/x2/y2 default to 0 and stroke-width defaults to 1
-        // ([SVG11] §9.4, §11.4).
+        // ([SVG11] §9.5, §11.4).
         let geo = resolve_line(&line(&[("x2", "20"), ("y2", "10")]), vp()).unwrap();
         assert_eq!(
             geo,
@@ -227,10 +232,49 @@ mod tests {
         let mesh = tessellate_line(&geo, [0.0, 0.0, 1.0, 1.0]);
         assert_eq!(mesh.vertices.len(), 4);
         assert_eq!(mesh.indices, vec![0, 1, 2, 0, 2, 3]);
-        assert_eq!(mesh.vertices[0].position, [10.0, 22.0, 0.0]);
-        assert_eq!(mesh.vertices[1].position, [50.0, 22.0, 0.0]);
-        assert_eq!(mesh.vertices[2].position, [50.0, 18.0, 0.0]);
-        assert_eq!(mesh.vertices[3].position, [10.0, 18.0, 0.0]);
+        assert_eq!(mesh.vertices[0].position, [10.0, 18.0, 0.0]);
+        assert_eq!(mesh.vertices[1].position, [50.0, 18.0, 0.0]);
+        assert_eq!(mesh.vertices[2].position, [50.0, 22.0, 0.0]);
+        assert_eq!(mesh.vertices[3].position, [10.0, 22.0, 0.0]);
         assert_eq!(mesh.vertices[0].color, [0.0, 0.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn tessellate_diagonal_line_offsets_both_axes() {
+        let geo = resolve_line(
+            &line(&[
+                ("x1", "10"),
+                ("y1", "20"),
+                ("x2", "40"),
+                ("y2", "60"),
+                ("stroke-width", "10"),
+            ]),
+            vp(),
+        )
+        .unwrap();
+        let mesh = tessellate_line(&geo, [1.0; 4]);
+        assert_eq!(mesh.indices, vec![0, 1, 2, 0, 2, 3]);
+        let positions: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.position).collect();
+        assert_positions_close(
+            &positions,
+            &[
+                [14.0, 17.0, 0.0],
+                [44.0, 57.0, 0.0],
+                [36.0, 63.0, 0.0],
+                [6.0, 23.0, 0.0],
+            ],
+        );
+    }
+
+    fn assert_positions_close(actual: &[[f32; 3]], expected: &[[f32; 3]]) {
+        assert_eq!(actual.len(), expected.len());
+        for (actual, expected) in actual.iter().zip(expected) {
+            for (actual, expected) in actual.iter().zip(expected) {
+                assert!(
+                    (actual - expected).abs() < 1e-5,
+                    "expected {expected}, got {actual}"
+                );
+            }
+        }
     }
 }
