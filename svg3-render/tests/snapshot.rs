@@ -279,7 +279,14 @@ fn cases() -> Vec<Case> {
 
 #[test]
 fn shape_snapshots_match_references() {
-    let renderer = Renderer::new();
+    let renderer = match Renderer::headless() {
+        Ok(renderer) => renderer,
+        Err(RenderError::NoAdapter) => {
+            eprintln!("skipping snapshot tests: no GPU adapter available");
+            return;
+        }
+        Err(error) => panic!("renderer construction failed: {error}"),
+    };
     let update = std::env::var_os("SVG3_UPDATE_SNAPSHOTS").is_some();
 
     let mut updated: Vec<&str> = Vec::new();
@@ -293,14 +300,9 @@ fn shape_snapshots_match_references() {
             camera: case.camera,
             ..RenderConfig::default()
         };
-        let image = match renderer.render_to_image(&document, config) {
-            Ok(image) => image,
-            Err(RenderError::NoAdapter) => {
-                eprintln!("skipping snapshot tests: no GPU adapter available");
-                return;
-            }
-            Err(error) => panic!("render failed for `{}`: {error}", case.name),
-        };
+        let image = renderer
+            .render_to_image(&document, config)
+            .unwrap_or_else(|error| panic!("render failed for `{}`: {error}", case.name));
 
         let golden = snapshot_path(case.name);
         if update {

@@ -1,10 +1,11 @@
 //! Full-renderer benchmarks for `Renderer::render_to_image`.
 //!
-//! These benches exercise `Renderer::render_to_image` as it exists today:
-//! per-call GPU adapter/device acquisition, pipeline creation, scene
-//! tessellation, vertex upload, render pass, and readback. They are intended
-//! for GPU-capable macOS runners and self-skip when no adapter is available,
-//! so CI treats them as a timing smoke check rather than tracked CodSpeed data.
+//! These benches exercise `Renderer::render_to_image`: per-call scene
+//! tessellation, GPU buffer creation, render pass, and readback. The wgpu
+//! device, queue and pipeline are built once when the `Renderer` is
+//! constructed and reused across iterations. They are intended for
+//! GPU-capable macOS runners and self-skip when no adapter is available, so
+//! CI treats them as a timing smoke check rather than tracked CodSpeed data.
 
 use std::hint::black_box;
 
@@ -58,39 +59,20 @@ fn config(camera: Option<Camera>) -> RenderConfig {
 }
 
 fn render_or_panic(renderer: &Renderer, document: &Document, config: RenderConfig) -> Image {
-    match renderer.render_to_image(document, config) {
-        Ok(image) => image,
-        Err(RenderError::NoAdapter) => panic!("GPU adapter disappeared during render benchmark"),
-        Err(error) => panic!("render benchmark failed: {error}"),
-    }
-}
-
-fn gpu_available(renderer: &Renderer) -> bool {
-    let document = parse(r#"<svg><rect width="1" height="1"/></svg>"#)
-        .expect("smoke benchmark fixture should parse");
-    match renderer.render_to_image(
-        &document,
-        RenderConfig {
-            width: 1,
-            height: 1,
-            ..RenderConfig::default()
-        },
-    ) {
-        Ok(image) => {
-            black_box(image);
-            true
-        }
-        Err(RenderError::NoAdapter) => false,
-        Err(error) => panic!("render benchmark GPU smoke test failed: {error}"),
-    }
+    renderer
+        .render_to_image(document, config)
+        .unwrap_or_else(|error| panic!("render benchmark failed: {error}"))
 }
 
 fn bench_render(c: &mut Criterion) {
-    let renderer = Renderer::new();
-    if !gpu_available(&renderer) {
-        eprintln!("skipping full-renderer benchmarks: no GPU adapter available");
-        return;
-    }
+    let renderer = match Renderer::headless() {
+        Ok(renderer) => renderer,
+        Err(RenderError::NoAdapter) => {
+            eprintln!("skipping full-renderer benchmarks: no GPU adapter available");
+            return;
+        }
+        Err(error) => panic!("renderer construction failed: {error}"),
+    };
 
     let document = many_shapes_document();
     let front = Camera::facing(WIDTH, HEIGHT);

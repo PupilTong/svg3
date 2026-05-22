@@ -7,10 +7,12 @@
 //! `<polygon>`, `<polyline>`, and `<line>` basic shapes: [`build_scene`]
 //! tessellates every such shape in a document into a [`Mesh`], and
 //! [`Renderer::render_to_image`] rasterises that mesh headlessly — no window
-//! or swapchain — into an [`Image`]. Basic shapes are two-dimensional, so
-//! geometry lies in the world plane `z = 0`: by default it is drawn flat
-//! through the orthographic
-//! [`RenderConfig::projection`], but an optional [`Camera`] on
+//! or swapchain — into an [`Image`]. The same [`Renderer`] also drives a
+//! caller-owned windowed render pass via [`Renderer::create_scene`] and
+//! [`Renderer::draw`] — see the `app-macos` demo. Basic shapes are
+//! two-dimensional, so geometry lies in the world plane `z = 0`: by default
+//! it is drawn flat through the orthographic [`RenderConfig::projection`],
+//! but an optional [`Camera`] on
 //! [`RenderConfig`] instead views that plane through a movable 3D
 //! perspective camera. The root `<svg width>` / `<svg height>` set the
 //! default viewport for percentage lengths; when either is omitted or
@@ -336,31 +338,179 @@ pub fn document_viewport(document: &Document, fallback: Viewport) -> Viewport {
     }
 }
 
-/// Renders SVG3 documents to GPU images.
-#[derive(Debug, Default)]
-pub struct Renderer;
+/// GPU buffers for one tessellated scene, ready to draw.
+///
+/// Produced by [`Renderer::create_scene`]; consumed by [`Renderer::draw`] and
+/// rewritten by [`Renderer::update_view_projection`]. Opaque, and tied to the
+/// [`Renderer`] that created it — its bind group references that renderer's
+/// pipeline layout.
+#[derive(Debug)]
+pub struct GpuScene {
+    vertex_buffer: wgpu::Buffer,
+    index_buffer: wgpu::Buffer,
+    transform_buffer: wgpu::Buffer,
+    transform_bind_group: wgpu::BindGroup,
+    index_count: u32,
+}
+
+/// Renders SVG3 documents to GPU images and into caller-owned render passes.
+///
+/// Owns and caches the wgpu device, queue, render pipeline and bind-group
+/// layout, so the shader and pipeline are built once — at construction —
+/// rather than per render.
+#[derive(Debug)]
+pub struct Renderer {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    pipeline: wgpu::RenderPipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+    format: wgpu::TextureFormat,
+}
 
 impl Renderer {
-    /// Create a new renderer.
-    pub fn new() -> Self {
-        Self
+    /// Create a headless renderer, bringing up a wgpu device with no surface.
+    ///
+    /// The pipeline targets the sRGB `RGBA8` format that
+    /// [`render_to_image`](Renderer::render_to_image) reads back. Returns
+    /// [`RenderError::NoAdapter`] when the machine exposes no GPU adapter —
+    /// callers should treat that as "skip", not "fail".
+    pub fn headless() -> Result<Self, RenderError> {
+        let (device, queue) = acquire_gpu()?;
+        Ok(Self::with_device(device, queue, TARGET_FORMAT))
+    }
+
+    /// Create a renderer over a caller-supplied `device` and `queue`, with a
+    /// pipeline targeting `format`.
+    ///
+    /// For the windowed path: the caller brings up a surface-compatible device
+    /// (so the adapter is chosen with `compatible_surface`) and hands it here
+    /// with the surface's texture `format`. Such a renderer is driven through
+    /// [`create_scene`](Renderer::create_scene) and [`draw`](Renderer::draw);
+    /// [`render_to_image`](Renderer::render_to_image) additionally requires
+    /// `format` to be sRGB `RGBA8`.
+    pub fn with_device(
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        format: wgpu::TextureFormat,
+    ) -> Self {
+        let pipeline = build_pipeline(&device, format);
+        let bind_group_layout = pipeline.get_bind_group_layout(0);
+        Self {
+            device,
+            queue,
+            pipeline,
+            bind_group_layout,
+            format,
+        }
+    }
+
+    /// The wgpu device backing this renderer.
+    ///
+    /// Exposed so a windowed caller can configure its own [`wgpu::Surface`]
+    /// and encode commands against the same device.
+    pub fn device(&self) -> &wgpu::Device {
+        &self.device
+    }
+
+    /// The wgpu queue backing this renderer.
+    ///
+    /// Exposed so a windowed caller can submit its own command buffers.
+    pub fn queue(&self) -> &wgpu::Queue {
+        &self.queue
+    }
+
+    /// Upload `mesh` and an initial `view_projection` into GPU buffers.
+    ///
+    /// Returns `None` for an empty mesh: a scene with no triangles draws
+    /// nothing, so it needs no buffers. Vertices are uploaded in SVG/world
+    /// space; `shader.wgsl` projects them to clip space with the
+    /// `view_projection` matrix, which
+    /// [`update_view_projection`](Renderer::update_view_projection) can later
+    /// rewrite.
+    pub fn create_scene(&self, mesh: &Mesh, view_projection: Mat4) -> Option<GpuScene> {
+        if mesh.is_empty() {
+            return None;
+        }
+        let uniform = TransformUniform::new(view_projection);
+        let transform_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("svg3 transform uniform"),
+                contents: bytemuck::bytes_of(&uniform),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
+        let transform_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("svg3 transform bind group"),
+            layout: &self.bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: transform_buffer.as_entire_binding(),
+            }],
+        });
+        let vertex_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("svg3 vertex buffer"),
+                contents: bytemuck::cast_slice(&mesh.vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+        let index_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("svg3 index buffer"),
+                contents: bytemuck::cast_slice(&mesh.indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+        Some(GpuScene {
+            vertex_buffer,
+            index_buffer,
+            transform_buffer,
+            transform_bind_group,
+            index_count: mesh.indices.len() as u32,
+        })
+    }
+
+    /// Rewrite a scene's view-projection matrix.
+    ///
+    /// Cheap enough to call on every camera move: it writes only the 64-byte
+    /// transform uniform, leaving the vertex and index buffers untouched.
+    pub fn update_view_projection(&self, scene: &GpuScene, view_projection: Mat4) {
+        let uniform = TransformUniform::new(view_projection);
+        self.queue
+            .write_buffer(&scene.transform_buffer, 0, bytemuck::bytes_of(&uniform));
+    }
+
+    /// Record the draw commands for `scene` into `pass`.
+    ///
+    /// The caller owns the render pass — its target, load/store ops and clear
+    /// colour — so one renderer drives both the headless image pass and a
+    /// windowed surface pass.
+    pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>, scene: &GpuScene) {
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &scene.transform_bind_group, &[]);
+        pass.set_vertex_buffer(0, scene.vertex_buffer.slice(..));
+        pass.set_index_buffer(scene.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+        pass.draw_indexed(0..scene.index_count, 0, 0..1);
     }
 
     /// Render every supported 2D SVG shape in `document` headlessly into an
     /// Render every supported 2D SVG shape in `document` headlessly into an
     /// [`Image`] of `config.width × config.height` pixels.
     ///
-    /// Brings up a wgpu device with no surface, rasterises the tessellated
-    /// scene into an offscreen sRGB texture, and reads the pixels back. The
-    /// surface is cleared to transparent before drawing.
+    /// Rasterises the tessellated scene into an offscreen sRGB texture and
+    /// reads the pixels back; the surface is cleared to transparent first.
     ///
-    /// Returns [`RenderError::NoAdapter`] when the machine exposes no GPU
-    /// adapter — callers should treat that as "skip", not "fail".
+    /// Returns [`RenderError::UnsupportedImageFormat`] when this renderer's
+    /// pipeline does not target sRGB `RGBA8` — the readback assumes that byte
+    /// layout. A renderer from [`Renderer::headless`] always satisfies this.
     pub fn render_to_image(
         &self,
         document: &Document,
         config: RenderConfig,
     ) -> Result<Image, RenderError> {
+        if self.format != TARGET_FORMAT {
+            return Err(RenderError::UnsupportedImageFormat(self.format));
+        }
         let width = config.width.max(1);
         let height = config.height.max(1);
         let target_viewport = Viewport {
@@ -368,59 +518,40 @@ impl Renderer {
             height: height as f32,
         };
         let mesh = build_scene(document, document_viewport(document, target_viewport));
-
-        let (device, queue) = acquire_gpu()?;
+        let scene = self.create_scene(&mesh, config.view_projection());
 
         let extent = wgpu::Extent3d {
             width,
             height,
             depth_or_array_layers: 1,
         };
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("svg3 headless target"),
             size: extent,
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: TARGET_FORMAT,
+            format: self.format,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let pipeline = build_pipeline(&device);
-
-        // Vertices are uploaded in SVG/world space; `shader.wgsl` projects
-        // them to clip space from the uniform view-projection matrix.
-        let buffers = (!mesh.is_empty()).then(|| {
-            let transform_bind_group =
-                build_transform_bind_group(&device, &pipeline, config.view_projection());
-            let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("svg3 vertex buffer"),
-                contents: bytemuck::cast_slice(&mesh.vertices),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-            let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("svg3 index buffer"),
-                contents: bytemuck::cast_slice(&mesh.indices),
-                usage: wgpu::BufferUsages::INDEX,
-            });
-            (vertex_buffer, index_buffer, transform_bind_group)
-        });
-
         let bytes_per_row = width * 4;
         let padded_bytes_per_row = bytes_per_row.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
             * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+        let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("svg3 readback buffer"),
             size: padded_bytes_per_row as u64 * height as u64,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
 
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("svg3 headless encoder"),
-        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("svg3 headless encoder"),
+            });
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("svg3 shape pass"),
@@ -435,12 +566,8 @@ impl Renderer {
                 })],
                 ..Default::default()
             });
-            if let Some((vertex_buffer, index_buffer, transform_bind_group)) = &buffers {
-                pass.set_pipeline(&pipeline);
-                pass.set_bind_group(0, transform_bind_group, &[]);
-                pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-                pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..mesh.indices.len() as u32, 0, 0..1);
+            if let Some(scene) = &scene {
+                self.draw(&mut pass, scene);
             }
         }
         encoder.copy_texture_to_buffer(
@@ -460,9 +587,9 @@ impl Renderer {
             },
             extent,
         );
-        queue.submit(std::iter::once(encoder.finish()));
+        self.queue.submit(std::iter::once(encoder.finish()));
 
-        let pixels = read_back(&device, &readback, width, height, padded_bytes_per_row)?;
+        let pixels = read_back(&self.device, &readback, width, height, padded_bytes_per_row)?;
         Ok(Image {
             width,
             height,
@@ -498,8 +625,8 @@ fn acquire_gpu() -> Result<(wgpu::Device, wgpu::Queue), RenderError> {
     })
 }
 
-/// Build the basic-shape render pipeline.
-fn build_pipeline(device: &wgpu::Device) -> wgpu::RenderPipeline {
+/// Build the basic-shape render pipeline targeting `format`.
+fn build_pipeline(device: &wgpu::Device, format: wgpu::TextureFormat) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("svg3 shape pipeline"),
@@ -522,34 +649,13 @@ fn build_pipeline(device: &wgpu::Device) -> wgpu::RenderPipeline {
             entry_point: Some("fs_main"),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             targets: &[Some(wgpu::ColorTargetState {
-                format: TARGET_FORMAT,
+                format,
                 blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                 write_mask: wgpu::ColorWrites::ALL,
             })],
         }),
         multiview_mask: None,
         cache: None,
-    })
-}
-
-fn build_transform_bind_group(
-    device: &wgpu::Device,
-    pipeline: &wgpu::RenderPipeline,
-    view_projection: Mat4,
-) -> wgpu::BindGroup {
-    let uniform = TransformUniform::new(view_projection);
-    let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("svg3 transform uniform"),
-        contents: bytemuck::bytes_of(&uniform),
-        usage: wgpu::BufferUsages::UNIFORM,
-    });
-    device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("svg3 transform bind group"),
-        layout: &pipeline.get_bind_group_layout(0),
-        entries: &[wgpu::BindGroupEntry {
-            binding: 0,
-            resource: buffer.as_entire_binding(),
-        }],
     })
 }
 
@@ -599,6 +705,11 @@ pub enum RenderError {
     /// A GPU device could not be acquired from the adapter.
     #[error("could not acquire a GPU device: {0}")]
     DeviceUnavailable(#[from] wgpu::RequestDeviceError),
+    /// [`Renderer::render_to_image`] was called on a renderer whose pipeline
+    /// does not target sRGB `RGBA8`. The headless image readback assumes that
+    /// byte layout; a renderer from [`Renderer::headless`] always satisfies it.
+    #[error("render_to_image requires an Rgba8UnormSrgb renderer, but this one targets {0:?}")]
+    UnsupportedImageFormat(wgpu::TextureFormat),
     /// Reading the rendered texture back to CPU memory failed.
     #[error("reading the rendered image back from the GPU failed: {0}")]
     Readback(String),
@@ -614,6 +725,20 @@ mod tests {
         Viewport {
             width: 100.0,
             height: 100.0,
+        }
+    }
+
+    /// A headless [`Renderer`], or `None` (after printing a skip message)
+    /// when the host has no GPU adapter — so a GPU-backed test self-skips on
+    /// a GPU-less runner instead of failing.
+    fn skip_or_renderer(test: &str) -> Option<Renderer> {
+        match Renderer::headless() {
+            Ok(renderer) => Some(renderer),
+            Err(RenderError::NoAdapter) => {
+                eprintln!("skipping {test}: no GPU adapter");
+                None
+            }
+            Err(error) => panic!("renderer construction failed: {error}"),
         }
     }
 
@@ -992,14 +1117,12 @@ mod tests {
             height: 64,
             ..RenderConfig::default()
         };
-        let image = match Renderer::new().render_to_image(&document, config) {
-            Ok(image) => image,
-            Err(RenderError::NoAdapter) => {
-                eprintln!("skipping render_to_image_draws_blue_rect: no GPU adapter");
-                return;
-            }
-            Err(e) => panic!("headless render failed: {e}"),
+        let Some(renderer) = skip_or_renderer("render_to_image_draws_blue_rect") else {
+            return;
         };
+        let image = renderer
+            .render_to_image(&document, config)
+            .expect("headless render failed");
         assert_eq!((image.width, image.height), (64, 64));
         // The rect covers x,y in 16..48: its centre pixel is blue.
         let centre = image.pixel(32, 32);
@@ -1021,14 +1144,12 @@ mod tests {
             height: 64,
             ..RenderConfig::default()
         };
-        let image = match Renderer::new().render_to_image(&document, config) {
-            Ok(image) => image,
-            Err(RenderError::NoAdapter) => {
-                eprintln!("skipping render_to_image_draws_circle: no GPU adapter");
-                return;
-            }
-            Err(e) => panic!("headless render failed: {e}"),
+        let Some(renderer) = skip_or_renderer("render_to_image_draws_circle") else {
+            return;
         };
+        let image = renderer
+            .render_to_image(&document, config)
+            .expect("headless render failed");
         assert_eq!((image.width, image.height), (64, 64));
         // The circle's centre pixel is blue.
         let centre = image.pixel(32, 32);
@@ -1052,14 +1173,12 @@ mod tests {
             height: 64,
             ..RenderConfig::default()
         };
-        let image = match Renderer::new().render_to_image(&document, config) {
-            Ok(image) => image,
-            Err(RenderError::NoAdapter) => {
-                eprintln!("skipping render_to_image_draws_ellipse: no GPU adapter");
-                return;
-            }
-            Err(e) => panic!("headless render failed: {e}"),
+        let Some(renderer) = skip_or_renderer("render_to_image_draws_ellipse") else {
+            return;
         };
+        let image = renderer
+            .render_to_image(&document, config)
+            .expect("headless render failed");
         assert_eq!((image.width, image.height), (64, 64));
         // The ellipse's centre pixel is blue.
         let centre = image.pixel(32, 32);
@@ -1101,14 +1220,12 @@ mod tests {
             height: 64,
             ..RenderConfig::default()
         };
-        let image = match Renderer::new().render_to_image(&document, config) {
-            Ok(image) => image,
-            Err(RenderError::NoAdapter) => {
-                eprintln!("skipping render_to_image_draws_polygon: no GPU adapter");
-                return;
-            }
-            Err(e) => panic!("headless render failed: {e}"),
+        let Some(renderer) = skip_or_renderer("render_to_image_draws_polygon") else {
+            return;
         };
+        let image = renderer
+            .render_to_image(&document, config)
+            .expect("headless render failed");
         assert_eq!((image.width, image.height), (64, 64));
         // A pixel well inside the triangle is blue.
         let inside = image.pixel(32, 40);
@@ -1131,14 +1248,12 @@ mod tests {
             height: 64,
             ..RenderConfig::default()
         };
-        let image = match Renderer::new().render_to_image(&document, config) {
-            Ok(image) => image,
-            Err(RenderError::NoAdapter) => {
-                eprintln!("skipping render_to_image_draws_polyline_fill: no GPU adapter");
-                return;
-            }
-            Err(e) => panic!("headless render failed: {e}"),
+        let Some(renderer) = skip_or_renderer("render_to_image_draws_polyline_fill") else {
+            return;
         };
+        let image = renderer
+            .render_to_image(&document, config)
+            .expect("headless render failed");
         assert_eq!((image.width, image.height), (64, 64));
         let inside = image.pixel(32, 36);
         assert!(
@@ -1166,14 +1281,12 @@ mod tests {
             height: 64,
             ..RenderConfig::default()
         };
-        let image = match Renderer::new().render_to_image(&document, config) {
-            Ok(image) => image,
-            Err(RenderError::NoAdapter) => {
-                eprintln!("skipping render_to_image_draws_concave_polyline_fill: no GPU adapter");
-                return;
-            }
-            Err(e) => panic!("headless render failed: {e}"),
+        let Some(renderer) = skip_or_renderer("render_to_image_draws_concave_polyline_fill") else {
+            return;
         };
+        let image = renderer
+            .render_to_image(&document, config)
+            .expect("headless render failed");
         assert_eq!((image.width, image.height), (64, 64));
 
         for (x, y) in [(16, 16), (16, 48), (48, 16)] {
@@ -1206,14 +1319,12 @@ mod tests {
             height: 64,
             ..RenderConfig::default()
         };
-        let image = match Renderer::new().render_to_image(&document, config) {
-            Ok(image) => image,
-            Err(RenderError::NoAdapter) => {
-                eprintln!("skipping render_to_image_draws_line: no GPU adapter");
-                return;
-            }
-            Err(e) => panic!("headless render failed: {e}"),
+        let Some(renderer) = skip_or_renderer("render_to_image_draws_line") else {
+            return;
         };
+        let image = renderer
+            .render_to_image(&document, config)
+            .expect("headless render failed");
         assert_eq!((image.width, image.height), (64, 64));
         let centre = image.pixel(32, 32);
         assert!(
@@ -1241,14 +1352,12 @@ mod tests {
             camera: Some(Camera::facing(64, 64)),
             ..RenderConfig::default()
         };
-        let image = match Renderer::new().render_to_image(&document, config) {
-            Ok(image) => image,
-            Err(RenderError::NoAdapter) => {
-                eprintln!("skipping render_to_image_draws_rect_through_camera: no GPU adapter");
-                return;
-            }
-            Err(e) => panic!("headless render failed: {e}"),
+        let Some(renderer) = skip_or_renderer("render_to_image_draws_rect_through_camera") else {
+            return;
         };
+        let image = renderer
+            .render_to_image(&document, config)
+            .expect("headless render failed");
         assert_eq!((image.width, image.height), (64, 64));
         let centre = image.pixel(32, 32);
         assert!(
@@ -1269,16 +1378,14 @@ mod tests {
             height: 24,
             ..RenderConfig::default()
         };
-        let image = match Renderer::new().render_to_image(&document, config) {
-            Ok(image) => image,
-            Err(RenderError::NoAdapter) => {
-                eprintln!(
-                    "skipping render_to_image_fills_target_with_percent_sized_rect: no GPU adapter"
-                );
-                return;
-            }
-            Err(e) => panic!("headless render failed: {e}"),
+        let Some(renderer) =
+            skip_or_renderer("render_to_image_fills_target_with_percent_sized_rect")
+        else {
+            return;
         };
+        let image = renderer
+            .render_to_image(&document, config)
+            .expect("headless render failed");
         assert_eq!((image.width, image.height), (40, 24));
         // Every corner and the centre are blue — the percentage rect bled to
         // all four edges of the non-square target.
@@ -1305,16 +1412,13 @@ mod tests {
             height: 24,
             ..RenderConfig::default()
         };
-        let image = match Renderer::new().render_to_image(&document, config) {
-            Ok(image) => image,
-            Err(RenderError::NoAdapter) => {
-                eprintln!(
-                    "skipping render_to_image_uses_svg_root_size_for_percentages: no GPU adapter"
-                );
-                return;
-            }
-            Err(e) => panic!("headless render failed: {e}"),
+        let Some(renderer) = skip_or_renderer("render_to_image_uses_svg_root_size_for_percentages")
+        else {
+            return;
         };
+        let image = renderer
+            .render_to_image(&document, config)
+            .expect("headless render failed");
         assert_eq!((image.width, image.height), (40, 24));
 
         let inside = image.pixel(19, 9);

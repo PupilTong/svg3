@@ -14,7 +14,6 @@ svg3-render.workspace = true
 winit.workspace = true
 wgpu.workspace = true
 pollster.workspace = true
-bytemuck.workspace = true
 glam.workspace = true
 env_logger.workspace = true
 log.workspace = true
