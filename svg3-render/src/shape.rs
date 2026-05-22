@@ -13,10 +13,26 @@
 
 use svg3_dom::Element;
 
-use crate::Vertex;
+use crate::{Mesh, Vertex};
 
 /// The SVG 1.1 initial `fill` value — opaque black — in linear RGBA.
 const DEFAULT_FILL: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+
+/// Shape-kind tags carried in [`Vertex::kind`]. Solid triangle geometry is
+/// [`KIND_SOLID`]; the curved primitives and `<line>` carry an SDF kind whose
+/// coverage the fragment shader computes analytically. Must stay in sync with
+/// the `KIND_*` constants in `shader.wgsl`.
+pub(crate) const KIND_SOLID: u32 = 0;
+pub(crate) const KIND_ELLIPSE: u32 = 1;
+pub(crate) const KIND_ROUND_BOX: u32 = 2;
+pub(crate) const KIND_SEGMENT: u32 = 3;
+
+/// Per-side margin, in user units, by which an SDF shape's bounding quad is
+/// inflated past the shape, giving the anti-aliasing band room beyond the
+/// shape edge. `shader.wgsl` mirrors this constant and clamps its coverage
+/// ramp to it, so the band never extends past the quad — even under heavy
+/// minification. Keep the two values in sync.
+pub(crate) const SDF_PAD: f32 = 1.0;
 
 /// Resolve a shape's solid fill as linear RGBA in `[0, 1]`.
 ///
@@ -63,13 +79,55 @@ pub(crate) fn resolve_stroke_width(element: &Element, viewport: Viewport) -> f32
         .unwrap_or(1.0)
 }
 
-/// A mesh [`Vertex`] at `(x, y)` in SVG user space. Basic shapes are
-/// two-dimensional, so the position lies in the plane `z = 0`
-/// ([SPEC.md](../../SPEC.md) §3.1).
+/// A solid-fill mesh [`Vertex`] at `(x, y)` in SVG user space. Basic shapes
+/// are two-dimensional, so the position lies in the plane `z = 0`
+/// ([SPEC.md](../../SPEC.md) §3.1). Tagged [`KIND_SOLID`]: the fragment
+/// shader paints it at full coverage with no SDF.
 pub(crate) fn vertex(x: f32, y: f32, color: [f32; 4]) -> Vertex {
     Vertex {
         position: [x, y, 0.0],
         color,
+        local: [0.0, 0.0],
+        params: [0.0; 4],
+        kind: KIND_SOLID,
+    }
+}
+
+/// One bounding-quad corner [`Vertex`] for an SDF-covered shape: world
+/// `position` (in the plane `z = 0`), the interpolated shape-local
+/// coordinate `local`, the SDF `params`, and the shape `kind`.
+pub(crate) fn sdf_vertex(
+    position: [f32; 2],
+    local: [f32; 2],
+    params: [f32; 4],
+    kind: u32,
+    color: [f32; 4],
+) -> Vertex {
+    Vertex {
+        position: [position[0], position[1], 0.0],
+        color,
+        local,
+        params,
+        kind,
+    }
+}
+
+/// Build a two-triangle [`Mesh`] for one SDF-covered shape from its four
+/// bounding-quad corners, each given as `(world_position, shape_local)`.
+/// `params`, `kind` and `color` are shared by all four corners; the fragment
+/// shader turns the interpolated `local` into analytic, anti-aliased coverage.
+pub(crate) fn sdf_quad(
+    corners: [([f32; 2], [f32; 2]); 4],
+    params: [f32; 4],
+    kind: u32,
+    color: [f32; 4],
+) -> Mesh {
+    Mesh {
+        vertices: corners
+            .iter()
+            .map(|&(position, local)| sdf_vertex(position, local, params, kind, color))
+            .collect(),
+        indices: vec![0, 1, 2, 0, 2, 3],
     }
 }
 
