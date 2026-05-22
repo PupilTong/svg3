@@ -10,8 +10,9 @@
 //! The parser is structural only at this milestone: attribute *values* are
 //! preserved as raw strings (so the planned Stylo cascade can consume
 //! `class`, `id`, `style`, …) but no attribute values are interpreted into
-//! typed representations. Text content inside elements is ignored.
-//! Namespaces are not handled.
+//! typed representations. Text content is captured only inside `<style>`
+//! elements (their inline CSS); other element text is ignored. Namespaces
+//! are not handled.
 
 use std::collections::BTreeMap;
 
@@ -45,6 +46,9 @@ pub enum ElementKind {
     Filter,
     /// Gaussian blur filter primitive (SVG 1.1 `<feGaussianBlur>`).
     FeGaussianBlur,
+    /// Inline stylesheet (SVG 1.1 `<style>`); its CSS text is captured in
+    /// [`Element::text`].
+    Style,
     /// Axis-aligned box primitive.
     Cube,
     /// Ellipsoid primitive.
@@ -72,6 +76,7 @@ impl ElementKind {
             "path" => Self::Path,
             "filter" => Self::Filter,
             "feGaussianBlur" => Self::FeGaussianBlur,
+            "style" => Self::Style,
             "cube" => Self::Cube,
             "ellipsoid" => Self::Ellipsoid,
             other => Self::Unknown(other.to_owned()),
@@ -92,6 +97,7 @@ impl ElementKind {
             Self::Path => "path",
             Self::Filter => "filter",
             Self::FeGaussianBlur => "feGaussianBlur",
+            Self::Style => "style",
             Self::Cube => "cube",
             Self::Ellipsoid => "ellipsoid",
             Self::Unknown(t) => t.as_str(),
@@ -112,14 +118,19 @@ pub struct Element {
     pub kind: ElementKind,
     /// Raw attributes, keyed by name.
     pub attributes: BTreeMap<String, String>,
+    /// Text content. Captured only for [`ElementKind::Style`] elements — it
+    /// holds their inline CSS for the style engine to parse. Every other
+    /// element keeps this empty; general element text is not modelled yet.
+    pub text: String,
 }
 
 impl Element {
-    /// Construct an element with the given kind and no attributes.
+    /// Construct an element with the given kind, no attributes and no text.
     pub fn new(kind: ElementKind) -> Self {
         Self {
             kind,
             attributes: BTreeMap::new(),
+            text: String::new(),
         }
     }
 }
@@ -280,9 +291,12 @@ pub fn parse(input: &str) -> Result<Document, ParseError> {
             Event::End(_) => {
                 parents.pop().ok_or(ParseError::EmptyDocument)?;
             }
+            Event::Text(e) => capture_style_text(&mut arena, &parents, &e.into_inner())?,
+            Event::CData(e) => capture_style_text(&mut arena, &parents, &e.into_inner())?,
             Event::Eof => break,
-            // Text, comments, CDATA, processing instructions, XML
-            // declarations and DOCTYPEs are ignored at this milestone.
+            // Comments, processing instructions, XML declarations and
+            // DOCTYPEs are ignored; element text is captured only inside
+            // `<style>` (see `capture_style_text`).
             _ => {}
         }
         buf.clear();
@@ -340,6 +354,24 @@ fn attach(arena: &mut [Node], parents: &[NodeId], root: &mut Option<NodeId>, id:
     }
 }
 
+/// Append parsed text to the innermost open element's content, but only when
+/// that element is a `<style>` — its CSS is the one kind of text content the
+/// model keeps. Text anywhere else is dropped. XML entity references in the
+/// text are not resolved yet.
+fn capture_style_text(
+    arena: &mut [Node],
+    parents: &[NodeId],
+    text: &[u8],
+) -> Result<(), ParseError> {
+    if let Some(&parent) = parents.last() {
+        let element = &mut arena[parent.0 as usize].element;
+        if element.kind == ElementKind::Style {
+            element.text.push_str(std::str::from_utf8(text)?);
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -360,6 +392,7 @@ mod tests {
             ElementKind::from_tag("feGaussianBlur"),
             ElementKind::FeGaussianBlur
         );
+        assert_eq!(ElementKind::from_tag("style"), ElementKind::Style);
         assert_eq!(ElementKind::from_tag("cube"), ElementKind::Cube);
         assert_eq!(ElementKind::from_tag("ellipsoid"), ElementKind::Ellipsoid);
         // `as_tag` round-trips a recognised kind back to its source name.
@@ -371,6 +404,7 @@ mod tests {
         assert_eq!(ElementKind::Path.as_tag(), "path");
         assert_eq!(ElementKind::Filter.as_tag(), "filter");
         assert_eq!(ElementKind::FeGaussianBlur.as_tag(), "feGaussianBlur");
+        assert_eq!(ElementKind::Style.as_tag(), "style");
         // `<group>` is not in SPEC.md; only `<g>` from SVG 1.1 is the
         // canonical grouping element.
         assert_eq!(
@@ -582,6 +616,31 @@ mod tests {
             blur.attributes.get("stdDeviation").map(String::as_str),
             Some("4 2")
         );
+    }
+
+    #[test]
+    fn parse_captures_style_element_css() {
+        let doc = parse(r#"<svg><style>rect { fill: red; }</style></svg>"#).unwrap();
+        let style_id = doc.node(doc.root()).children[0];
+        let style = doc.element(style_id);
+        assert_eq!(style.kind, ElementKind::Style);
+        assert_eq!(style.text, "rect { fill: red; }");
+    }
+
+    #[test]
+    fn parse_captures_cdata_wrapped_style_css() {
+        let doc = parse(r#"<svg><style><![CDATA[circle{stroke:blue}]]></style></svg>"#).unwrap();
+        let style_id = doc.node(doc.root()).children[0];
+        assert_eq!(doc.element(style_id).text, "circle{stroke:blue}");
+    }
+
+    #[test]
+    fn parse_ignores_text_outside_style_elements() {
+        // Only `<style>` keeps text; other elements drop their content.
+        let doc = parse("<svg>loose<rect>inner</rect></svg>").unwrap();
+        assert!(doc.element(doc.root()).text.is_empty());
+        let rect_id = doc.node(doc.root()).children[0];
+        assert!(doc.element(rect_id).text.is_empty());
     }
 
     #[test]
