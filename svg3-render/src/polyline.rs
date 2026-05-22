@@ -2,15 +2,18 @@
 //!
 //! `<polyline>` is a two-dimensional basic shape; per [`SPEC.md`](../../SPEC.md)
 //! §3.1 it lies in the plane `z = 0`. This module turns a parsed `<polyline>`
-//! [`Element`] into filled triangle geometry in SVG user space. Stroke
-//! rendering is not implemented yet, so only the SVG fill behavior is
-//! represented: the open polyline is closed by the fill operation.
+//! [`Element`] into filled triangle geometry in SVG user space, applying the
+//! SVG 1.1 geometry rules ([SVG11] §9.6 and §9.7). Stroke rendering is not
+//! implemented yet, so only the SVG fill behavior is represented: the open
+//! polyline is closed by the fill operation.
 
 use svg3_dom::Element;
 
-use crate::shape::{vertex, Length, Viewport};
+use crate::shape::vertex;
 use crate::Mesh;
 
+// A small user-unit tolerance used both for point equality and near-zero
+// triangle/polygon area checks in the current scaffold renderer.
 const EPSILON: f32 = 1e-5;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -28,14 +31,13 @@ pub(crate) struct PolylineGeometry {
 
 /// Resolve a `<polyline>`'s raw `points` attribute into a [`PolylineGeometry`].
 ///
-/// Coordinates in even positions resolve against `viewport.width`; odd
-/// positions resolve against `viewport.height`. Missing, malformed, odd, or
-/// degenerate point lists are skipped. Because this renderer does not support
-/// stroke yet, fewer than three distinct points have no filled area and
-/// contribute no geometry.
-pub(crate) fn resolve_polyline(element: &Element, viewport: Viewport) -> Option<PolylineGeometry> {
+/// SVG 1.1 `points` coordinates are plain numbers, not lengths; units and
+/// percentages are rejected. Missing, malformed, odd, or degenerate point
+/// lists are skipped. Because this renderer does not support stroke yet, fewer
+/// than three distinct points have no filled area and contribute no geometry.
+pub(crate) fn resolve_polyline(element: &Element) -> Option<PolylineGeometry> {
     let points = element.attributes.get("points")?;
-    let points = parse_points(points, viewport)?;
+    let points = parse_points(points)?;
     let points = normalize_points(points);
     (points.len() >= 3 && signed_area(&points).abs() > EPSILON)
         .then_some(PolylineGeometry { points })
@@ -45,8 +47,8 @@ pub(crate) fn resolve_polyline(element: &Element, viewport: Viewport) -> Option<
 ///
 /// SVG fills open subpaths as if they were closed, so the polyline's first and
 /// last points are connected for triangulation. The current tessellator handles
-/// simple polygons; self-intersecting point lists are skipped until the fill
-/// rule pipeline exists.
+/// simple polygons; self-intersecting point lists may produce incorrect
+/// geometry until the fill-rule pipeline exists.
 pub(crate) fn tessellate_polyline(geo: &PolylineGeometry, color: [f32; 4]) -> Mesh {
     let indices = triangulate(&geo.points);
     if indices.is_empty() {
@@ -63,54 +65,67 @@ pub(crate) fn tessellate_polyline(geo: &PolylineGeometry, color: [f32; 4]) -> Me
     }
 }
 
-fn parse_points(value: &str, viewport: Viewport) -> Option<Vec<Point>> {
-    let mut lengths = Vec::new();
-    let mut cursor = 0;
+fn parse_points(value: &str) -> Option<Vec<Point>> {
+    let mut coordinates = Vec::new();
+    let mut cursor = skip_wsp(value.as_bytes(), 0);
     let bytes = value.as_bytes();
 
     loop {
-        cursor = skip_separators(bytes, cursor);
         if cursor == bytes.len() {
             break;
         }
 
         let (token, next) = next_coordinate_token(value, cursor)?;
-        lengths.push(Length::parse(token)?);
+        coordinates.push(parse_coordinate(token)?);
         cursor = next;
 
-        if cursor < bytes.len()
-            && !is_separator(bytes[cursor])
-            && bytes[cursor] != b'+'
-            && bytes[cursor] != b'-'
-        {
-            return None;
-        }
+        cursor = consume_coordinate_separator(bytes, cursor)?;
     }
 
-    if lengths.len() < 6 || lengths.len() % 2 != 0 {
+    if coordinates.len() < 6 || coordinates.len() % 2 != 0 {
         return None;
     }
 
     Some(
-        lengths
+        coordinates
             .chunks_exact(2)
             .map(|pair| Point {
-                x: pair[0].resolve(viewport.width),
-                y: pair[1].resolve(viewport.height),
+                x: pair[0],
+                y: pair[1],
             })
             .collect(),
     )
 }
 
-fn skip_separators(bytes: &[u8], mut cursor: usize) -> usize {
-    while cursor < bytes.len() && is_separator(bytes[cursor]) {
+fn consume_coordinate_separator(bytes: &[u8], mut cursor: usize) -> Option<usize> {
+    let before_wsp = cursor;
+    cursor = skip_wsp(bytes, cursor);
+    if cursor == bytes.len() {
+        return Some(cursor);
+    }
+    if bytes[cursor] == b',' {
+        cursor = skip_wsp(bytes, cursor + 1);
+        return (cursor < bytes.len()).then_some(cursor);
+    }
+    if cursor != before_wsp {
+        return Some(cursor);
+    }
+    if bytes[cursor] == b'-' {
+        return Some(cursor);
+    }
+    None
+}
+
+fn parse_coordinate(token: &str) -> Option<f32> {
+    let coordinate: f32 = token.parse().ok()?;
+    coordinate.is_finite().then_some(coordinate)
+}
+
+fn skip_wsp(bytes: &[u8], mut cursor: usize) -> usize {
+    while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
         cursor += 1;
     }
     cursor
-}
-
-fn is_separator(byte: u8) -> bool {
-    byte == b',' || byte.is_ascii_whitespace()
 }
 
 fn next_coordinate_token(value: &str, start: usize) -> Option<(&str, usize)> {
@@ -150,14 +165,6 @@ fn next_coordinate_token(value: &str, start: usize) -> Option<(&str, usize)> {
         }
         if cursor == exponent_start {
             return None;
-        }
-    }
-
-    if matches!(bytes.get(cursor), Some(b'%')) {
-        cursor += 1;
-    } else {
-        while matches!(bytes.get(cursor), Some(byte) if byte.is_ascii_alphabetic()) {
-            cursor += 1;
         }
     }
 
@@ -281,16 +288,9 @@ mod tests {
         element
     }
 
-    fn vp() -> Viewport {
-        Viewport {
-            width: 200.0,
-            height: 100.0,
-        }
-    }
-
     #[test]
     fn resolve_polyline_reads_points_list() {
-        let geo = resolve_polyline(&polyline("10,20 80,20 45,70"), vp()).unwrap();
+        let geo = resolve_polyline(&polyline("10,20 80,20 45,70")).unwrap();
         assert_eq!(
             geo.points,
             vec![
@@ -302,32 +302,42 @@ mod tests {
     }
 
     #[test]
-    fn resolve_polyline_accepts_implicit_sign_separator_and_percentages() {
-        let geo = resolve_polyline(&polyline("0,0 50%-25% 100%,100%"), vp()).unwrap();
+    fn resolve_polyline_accepts_negative_separator_and_exponents() {
+        let geo = resolve_polyline(&polyline("0,0 1e2-25 .2,5.")).unwrap();
         assert_eq!(
             geo.points,
             vec![
                 Point { x: 0.0, y: 0.0 },
                 Point { x: 100.0, y: -25.0 },
-                Point { x: 200.0, y: 100.0 },
+                Point { x: 0.2, y: 5.0 },
             ]
         );
     }
 
     #[test]
     fn resolve_polyline_skips_degenerate_or_malformed_points() {
-        assert_eq!(
-            resolve_polyline(&Element::new(ElementKind::Polyline), vp()),
-            None
-        );
-        assert_eq!(resolve_polyline(&polyline("10,10 20,20"), vp()), None);
-        assert_eq!(resolve_polyline(&polyline("10,10 20,20 30"), vp()), None);
-        assert_eq!(resolve_polyline(&polyline("10,10 20,20 30,30"), vp()), None);
+        assert_eq!(resolve_polyline(&Element::new(ElementKind::Polyline)), None);
+        assert_eq!(resolve_polyline(&polyline("10,10 20,20")), None);
+        assert_eq!(resolve_polyline(&polyline("10,10 20,20 30")), None);
+        assert_eq!(resolve_polyline(&polyline("10,10 20,20 30,30")), None);
+        assert_eq!(resolve_polyline(&polyline("0,0 50%,50 100,0")), None);
+        assert_eq!(resolve_polyline(&polyline("0,0 50px,50 100,0")), None);
+        assert_eq!(resolve_polyline(&polyline("0,0 50,50+100,0")), None);
+        assert_eq!(resolve_polyline(&polyline("0,0 50,,50 100,0")), None);
+        assert_eq!(resolve_polyline(&polyline("0,0 50,50 100,0,")), None);
+    }
+
+    #[test]
+    fn resolve_polyline_removes_explicit_closing_point() {
+        let geo = resolve_polyline(&polyline("10,20 80,20 45,70 10,20")).unwrap();
+        assert_eq!(geo.points.len(), 3);
+        assert_eq!(geo.points[0], Point { x: 10.0, y: 20.0 });
+        assert_eq!(geo.points[2], Point { x: 45.0, y: 70.0 });
     }
 
     #[test]
     fn tessellate_polyline_closes_triangle_for_fill() {
-        let geo = resolve_polyline(&polyline("10,20 80,20 45,70"), vp()).unwrap();
+        let geo = resolve_polyline(&polyline("10,20 80,20 45,70")).unwrap();
         let mesh = tessellate_polyline(&geo, [0.0, 0.0, 1.0, 1.0]);
         assert_eq!(mesh.vertices.len(), 3);
         assert_eq!(mesh.indices.len(), 3);
@@ -337,9 +347,17 @@ mod tests {
 
     #[test]
     fn tessellate_polyline_handles_concave_fill() {
-        let geo = resolve_polyline(&polyline("10,10 80,10 80,40 50,40 50,80 10,80"), vp()).unwrap();
+        let geo = resolve_polyline(&polyline("10,10 80,10 80,40 50,40 50,80 10,80")).unwrap();
         let mesh = tessellate_polyline(&geo, [1.0; 4]);
         assert_eq!(mesh.vertices.len(), 6);
         assert_eq!(mesh.indices.len(), 12);
+    }
+
+    #[test]
+    fn tessellate_polyline_handles_clockwise_fill() {
+        let geo = resolve_polyline(&polyline("10,20 45,70 80,20")).unwrap();
+        let mesh = tessellate_polyline(&geo, [1.0; 4]);
+        assert_eq!(mesh.vertices.len(), 3);
+        assert_eq!(mesh.indices.len(), 3);
     }
 }

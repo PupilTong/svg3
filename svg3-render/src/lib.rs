@@ -288,7 +288,7 @@ pub fn build_scene(document: &Document, viewport: Viewport) -> Mesh {
             }
             ElementKind::Polyline => {
                 if let (Some(geo), Some(color)) = (
-                    polyline::resolve_polyline(&node.element, viewport),
+                    polyline::resolve_polyline(&node.element),
                     shape::resolve_fill(&node.element),
                 ) {
                     mesh.append(polyline::tessellate_polyline(&geo, color));
