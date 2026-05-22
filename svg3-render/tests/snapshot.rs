@@ -1,11 +1,11 @@
-//! End-to-end snapshot tests for `<rect>`, `<circle>`, `<ellipse>` and
-//! `<polygon>` rendering.
+//! End-to-end snapshot tests for `<rect>`, `<circle>`, `<ellipse>`,
+//! `<polygon>` and filled `<polyline>` rendering.
 //!
 //! Each case parses an svg3 document — the SVG WPT `shapes/rect-*`,
 //! `shapes/circle-*`, `shapes/ellipse-*` and `shapes/polygon-*` reference
-//! tests, plus the canonical SVG sample — renders it headlessly with
-//! [`Renderer::render_to_image`], and compares the result against a
-//! committed golden PNG in `tests/snapshots/`. Those PNGs are the
+//! tests, plus polyline fill cases and the canonical SVG sample — renders it
+//! headlessly with [`Renderer::render_to_image`], and compares the result
+//! against a committed golden PNG in `tests/snapshots/`. Those PNGs are the
 //! reviewable snapshots — open them in a pull request to see what the
 //! renderer produces.
 //!
@@ -191,6 +191,42 @@ fn cases() -> Vec<Case> {
         Case::square(
             "polygon-star",
             r##"<svg><polygon points="50,5 61,35 93,36 67,56 76,86 50,68 24,86 33,56 7,36 39,35" fill="#11aa55"/></svg>"##,
+        ),
+        // SVG WPT `shapes/polyline-*`: an open point list is closed for fill
+        // rendering, producing a filled triangle.
+        Case::square(
+            "polyline-triangle-fill",
+            r#"<svg><polyline points="16,82 50,18 84,82" fill="blue"/></svg>"#,
+        ),
+        // A reversed point order exercises the tessellator's winding branch
+        // and should still produce a filled triangle.
+        Case::square(
+            "polyline-clockwise-fill",
+            r#"<svg><polyline points="16,82 84,82 50,18" fill="blue"/></svg>"#,
+        ),
+        // A repeated first point is an explicitly closed list; normalisation
+        // drops the duplicate endpoint before triangulation.
+        Case::square(
+            "polyline-explicit-close",
+            r##"<svg><polyline points="20,20 80,26 72,80 28,72 20,20" fill="#11aa55"/></svg>"##,
+        ),
+        // Concave simple polygon: the L shape exercises ear-clipping through
+        // the public parse -> render path, not just unit-level triangulation.
+        Case::square(
+            "polyline-concave-fill",
+            r#"<svg><polyline points="14,14 82,14 82,36 42,36 42,82 14,82" fill="blue"/></svg>"#,
+        ),
+        // Painter's order with a polyline: a later rect paints over the
+        // triangle in the combined mesh.
+        Case::square(
+            "polyline-overlap-order",
+            r#"<svg><polyline points="10,84 50,10 90,84" fill="blue"/><rect x="35" y="45" width="30" height="30" fill="red"/></svg>"#,
+        ),
+        // Invalid SVG 1.1 point coordinates are skipped, so the red polyline
+        // with a percentage coordinate does not cover the gray background.
+        Case::square(
+            "polyline-invalid-points-skipped",
+            r##"<svg><rect width="100%" height="100%" fill="#666666"/><polyline points="18,82 50%,18 82,82" fill="red"/></svg>"##,
         ),
         // The canonical SVG sample, rendered at its declared 300×200 size. The
         // `<rect width="100%">` exercises percentage lengths; the `<text>` is
