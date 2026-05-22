@@ -37,6 +37,8 @@ pub enum ElementKind {
     Polygon,
     /// Connected line segments (SVG 1.1 `<polyline>` basic shape).
     Polyline,
+    /// Line segment (SVG 1.1 `<line>` basic shape).
+    Line,
     /// Axis-aligned box primitive.
     Cube,
     /// Ellipsoid primitive.
@@ -60,6 +62,7 @@ impl ElementKind {
             "ellipse" => Self::Ellipse,
             "polygon" => Self::Polygon,
             "polyline" => Self::Polyline,
+            "line" => Self::Line,
             "cube" => Self::Cube,
             "ellipsoid" => Self::Ellipsoid,
             other => Self::Unknown(other.to_owned()),
@@ -76,6 +79,7 @@ impl ElementKind {
             Self::Ellipse => "ellipse",
             Self::Polygon => "polygon",
             Self::Polyline => "polyline",
+            Self::Line => "line",
             Self::Cube => "cube",
             Self::Ellipsoid => "ellipsoid",
             Self::Unknown(t) => t.as_str(),
@@ -337,6 +341,7 @@ mod tests {
         assert_eq!(ElementKind::from_tag("ellipse"), ElementKind::Ellipse);
         assert_eq!(ElementKind::from_tag("polygon"), ElementKind::Polygon);
         assert_eq!(ElementKind::from_tag("polyline"), ElementKind::Polyline);
+        assert_eq!(ElementKind::from_tag("line"), ElementKind::Line);
         assert_eq!(ElementKind::from_tag("cube"), ElementKind::Cube);
         assert_eq!(ElementKind::from_tag("ellipsoid"), ElementKind::Ellipsoid);
         // `as_tag` round-trips a recognised kind back to its source name.
@@ -344,6 +349,7 @@ mod tests {
         assert_eq!(ElementKind::Ellipse.as_tag(), "ellipse");
         assert_eq!(ElementKind::Polygon.as_tag(), "polygon");
         assert_eq!(ElementKind::Polyline.as_tag(), "polyline");
+        assert_eq!(ElementKind::Line.as_tag(), "line");
         // `<group>` is not in SPEC.md; only `<g>` from SVG 1.1 is the
         // canonical grouping element.
         assert_eq!(
@@ -485,6 +491,28 @@ mod tests {
         assert_eq!(
             polyline.attributes.get("fill").map(String::as_str),
             Some("green")
+        );
+    }
+
+    #[test]
+    fn parse_line_preserves_geometry_attributes() {
+        let xml =
+            r#"<svg><line x1="10" y1="20" x2="50" y2="40" stroke="blue" stroke-width="3"/></svg>"#;
+        let doc = parse(xml).unwrap();
+        let line_id = doc.node(doc.root()).children[0];
+        let line = doc.element(line_id);
+        assert_eq!(line.kind, ElementKind::Line);
+        assert_eq!(line.attributes.get("x1").map(String::as_str), Some("10"));
+        assert_eq!(line.attributes.get("y1").map(String::as_str), Some("20"));
+        assert_eq!(line.attributes.get("x2").map(String::as_str), Some("50"));
+        assert_eq!(line.attributes.get("y2").map(String::as_str), Some("40"));
+        assert_eq!(
+            line.attributes.get("stroke").map(String::as_str),
+            Some("blue")
+        );
+        assert_eq!(
+            line.attributes.get("stroke-width").map(String::as_str),
+            Some("3")
         );
     }
 

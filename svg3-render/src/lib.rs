@@ -4,8 +4,8 @@
 //! with [wgpu](https://crates.io/crates/wgpu).
 //!
 //! This milestone implements the SVG 1.1 `<rect>`, `<circle>`, `<ellipse>`,
-//! `<polygon>`, and `<polyline>` basic shapes: [`build_scene`] tessellates
-//! every such shape in a document into a [`Mesh`], and
+//! `<polygon>`, `<polyline>`, and `<line>` basic shapes: [`build_scene`]
+//! tessellates every such shape in a document into a [`Mesh`], and
 //! [`Renderer::render_to_image`] rasterises that mesh headlessly — no window
 //! or swapchain — into an [`Image`]. Basic shapes are two-dimensional, so
 //! geometry lies in the world plane `z = 0`: by default it is drawn flat
@@ -18,6 +18,7 @@
 
 mod circle;
 mod ellipse;
+mod line;
 mod polygon;
 mod polyline;
 mod rect;
@@ -243,9 +244,10 @@ impl Image {
 /// callers that want SVG root sizing should pass [`document_viewport`]. The
 /// mesh is in SVG user space (origin top-left, y-down, `z = 0`). Shapes are
 /// appended in document order, so a later shape paints over an earlier one. A
-/// shape that is not rendered — a degenerate size, or `fill="none"` —
-/// contributes nothing. `transform` and grouping are not applied yet, so a
-/// shape is placed at its own coordinates regardless of any ancestor `<g>`.
+/// shape that is not rendered — a degenerate size, `fill="none"`, or a
+/// missing/`none` stroke on `<line>` — contributes nothing. `transform` and
+/// grouping are not applied yet, so a shape is placed at its own coordinates
+/// regardless of any ancestor `<g>`.
 pub fn build_scene(document: &Document, viewport: Viewport) -> Mesh {
     let mut mesh = Mesh::default();
     // Pre-order DFS; children pushed in reverse so they pop in document
@@ -294,6 +296,14 @@ pub fn build_scene(document: &Document, viewport: Viewport) -> Mesh {
                     mesh.append(polyline::tessellate_polyline(&geo, color));
                 }
             }
+            ElementKind::Line => {
+                if let (Some(geo), Some(color)) = (
+                    line::resolve_line(&node.element, viewport),
+                    shape::resolve_stroke(&node.element),
+                ) {
+                    mesh.append(line::tessellate_line(&geo, color));
+                }
+            }
             _ => {}
         }
         stack.extend(node.children.iter().rev().copied());
@@ -336,6 +346,7 @@ impl Renderer {
         Self
     }
 
+    /// Render every supported 2D SVG shape in `document` headlessly into an
     /// Render every supported 2D SVG shape in `document` headlessly into an
     /// [`Image`] of `config.width × config.height` pixels.
     ///
@@ -904,6 +915,23 @@ mod tests {
     }
 
     #[test]
+    fn build_scene_tessellates_line() {
+        // A `<line>` needs renderable stroke paint; the other lines are
+        // skipped because SVG's initial `stroke` value is `none`, explicit
+        // `none` also paints nothing, and invalid stroke paint falls back to
+        // the initial `none`.
+        let document = svg3_dom::parse(
+            r#"<svg><line x1="10" y1="20" x2="50" y2="20" stroke="blue" stroke-width="4"/><line x1="10" y1="40" x2="50" y2="40"/><line x1="10" y1="50" x2="50" y2="50" stroke="none"/><line x1="10" y1="60" x2="50" y2="60" stroke="bogus"/></svg>"#,
+        )
+        .unwrap();
+        let mesh = build_scene(&document, vp());
+        assert_eq!(mesh.vertices.len(), 4);
+        assert_eq!(mesh.indices, vec![0, 1, 2, 0, 2, 3]);
+        assert_eq!(mesh.vertices[0].position, [10.0, 18.0, 0.0]);
+        assert_eq!(mesh.vertices[2].position, [50.0, 22.0, 0.0]);
+    }
+
+    #[test]
     fn document_viewport_reads_root_width_and_height() {
         let document = svg3_dom::parse(r#"<svg width="300" height="200"/>"#).unwrap();
         let viewport = document_viewport(
@@ -1163,6 +1191,40 @@ mod tests {
                 "pixel ({x}, {y}) should be transparent"
             );
         }
+    }
+
+    #[test]
+    fn render_to_image_draws_line() {
+        // A stroked line is rendered through its stroke paint; fill does not
+        // apply to `<line>`.
+        let document = svg3_dom::parse(
+            r#"<svg><line x1="8" y1="32" x2="56" y2="32" stroke="blue" stroke-width="8"/></svg>"#,
+        )
+        .unwrap();
+        let config = RenderConfig {
+            width: 64,
+            height: 64,
+            ..RenderConfig::default()
+        };
+        let image = match Renderer::new().render_to_image(&document, config) {
+            Ok(image) => image,
+            Err(RenderError::NoAdapter) => {
+                eprintln!("skipping render_to_image_draws_line: no GPU adapter");
+                return;
+            }
+            Err(e) => panic!("headless render failed: {e}"),
+        };
+        assert_eq!((image.width, image.height), (64, 64));
+        let centre = image.pixel(32, 32);
+        assert!(
+            centre[2] > 200 && centre[0] < 60 && centre[1] < 60,
+            "line centre pixel not blue: {centre:?}"
+        );
+        assert_eq!(
+            image.pixel(32, 20)[3],
+            0,
+            "background should be transparent"
+        );
     }
 
     #[test]

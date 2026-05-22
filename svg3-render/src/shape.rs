@@ -1,15 +1,15 @@
 //! Shared support for the SVG 1.1 basic-shape modules ([`crate::rect`],
-//! [`crate::circle`], [`crate::ellipse`], [`crate::polygon`] and
-//! [`crate::polyline`]).
+//! [`crate::circle`], [`crate::ellipse`], [`crate::polygon`],
+//! [`crate::polyline`], and [`crate::line`]).
 //!
-//! Each basic-shape module resolves its own geometry, but they share the
-//! `fill` paint resolution and the mesh [`Vertex`] constructor — and, for
-//! the `<length>`-based shapes, the SVG length grammar — collected here so a
+//! Each basic-shape module resolves its own geometry, but they share paint
+//! resolution and the mesh [`Vertex`] constructor — and, for the
+//! `<length>`-based shapes, the SVG length grammar — collected here so a
 //! new shape reuses the SVG 1.1 attribute rules instead of reimplementing
 //! them.
 //!
-//! Stroke, `fill-opacity`, CSS / `style=""`-set properties, and the Stylo
-//! cascade are not consulted yet — see the crate roadmap.
+//! `fill-opacity`, `stroke-opacity`, CSS / `style=""`-set properties, and
+//! the Stylo cascade are not consulted yet — see the crate roadmap.
 
 use svg3_dom::Element;
 
@@ -33,6 +33,19 @@ pub(crate) fn resolve_fill(element: &Element) -> Option<[f32; 4]> {
         return None;
     }
     Some(parse_color(value).unwrap_or(DEFAULT_FILL))
+}
+
+/// Resolve a shape's solid stroke as linear RGBA in `[0, 1]`.
+///
+/// Reads the `stroke` presentation attribute only. Unlike `fill`, SVG 1.1's
+/// initial `stroke` value is `none`, so a missing `stroke`, `stroke="none"`,
+/// or an unrecognised paint produces no stroke geometry.
+pub(crate) fn resolve_stroke(element: &Element) -> Option<[f32; 4]> {
+    let value = element.attributes.get("stroke")?.trim();
+    if value.eq_ignore_ascii_case("none") {
+        return None;
+    }
+    parse_color(value)
 }
 
 /// A mesh [`Vertex`] at `(x, y)` in SVG user space. Basic shapes are
@@ -250,6 +263,25 @@ mod tests {
             resolve_fill(&element(&[("fill", "bogus")])),
             Some([0.0, 0.0, 0.0, 1.0])
         );
+    }
+
+    #[test]
+    fn resolve_stroke_reads_presentation_attribute() {
+        // Missing `stroke` => SVG 1.1 initial value, no stroke paint.
+        assert_eq!(resolve_stroke(&element(&[])), None);
+        // `none` => no stroke geometry.
+        assert_eq!(resolve_stroke(&element(&[("stroke", "none")])), None);
+        // Named and hex paints resolve to linear RGBA.
+        assert_eq!(
+            resolve_stroke(&element(&[("stroke", "blue")])),
+            Some([0.0, 0.0, 1.0, 1.0])
+        );
+        assert_eq!(
+            resolve_stroke(&element(&[("stroke", "#ff0000")])),
+            Some([1.0, 0.0, 0.0, 1.0])
+        );
+        // Invalid stroke paint is ignored, leaving the initial `none`.
+        assert_eq!(resolve_stroke(&element(&[("stroke", "bogus")])), None);
     }
 
     #[test]

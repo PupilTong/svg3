@@ -1,13 +1,12 @@
-//! End-to-end snapshot tests for `<rect>`, `<circle>`, `<ellipse>`,
-//! `<polygon>` and filled `<polyline>` rendering.
+//! End-to-end snapshot tests for basic-shape rendering.
 //!
 //! Each case parses an svg3 document — the SVG WPT `shapes/rect-*`,
-//! `shapes/circle-*`, `shapes/ellipse-*` and `shapes/polygon-*` reference
-//! tests, plus polyline fill cases and the canonical SVG sample — renders it
-//! headlessly with [`Renderer::render_to_image`], and compares the result
-//! against a committed golden PNG in `tests/snapshots/`. Those PNGs are the
-//! reviewable snapshots — open them in a pull request to see what the
-//! renderer produces.
+//! `shapes/circle-*`, `shapes/ellipse-*`, and `shapes/polygon-*` reference
+//! tests, plus polyline fill, line, mixed-shape, and canonical SVG samples —
+//! renders it headlessly with [`Renderer::render_to_image`], and compares
+//! the result against a committed golden PNG in `tests/snapshots/`. Those
+//! PNGs are the reviewable snapshots — open them in a pull request to see
+//! what the renderer produces.
 //!
 //! After an intentional rendering change, regenerate the goldens and review
 //! the updated images in the diff:
@@ -227,6 +226,32 @@ fn cases() -> Vec<Case> {
         Case::square(
             "polyline-invalid-points-skipped",
             r##"<svg><rect width="100%" height="100%" fill="#666666"/><polyline points="18,82 50%,18 82,82" fill="red"/></svg>"##,
+        ),
+        // WPT `shapes/line-*`: a stroked horizontal line. SVG's initial
+        // stroke is `none`, so this fixture declares stroke paint explicitly.
+        Case::square(
+            "line-stroke",
+            r##"<svg><line x1="10" y1="50" x2="90" y2="50" stroke="#11aa55" stroke-width="8"/></svg>"##,
+        ),
+        // A non-axis-aligned line, catching perpendicular-offset math on both
+        // axes rather than only the horizontal-line path above.
+        Case::square(
+            "line-diagonal",
+            r##"<svg><line x1="15.25" y1="82.5" x2="84.75" y2="18.25" stroke="#2563eb" stroke-width="9.5"/></svg>"##,
+        ),
+        // Percentage coordinates and percentage stroke width, resolved through
+        // the document viewport before tessellation.
+        Case::sized(
+            "line-percentages",
+            r##"<svg width="160" height="90"><line x1="10%" y1="80%" x2="90%" y2="20%" stroke="#c14b2b" stroke-width="8%"/></svg>"##,
+            160,
+            90,
+        ),
+        // Mixed basic shapes in painter's order: the line is composited over
+        // filled rect/circle/ellipse geometry in one end-to-end scene.
+        Case::square(
+            "basic-shapes-overlap",
+            r##"<svg><rect x="8" y="8" width="84" height="84" fill="#13294b"/><circle cx="36" cy="36" r="22" fill="#f2c14e"/><ellipse cx="62" cy="62" rx="28" ry="18" fill="#c14b2b"/><line x1="18" y1="80" x2="82" y2="20" stroke="#ffffff" stroke-width="6"/></svg>"##,
         ),
         // The canonical SVG sample, rendered at its declared 300×200 size. The
         // `<rect width="100%">` exercises percentage lengths; the `<text>` is
