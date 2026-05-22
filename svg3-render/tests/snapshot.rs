@@ -176,6 +176,11 @@ fn cases() -> Vec<Case> {
             "ellipse-zero-radius",
             r#"<svg><ellipse cx="50" cy="50" rx="0" ry="30" fill="blue"/></svg>"#,
         ),
+        // Painter's order: a later `<ellipse>` paints over an earlier one.
+        Case::square(
+            "ellipse-overlap",
+            r#"<svg><ellipse cx="40" cy="44" rx="38" ry="24" fill="blue"/><ellipse cx="62" cy="58" rx="30" ry="40" fill="red"/></svg>"#,
+        ),
         // The canonical SVG sample, rendered at its declared 300×200 size. The
         // `<rect width="100%">` exercises percentage lengths; the `<text>` is
         // parsed but not yet rendered (text rendering is a separate milestone),

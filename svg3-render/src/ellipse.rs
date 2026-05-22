@@ -207,4 +207,85 @@ mod tests {
             assert_eq!(v.position[2], 0.0);
         }
     }
+
+    #[test]
+    fn resolve_ellipse_rejects_unparseable_radius() {
+        // An unparseable radius is treated like a missing one — the ellipse
+        // is not rendered. This holds for either axis.
+        assert_eq!(
+            resolve_ellipse(&ellipse(&[("rx", "abc"), ("ry", "20")]), vp()),
+            None
+        );
+        assert_eq!(
+            resolve_ellipse(&ellipse(&[("rx", "20"), ("ry", "")]), vp()),
+            None
+        );
+        assert_eq!(
+            resolve_ellipse(&ellipse(&[("rx", "20"), ("ry", "10 20")]), vp()),
+            None
+        );
+        // An unparseable `cx`/`cy`, by contrast, just falls back to its `0`
+        // default — it does not disable an otherwise-valid ellipse.
+        let geo = resolve_ellipse(
+            &ellipse(&[("cx", "nope"), ("rx", "20"), ("ry", "12")]),
+            vp(),
+        )
+        .unwrap();
+        assert_eq!((geo.cx, geo.cy), (0.0, 0.0));
+    }
+
+    #[test]
+    fn resolve_ellipse_mixes_absolute_and_percentage_lengths() {
+        // Absolute and percentage lengths may be mixed freely across one
+        // ellipse's attributes; each still resolves on its own axis.
+        let viewport = Viewport {
+            width: 400.0,
+            height: 200.0,
+        };
+        let geo = resolve_ellipse(
+            &ellipse(&[("cx", "30"), ("cy", "10%"), ("rx", "25%"), ("ry", "40")]),
+            viewport,
+        )
+        .unwrap();
+        assert_eq!(geo.cx, 30.0); // absolute
+        assert_eq!(geo.cy, 20.0); // 10% of viewport height 200
+        assert_eq!(geo.rx, 100.0); // 25% of viewport width 400
+        assert_eq!(geo.ry, 40.0); // absolute
+    }
+
+    #[test]
+    fn tessellate_ellipse_places_axis_extremes() {
+        // The perimeter is sampled from `t = 0`, so vertex 1 sits at the
+        // `+rx` extreme and every quarter-turn (the segment count is a
+        // multiple of four) lands on an axis. This pins `rx` to the x-axis
+        // and `ry` to the y-axis — a circle would put both at one radius.
+        let geo = EllipseGeometry {
+            cx: 50.0,
+            cy: 40.0,
+            rx: 30.0,
+            ry: 20.0,
+        };
+        let mesh = tessellate_ellipse(&geo, [1.0; 4]);
+        let quarter = ELLIPSE_SEGMENTS / 4;
+        let at = |i: usize| mesh.vertices[i].position;
+        let near = |p: [f32; 3], x: f32, y: f32| {
+            (p[0] - x).abs() < 1e-3 && (p[1] - y).abs() < 1e-3 && p[2] == 0.0
+        };
+        assert!(near(at(1), 80.0, 40.0), "+rx extreme: {:?}", at(1));
+        assert!(
+            near(at(1 + quarter), 50.0, 60.0),
+            "+ry extreme: {:?}",
+            at(1 + quarter)
+        );
+        assert!(
+            near(at(1 + 2 * quarter), 20.0, 40.0),
+            "-rx extreme: {:?}",
+            at(1 + 2 * quarter)
+        );
+        assert!(
+            near(at(1 + 3 * quarter), 50.0, 20.0),
+            "-ry extreme: {:?}",
+            at(1 + 3 * quarter)
+        );
+    }
 }
