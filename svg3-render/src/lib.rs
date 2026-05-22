@@ -4,7 +4,7 @@
 //! with [wgpu](https://crates.io/crates/wgpu).
 //!
 //! This milestone implements the SVG 1.1 `<rect>`, `<circle>`, `<ellipse>`,
-//! `<polygon>`, `<polyline>`, and `<line>` basic shapes: [`build_scene`]
+//! `<polygon>`, `<polyline>`, `<line>`, and `<path>` shapes: [`build_scene`]
 //! tessellates every such shape in a document into a [`Mesh`], and
 //! [`Renderer::render_to_image`] rasterises that mesh headlessly — no window
 //! or swapchain — into an [`Image`]. The same [`Renderer`] also drives a
@@ -21,6 +21,7 @@
 mod circle;
 mod ellipse;
 mod line;
+mod path;
 mod polygon;
 mod polyline;
 mod rect;
@@ -247,9 +248,9 @@ impl Image {
 /// mesh is in SVG user space (origin top-left, y-down, `z = 0`). Shapes are
 /// appended in document order, so a later shape paints over an earlier one. A
 /// shape that is not rendered — a degenerate size, `fill="none"`, or a
-/// missing/`none` stroke on `<line>` — contributes nothing. `transform` and
-/// grouping are not applied yet, so a shape is placed at its own coordinates
-/// regardless of any ancestor `<g>`.
+/// missing/`none` stroke on stroke-only geometry — contributes nothing.
+/// `transform` and grouping are not applied yet, so a shape is placed at its
+/// own coordinates regardless of any ancestor `<g>`.
 pub fn build_scene(document: &Document, viewport: Viewport) -> Mesh {
     let mut mesh = Mesh::default();
     // Pre-order DFS; children pushed in reverse so they pop in document
@@ -304,6 +305,16 @@ pub fn build_scene(document: &Document, viewport: Viewport) -> Mesh {
                     shape::resolve_stroke(&node.element),
                 ) {
                     mesh.append(line::tessellate_line(&geo, color));
+                }
+            }
+            ElementKind::Path => {
+                if let Some(geo) = path::resolve_path(&node.element, viewport) {
+                    if let Some(color) = shape::resolve_fill(&node.element) {
+                        mesh.append(path::tessellate_path_fill(&geo, color));
+                    }
+                    if let Some(color) = shape::resolve_stroke(&node.element) {
+                        mesh.append(path::tessellate_path_stroke(&geo, color));
+                    }
                 }
             }
             _ => {}
@@ -625,7 +636,7 @@ fn acquire_gpu() -> Result<(wgpu::Device, wgpu::Queue), RenderError> {
     })
 }
 
-/// Build the basic-shape render pipeline targeting `format`.
+/// Build the 2D shape render pipeline targeting `format`.
 fn build_pipeline(device: &wgpu::Device, format: wgpu::TextureFormat) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -1057,6 +1068,41 @@ mod tests {
     }
 
     #[test]
+    fn build_scene_tessellates_path_fill() {
+        let document =
+            svg3_dom::parse(r#"<svg><path d="M 10 10 L 50 10 L 30 40 Z" fill="blue"/></svg>"#)
+                .unwrap();
+        let mesh = build_scene(&document, vp());
+        assert!(!mesh.is_empty());
+        assert_eq!(mesh.indices.len() % 3, 0);
+        assert!(mesh
+            .vertices
+            .iter()
+            .all(|v| v.color == [0.0, 0.0, 1.0, 1.0]));
+    }
+
+    #[test]
+    fn build_scene_paints_path_fill_before_stroke() {
+        let document = svg3_dom::parse(
+            r#"<svg><path d="M 10 10 H 60 V 40 Z" fill="blue" stroke="red" stroke-width="4"/></svg>"#,
+        )
+        .unwrap();
+        let mesh = build_scene(&document, vp());
+        let first_stroke = mesh
+            .vertices
+            .iter()
+            .position(|v| v.color == [1.0, 0.0, 0.0, 1.0])
+            .expect("stroke vertices should be appended after fill vertices");
+        assert!(first_stroke > 0);
+        assert!(
+            mesh.vertices[..first_stroke]
+                .iter()
+                .all(|v| v.color == [0.0, 0.0, 1.0, 1.0]),
+            "fill vertices should precede stroke vertices"
+        );
+    }
+
+    #[test]
     fn document_viewport_reads_root_width_and_height() {
         let document = svg3_dom::parse(r#"<svg width="300" height="200"/>"#).unwrap();
         let viewport = document_viewport(
@@ -1335,6 +1381,91 @@ mod tests {
             image.pixel(32, 20)[3],
             0,
             "background should be transparent"
+        );
+    }
+
+    #[test]
+    fn render_to_image_draws_path_fill() {
+        let document =
+            svg3_dom::parse(r#"<svg><path d="M 32 8 L 56 56 L 8 56 Z" fill="blue"/></svg>"#)
+                .unwrap();
+        let config = RenderConfig {
+            width: 64,
+            height: 64,
+            ..RenderConfig::default()
+        };
+        let Some(renderer) = skip_or_renderer("render_to_image_draws_path_fill") else {
+            return;
+        };
+        let image = renderer
+            .render_to_image(&document, config)
+            .expect("headless render failed");
+        assert_eq!((image.width, image.height), (64, 64));
+        let inside = image.pixel(32, 40);
+        assert!(
+            inside[2] > 200 && inside[0] < 60 && inside[1] < 60,
+            "path interior pixel not blue: {inside:?}"
+        );
+        assert_eq!(image.pixel(4, 4)[3], 0, "background should be transparent");
+    }
+
+    #[test]
+    fn render_to_image_draws_path_stroke() {
+        let document = svg3_dom::parse(
+            r#"<svg><path d="M 8 32 H 56" fill="none" stroke="blue" stroke-width="8"/></svg>"#,
+        )
+        .unwrap();
+        let config = RenderConfig {
+            width: 64,
+            height: 64,
+            ..RenderConfig::default()
+        };
+        let Some(renderer) = skip_or_renderer("render_to_image_draws_path_stroke") else {
+            return;
+        };
+        let image = renderer
+            .render_to_image(&document, config)
+            .expect("headless render failed");
+        assert_eq!((image.width, image.height), (64, 64));
+        let centre = image.pixel(32, 32);
+        assert!(
+            centre[2] > 200 && centre[0] < 60 && centre[1] < 60,
+            "path stroke pixel not blue: {centre:?}"
+        );
+        assert_eq!(
+            image.pixel(32, 20)[3],
+            0,
+            "background should be transparent"
+        );
+    }
+
+    #[test]
+    fn render_to_image_honors_path_evenodd_fill_rule() {
+        let document = svg3_dom::parse(
+            r#"<svg><path fill="blue" fill-rule="evenodd" d="M 8 8 H 56 V 56 H 8 Z M 20 20 H 44 V 44 H 20 Z"/></svg>"#,
+        )
+        .unwrap();
+        let config = RenderConfig {
+            width: 64,
+            height: 64,
+            ..RenderConfig::default()
+        };
+        let Some(renderer) = skip_or_renderer("render_to_image_honors_path_evenodd_fill_rule")
+        else {
+            return;
+        };
+        let image = renderer
+            .render_to_image(&document, config)
+            .expect("headless render failed");
+        let outer = image.pixel(12, 12);
+        assert!(
+            outer[2] > 200 && outer[0] < 60 && outer[1] < 60,
+            "outer ring pixel not blue: {outer:?}"
+        );
+        assert_eq!(
+            image.pixel(32, 32)[3],
+            0,
+            "evenodd hole should be transparent"
         );
     }
 

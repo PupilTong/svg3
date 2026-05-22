@@ -1,8 +1,8 @@
-//! Shared support for the SVG 1.1 basic-shape modules ([`crate::rect`],
+//! Shared support for the SVG 1.1 shape modules ([`crate::rect`],
 //! [`crate::circle`], [`crate::ellipse`], [`crate::polygon`],
-//! [`crate::polyline`], and [`crate::line`]).
+//! [`crate::polyline`], [`crate::line`], and [`crate::path`]).
 //!
-//! Each basic-shape module resolves its own geometry, but they share paint
+//! Each shape module resolves its own geometry, but they share paint
 //! resolution and the mesh [`Vertex`] constructor — and, for the
 //! `<length>`-based shapes, the SVG length grammar — collected here so a
 //! new shape reuses the SVG 1.1 attribute rules instead of reimplementing
@@ -46,6 +46,21 @@ pub(crate) fn resolve_stroke(element: &Element) -> Option<[f32; 4]> {
         return None;
     }
     parse_color(value)
+}
+
+/// Resolve a shape's `stroke-width` presentation attribute.
+///
+/// The SVG 1.1 initial value is `1`; percentages resolve against the
+/// normalized viewport diagonal because stroke width is neither horizontal
+/// nor vertical ([SVG11] §7.10).
+pub(crate) fn resolve_stroke_width(element: &Element, viewport: Viewport) -> f32 {
+    element
+        .attributes
+        .get("stroke-width")
+        .map(String::as_str)
+        .and_then(Length::parse)
+        .map(|length| length.resolve(viewport.diagonal()))
+        .unwrap_or(1.0)
 }
 
 /// A mesh [`Vertex`] at `(x, y)` in SVG user space. Basic shapes are
@@ -282,6 +297,40 @@ mod tests {
         );
         // Invalid stroke paint is ignored, leaving the initial `none`.
         assert_eq!(resolve_stroke(&element(&[("stroke", "bogus")])), None);
+    }
+
+    #[test]
+    fn resolve_stroke_width_defaults_and_resolves_percentages() {
+        assert_eq!(
+            resolve_stroke_width(
+                &element(&[]),
+                Viewport {
+                    width: 100.0,
+                    height: 100.0,
+                },
+            ),
+            1.0
+        );
+        assert_eq!(
+            resolve_stroke_width(
+                &element(&[("stroke-width", "6")]),
+                Viewport {
+                    width: 100.0,
+                    height: 100.0,
+                },
+            ),
+            6.0
+        );
+        assert_eq!(
+            resolve_stroke_width(
+                &element(&[("stroke-width", "10%")]),
+                Viewport {
+                    width: 300.0,
+                    height: 400.0,
+                },
+            ),
+            35.355_34
+        );
     }
 
     #[test]

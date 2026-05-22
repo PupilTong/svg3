@@ -12,6 +12,8 @@ bytemuck = { workspace = true, features = ["derive"] }
 glam.workspace = true
 thiserror.workspace = true
 log.workspace = true
+lyon_tessellation.workspace = true
+svgtypes.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true

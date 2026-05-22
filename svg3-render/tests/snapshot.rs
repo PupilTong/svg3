@@ -2,7 +2,7 @@
 //!
 //! Each case parses an svg3 document — the SVG WPT `shapes/rect-*`,
 //! `shapes/circle-*`, `shapes/ellipse-*`, and `shapes/polygon-*` reference
-//! tests, plus polyline fill, line, mixed-shape, and canonical SVG samples —
+//! tests, plus polyline fill, line, path, mixed-shape, and canonical SVG samples —
 //! renders it headlessly with [`Renderer::render_to_image`], and compares
 //! the result against a committed golden PNG in `tests/snapshots/`. Those
 //! PNGs are the reviewable snapshots — open them in a pull request to see
@@ -246,6 +246,22 @@ fn cases() -> Vec<Case> {
             r##"<svg width="160" height="90"><line x1="10%" y1="80%" x2="90%" y2="20%" stroke="#c14b2b" stroke-width="8%"/></svg>"##,
             160,
             90,
+        ),
+        // SVG WPT `paths/path-*`: closed path fill, including cubic and
+        // quadratic curves flattened through the path tessellator.
+        Case::square(
+            "path-fill-curves",
+            r##"<svg><path d="M 18 76 C 18 20 82 20 82 76 Q 50 92 18 76 Z" fill="#2563eb"/></svg>"##,
+        ),
+        // Stroked open path with round caps and joins.
+        Case::square(
+            "path-stroke-curve",
+            r##"<svg><path d="M 14 76 C 24 18 76 18 86 76" fill="none" stroke="#11aa55" stroke-width="10" stroke-linecap="round"/></svg>"##,
+        ),
+        // `fill-rule="evenodd"` cuts a hole through same-winding subpaths.
+        Case::square(
+            "path-evenodd-hole",
+            r##"<svg><path fill="#13294b" fill-rule="evenodd" d="M 10 10 H 90 V 90 H 10 Z M 30 30 H 70 V 70 H 30 Z"/></svg>"##,
         ),
         // Mixed basic shapes in painter's order: the line is composited over
         // filled rect/circle/ellipse geometry in one end-to-end scene.
