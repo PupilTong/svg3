@@ -35,6 +35,8 @@ pub enum ElementKind {
     Ellipse,
     /// Polygon (SVG 1.1 `<polygon>` basic shape).
     Polygon,
+    /// Connected line segments (SVG 1.1 `<polyline>` basic shape).
+    Polyline,
     /// Axis-aligned box primitive.
     Cube,
     /// Ellipsoid primitive.
@@ -57,6 +59,7 @@ impl ElementKind {
             "circle" => Self::Circle,
             "ellipse" => Self::Ellipse,
             "polygon" => Self::Polygon,
+            "polyline" => Self::Polyline,
             "cube" => Self::Cube,
             "ellipsoid" => Self::Ellipsoid,
             other => Self::Unknown(other.to_owned()),
@@ -72,6 +75,7 @@ impl ElementKind {
             Self::Circle => "circle",
             Self::Ellipse => "ellipse",
             Self::Polygon => "polygon",
+            Self::Polyline => "polyline",
             Self::Cube => "cube",
             Self::Ellipsoid => "ellipsoid",
             Self::Unknown(t) => t.as_str(),
@@ -332,10 +336,14 @@ mod tests {
         assert_eq!(ElementKind::from_tag("circle"), ElementKind::Circle);
         assert_eq!(ElementKind::from_tag("ellipse"), ElementKind::Ellipse);
         assert_eq!(ElementKind::from_tag("polygon"), ElementKind::Polygon);
+        assert_eq!(ElementKind::from_tag("polyline"), ElementKind::Polyline);
         assert_eq!(ElementKind::from_tag("cube"), ElementKind::Cube);
         assert_eq!(ElementKind::from_tag("ellipsoid"), ElementKind::Ellipsoid);
         // `as_tag` round-trips a recognised kind back to its source name.
         assert_eq!(ElementKind::Rect.as_tag(), "rect");
+        assert_eq!(ElementKind::Ellipse.as_tag(), "ellipse");
+        assert_eq!(ElementKind::Polygon.as_tag(), "polygon");
+        assert_eq!(ElementKind::Polyline.as_tag(), "polyline");
         // `<group>` is not in SPEC.md; only `<g>` from SVG 1.1 is the
         // canonical grouping element.
         assert_eq!(
@@ -459,6 +467,23 @@ mod tests {
         );
         assert_eq!(
             polygon.attributes.get("fill").map(String::as_str),
+            Some("green")
+        );
+    }
+
+    #[test]
+    fn parse_polyline_preserves_geometry_attributes() {
+        let xml = r#"<svg><polyline points="10,20 30,40 50,20" fill="green"/></svg>"#;
+        let doc = parse(xml).unwrap();
+        let polyline_id = doc.node(doc.root()).children[0];
+        let polyline = doc.element(polyline_id);
+        assert_eq!(polyline.kind, ElementKind::Polyline);
+        assert_eq!(
+            polyline.attributes.get("points").map(String::as_str),
+            Some("10,20 30,40 50,20")
+        );
+        assert_eq!(
+            polyline.attributes.get("fill").map(String::as_str),
             Some("green")
         );
     }
