@@ -343,4 +343,34 @@ mod tests {
             tessellated_area(&mesh),
         );
     }
+
+    #[test]
+    fn tessellate_degenerate_polygon_stays_robust() {
+        // Inputs with no valid ear-clipping triangulation — self-intersecting,
+        // fully collinear, or coincident — must still terminate and emit only
+        // valid, in-range indices via the `triangulate` fan fallback, never
+        // panicking or looping forever. The collinear and coincident cases
+        // have no ear at all, so they exercise that fallback branch directly.
+        for points in [
+            "0,0 10,10 10,0 0,10", // bowtie: self-intersecting
+            "0,0 10,0 20,0 30,0",  // collinear: zero area, no ear exists
+            "5,5 5,5 5,5 5,5",     // every corner coincident
+        ] {
+            let geo = resolve_polygon(&polygon(&[("points", points)])).unwrap();
+            let mesh = tessellate_polygon(&geo, [1.0; 4]);
+            assert_eq!(mesh.vertices.len(), geo.points.len());
+            assert!(!mesh.indices.is_empty(), "`{points}` produced no geometry");
+            assert_eq!(
+                mesh.indices.len() % 3,
+                0,
+                "`{points}` left a partial triangle",
+            );
+            assert!(
+                mesh.indices
+                    .iter()
+                    .all(|&i| (i as usize) < mesh.vertices.len()),
+                "`{points}` emitted an out-of-range index",
+            );
+        }
+    }
 }
