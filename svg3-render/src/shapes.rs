@@ -7,7 +7,9 @@
 //! paint resolution and the mesh [`Vertex`] constructors — and, for the
 //! `<length>`-based shapes, the SVG length grammar — collected here so a
 //! new shape reuses the SVG 1.1 attribute rules instead of reimplementing
-//! them.
+//! them. The `<polygon>` and `<polyline>` fills further share the
+//! [`triangulate`] ear clipper, since both fill an outline that may be
+//! concave.
 //!
 //! `fill-opacity`, `stroke-opacity`, CSS / `style=""`-set properties, and
 //! the Stylo cascade are not consulted yet — see the crate roadmap.
@@ -19,6 +21,8 @@ pub(crate) mod path;
 pub(crate) mod polygon;
 pub(crate) mod polyline;
 pub(crate) mod rect;
+
+mod triangulate;
 
 use svg3_dom::Element;
 
