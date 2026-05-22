@@ -1,8 +1,9 @@
 //! `svg3-macos` — native macOS demo window for svg3.
 //!
 //! Opens a Cocoa NSWindow via winit, accepts an SVG string through a macOS
-//! dialog, and draws the currently implemented `<rect>` / `<circle>` geometry
-//! into a Metal-backed wgpu surface. The document is viewed through an orbit
+//! dialog, and draws the currently implemented `<rect>` / `<circle>` /
+//! `<ellipse>` geometry into a Metal-backed wgpu surface. The document is
+//! viewed through an orbit
 //! camera the user can move: drag or the arrow keys to orbit, scroll to
 //! zoom, `R` to reset.
 
@@ -593,7 +594,7 @@ fn prompt_for_svg(default_source: &str) -> Result<Option<String>> {
         .arg(format!(
             "set promptText to {}",
             apple_script_string(
-                "Paste an SVG string. This demo currently renders <rect> and <circle> elements."
+                "Paste an SVG string. This demo currently renders <rect>, <circle> and <ellipse> elements."
             )
         ))
         .arg("-e")

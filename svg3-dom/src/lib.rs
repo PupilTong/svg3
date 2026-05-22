@@ -31,6 +31,8 @@ pub enum ElementKind {
     Rect,
     /// Circle (SVG 1.1 `<circle>` basic shape).
     Circle,
+    /// Ellipse (SVG 1.1 `<ellipse>` basic shape).
+    Ellipse,
     /// Axis-aligned box primitive.
     Cube,
     /// Ellipsoid primitive.
@@ -51,6 +53,7 @@ impl ElementKind {
             "g" => Self::Group,
             "rect" => Self::Rect,
             "circle" => Self::Circle,
+            "ellipse" => Self::Ellipse,
             "cube" => Self::Cube,
             "ellipsoid" => Self::Ellipsoid,
             other => Self::Unknown(other.to_owned()),
@@ -64,6 +67,7 @@ impl ElementKind {
             Self::Group => "g",
             Self::Rect => "rect",
             Self::Circle => "circle",
+            Self::Ellipse => "ellipse",
             Self::Cube => "cube",
             Self::Ellipsoid => "ellipsoid",
             Self::Unknown(t) => t.as_str(),
@@ -322,6 +326,7 @@ mod tests {
         assert_eq!(ElementKind::from_tag("g"), ElementKind::Group);
         assert_eq!(ElementKind::from_tag("rect"), ElementKind::Rect);
         assert_eq!(ElementKind::from_tag("circle"), ElementKind::Circle);
+        assert_eq!(ElementKind::from_tag("ellipse"), ElementKind::Ellipse);
         assert_eq!(ElementKind::from_tag("cube"), ElementKind::Cube);
         assert_eq!(ElementKind::from_tag("ellipsoid"), ElementKind::Ellipsoid);
         // `as_tag` round-trips a recognised kind back to its source name.
@@ -416,6 +421,23 @@ mod tests {
         assert_eq!(
             circle.attributes.get("fill").map(String::as_str),
             Some("red")
+        );
+    }
+
+    #[test]
+    fn parse_ellipse_preserves_geometry_attributes() {
+        let xml = r#"<svg><ellipse cx="60" cy="40" rx="50" ry="30" fill="green"/></svg>"#;
+        let doc = parse(xml).unwrap();
+        let ellipse_id = doc.node(doc.root()).children[0];
+        let ellipse = doc.element(ellipse_id);
+        assert_eq!(ellipse.kind, ElementKind::Ellipse);
+        assert_eq!(ellipse.attributes.get("cx").map(String::as_str), Some("60"));
+        assert_eq!(ellipse.attributes.get("cy").map(String::as_str), Some("40"));
+        assert_eq!(ellipse.attributes.get("rx").map(String::as_str), Some("50"));
+        assert_eq!(ellipse.attributes.get("ry").map(String::as_str), Some("30"));
+        assert_eq!(
+            ellipse.attributes.get("fill").map(String::as_str),
+            Some("green")
         );
     }
 

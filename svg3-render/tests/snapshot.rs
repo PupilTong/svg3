@@ -1,8 +1,10 @@
-//! End-to-end snapshot tests for `<rect>` and `<circle>` rendering.
+//! End-to-end snapshot tests for `<rect>`, `<circle>` and `<ellipse>`
+//! rendering.
 //!
-//! Each case parses an svg3 document — the SVG WPT `shapes/rect-*` /
-//! `shapes/circle-*` reference tests, plus the canonical SVG sample —
-//! renders it headlessly with [`Renderer::render_to_image`], and compares
+//! Each case parses an svg3 document — the SVG WPT `shapes/rect-*`,
+//! `shapes/circle-*` and `shapes/ellipse-*` reference tests, plus the
+//! canonical SVG sample — renders it headlessly with
+//! [`Renderer::render_to_image`], and compares
 //! the result against a committed golden PNG in `tests/snapshots/`. Those
 //! PNGs are the reviewable snapshots — open them in a pull request to see
 //! what the renderer produces.
@@ -157,6 +159,27 @@ fn cases() -> Vec<Case> {
         Case::square(
             "circle-hex-fill",
             r##"<svg><circle cx="50" cy="50" r="38" fill="#11aa55"/></svg>"##,
+        ),
+        // SVG WPT `shapes/ellipse-*`: a basic filled ellipse, wider than it
+        // is tall so it is visibly not a circle.
+        Case::square(
+            "ellipse-fill",
+            r#"<svg><ellipse cx="50" cy="50" rx="45" ry="28" fill="blue"/></svg>"#,
+        ),
+        // An ellipse with no `fill` — SVG 1.1's initial value is opaque black.
+        Case::square(
+            "ellipse-default-fill",
+            r#"<svg><ellipse cx="50" cy="50" rx="42" ry="30"/></svg>"#,
+        ),
+        // [SVG11] §9.4: an ellipse with a zero radius is not rendered.
+        Case::square(
+            "ellipse-zero-radius",
+            r#"<svg><ellipse cx="50" cy="50" rx="0" ry="30" fill="blue"/></svg>"#,
+        ),
+        // Painter's order: a later `<ellipse>` paints over an earlier one.
+        Case::square(
+            "ellipse-overlap",
+            r#"<svg><ellipse cx="40" cy="44" rx="38" ry="24" fill="blue"/><ellipse cx="62" cy="58" rx="30" ry="40" fill="red"/></svg>"#,
         ),
         // The canonical SVG sample, rendered at its declared 300×200 size. The
         // `<rect width="100%">` exercises percentage lengths; the `<text>` is
