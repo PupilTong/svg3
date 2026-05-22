@@ -1,11 +1,12 @@
-//! Benchmarks for `svg3_render::build_scene` — `<rect>` tessellation.
+//! Benchmarks for `svg3_render::build_scene` — basic-shape tessellation.
 //!
-//! Five representative shapes:
+//! Six representative shapes:
 //! - `sharp_100`: 100 sharp `<rect>`s — per-rect quad tessellation.
 //! - `rounded_100`: 100 rounded `<rect>`s — heavier corner-arc tessellation.
 //! - `single_rounded`: one rounded `<rect>` — fixed per-shape cost.
 //! - `circle_100`: 100 `<circle>`s — per-circle triangle-fan tessellation.
 //! - `ellipse_100`: 100 `<ellipse>`s — per-ellipse triangle-fan tessellation.
+//! - `polygon_100`: 100 concave-star `<polygon>`s — ear-clip triangulation.
 //!
 //! Documents are built once at benchmark-group setup and passed by
 //! reference into the iter loop so we measure tessellation, not document
@@ -69,12 +70,45 @@ fn document_of_ellipses(n: usize) -> Document {
     doc
 }
 
+/// A ten-vertex star outline centred at `(cx, cy)` — a concave polygon, so
+/// it exercises the ear-clipping path rather than a trivial fan.
+fn star_points(cx: f32, cy: f32) -> String {
+    let mut points = String::new();
+    for k in 0..10 {
+        let radius = if k % 2 == 0 { 16.0 } else { 7.0 };
+        let angle = std::f32::consts::PI * k as f32 / 5.0 - std::f32::consts::FRAC_PI_2;
+        if k > 0 {
+            points.push(' ');
+        }
+        points.push_str(&format!(
+            "{},{}",
+            cx + radius * angle.cos(),
+            cy + radius * angle.sin(),
+        ));
+    }
+    points
+}
+
+/// A document of `n` sibling concave-star `<polygon>`s under the root.
+fn document_of_polygons(n: usize) -> Document {
+    let mut doc = Document::new();
+    let root = doc.root();
+    for i in 0..n {
+        let id = doc.append_child(root, ElementKind::Polygon);
+        let attrs = &mut doc.node_mut(id).element.attributes;
+        attrs.insert("points".to_owned(), star_points((i * 2) as f32, 0.0));
+        attrs.insert("fill".to_owned(), "blue".to_owned());
+    }
+    doc
+}
+
 fn bench_tessellate(c: &mut Criterion) {
     let sharp = document_of_rects(100, false);
     let rounded = document_of_rects(100, true);
     let single = document_of_rects(1, true);
     let circles = document_of_circles(100);
     let ellipses = document_of_ellipses(100);
+    let polygons = document_of_polygons(100);
     // The fixtures use absolute coordinates, so the viewport only needs to be
     // a valid percentage basis.
     let viewport = Viewport {
@@ -97,6 +131,9 @@ fn bench_tessellate(c: &mut Criterion) {
     });
     group.bench_function("ellipse_100", |b| {
         b.iter(|| build_scene(black_box(&ellipses), viewport))
+    });
+    group.bench_function("polygon_100", |b| {
+        b.iter(|| build_scene(black_box(&polygons), viewport))
     });
     group.finish();
 }

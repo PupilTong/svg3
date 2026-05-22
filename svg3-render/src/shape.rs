@@ -1,10 +1,11 @@
 //! Shared support for the SVG 1.1 basic-shape modules ([`crate::rect`],
-//! [`crate::circle`]).
+//! [`crate::circle`], [`crate::ellipse`], [`crate::polygon`]).
 //!
-//! Each basic-shape module resolves its own geometry, but they all share
-//! the SVG length grammar, `fill` paint resolution, and the mesh [`Vertex`]
-//! constructor — collected here so a new shape reuses the SVG 1.1 attribute
-//! rules instead of reimplementing them.
+//! Each basic-shape module resolves its own geometry, but they share the
+//! `fill` paint resolution and the mesh [`Vertex`] constructor — and, for
+//! the `<length>`-based shapes, the SVG length grammar — collected here so a
+//! new shape reuses the SVG 1.1 attribute rules instead of reimplementing
+//! them.
 //!
 //! Stroke, `fill-opacity`, CSS / `style=""`-set properties, and the Stylo
 //! cascade are not consulted yet — see the crate roadmap.

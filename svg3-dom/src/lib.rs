@@ -33,6 +33,8 @@ pub enum ElementKind {
     Circle,
     /// Ellipse (SVG 1.1 `<ellipse>` basic shape).
     Ellipse,
+    /// Polygon (SVG 1.1 `<polygon>` basic shape).
+    Polygon,
     /// Axis-aligned box primitive.
     Cube,
     /// Ellipsoid primitive.
@@ -54,6 +56,7 @@ impl ElementKind {
             "rect" => Self::Rect,
             "circle" => Self::Circle,
             "ellipse" => Self::Ellipse,
+            "polygon" => Self::Polygon,
             "cube" => Self::Cube,
             "ellipsoid" => Self::Ellipsoid,
             other => Self::Unknown(other.to_owned()),
@@ -68,6 +71,7 @@ impl ElementKind {
             Self::Rect => "rect",
             Self::Circle => "circle",
             Self::Ellipse => "ellipse",
+            Self::Polygon => "polygon",
             Self::Cube => "cube",
             Self::Ellipsoid => "ellipsoid",
             Self::Unknown(t) => t.as_str(),
@@ -327,6 +331,7 @@ mod tests {
         assert_eq!(ElementKind::from_tag("rect"), ElementKind::Rect);
         assert_eq!(ElementKind::from_tag("circle"), ElementKind::Circle);
         assert_eq!(ElementKind::from_tag("ellipse"), ElementKind::Ellipse);
+        assert_eq!(ElementKind::from_tag("polygon"), ElementKind::Polygon);
         assert_eq!(ElementKind::from_tag("cube"), ElementKind::Cube);
         assert_eq!(ElementKind::from_tag("ellipsoid"), ElementKind::Ellipsoid);
         // `as_tag` round-trips a recognised kind back to its source name.
@@ -437,6 +442,23 @@ mod tests {
         assert_eq!(ellipse.attributes.get("ry").map(String::as_str), Some("30"));
         assert_eq!(
             ellipse.attributes.get("fill").map(String::as_str),
+            Some("green")
+        );
+    }
+
+    #[test]
+    fn parse_polygon_preserves_points_attribute() {
+        let xml = r#"<svg><polygon points="0,0 20,0 10,16" fill="green"/></svg>"#;
+        let doc = parse(xml).unwrap();
+        let polygon_id = doc.node(doc.root()).children[0];
+        let polygon = doc.element(polygon_id);
+        assert_eq!(polygon.kind, ElementKind::Polygon);
+        assert_eq!(
+            polygon.attributes.get("points").map(String::as_str),
+            Some("0,0 20,0 10,16")
+        );
+        assert_eq!(
+            polygon.attributes.get("fill").map(String::as_str),
             Some("green")
         );
     }
