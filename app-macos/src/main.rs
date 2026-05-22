@@ -13,8 +13,7 @@ use std::process::Command;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
-use svg3_render::{build_scene, document_viewport, RenderConfig, Vertex, Viewport};
-use wgpu::util::DeviceExt;
+use svg3_render::{build_scene, document_viewport, GpuScene, RenderConfig, Renderer, Viewport};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalSize};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -45,22 +44,6 @@ const CLEAR_COLOR: wgpu::Color = wgpu::Color {
 
 const DEFAULT_SVG: &str = r##"<svg><rect x="40" y="40" width="220" height="130" fill="#2563eb"/><circle cx="245" cy="155" r="64" fill="#f97316"/><ellipse cx="395" cy="130" rx="62" ry="38" fill="#a855f7"/><polygon points="505,58 565,170 448,170" fill="#facc15"/><polyline points="400,70 575,220 355,220" fill="#22c55e"/><line x1="48" y1="220" x2="330" y2="70" stroke="#111827" stroke-width="10"/></svg>"##;
 
-const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 2] =
-    wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4];
-
-/// A built scene: object-space geometry buffers plus the camera transform
-/// uniform. The vertex and index buffers are stable until the SVG itself
-/// changes; camera moves only rewrite the uniform buffer.
-struct DrawScene {
-    /// The document viewport the camera frames and targets.
-    viewport: Viewport,
-    vertex_buffer: wgpu::Buffer,
-    index_buffer: wgpu::Buffer,
-    transform_buffer: wgpu::Buffer,
-    transform_bind_group: wgpu::BindGroup,
-    index_count: u32,
-}
-
 /// GPU state, created once the window exists.
 ///
 /// `Arc<Window>` + `Surface<'static>`: wgpu borrows the window handle for the
@@ -69,11 +52,13 @@ struct DrawScene {
 struct Gfx {
     window: Arc<Window>,
     surface: wgpu::Surface<'static>,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
+    /// Shared renderer: owns the wgpu device, queue and render pipeline.
+    renderer: Renderer,
     config: wgpu::SurfaceConfiguration,
-    pipeline: wgpu::RenderPipeline,
-    scene: Option<DrawScene>,
+    /// The tessellated scene paired with the document viewport it was framed
+    /// against — `GpuScene` is GPU-only, so the viewport rides alongside it.
+    /// `None` when the document has no supported shapes.
+    scene: Option<(GpuScene, Viewport)>,
     svg_source: String,
     /// The orbit camera the document is viewed through.
     camera: OrbitCamera,
@@ -121,15 +106,13 @@ impl Gfx {
         })?;
 
         surface.configure(&device, &config);
-        let pipeline = build_pipeline(&device, config.format);
+        let renderer = Renderer::with_device(device, queue, config.format);
 
         let mut gfx = Self {
             window,
             surface,
-            device,
-            queue,
+            renderer,
             config,
-            pipeline,
             scene: None,
             svg_source: String::new(),
             camera: OrbitCamera::framing(Viewport {
@@ -150,7 +133,7 @@ impl Gfx {
         }
         self.config.width = width;
         self.config.height = height;
-        self.surface.configure(&self.device, &self.config);
+        self.surface.configure(self.renderer.device(), &self.config);
         self.rebuild_scene();
     }
 
@@ -158,11 +141,11 @@ impl Gfx {
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f) => f,
             wgpu::CurrentSurfaceTexture::Suboptimal(f) => {
-                self.surface.configure(&self.device, &self.config);
+                self.surface.configure(self.renderer.device(), &self.config);
                 f
             }
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                self.surface.configure(&self.device, &self.config);
+                self.surface.configure(self.renderer.device(), &self.config);
                 return;
             }
             wgpu::CurrentSurfaceTexture::Timeout
@@ -176,11 +159,12 @@ impl Gfx {
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("frame encoder"),
-            });
+        let mut encoder =
+            self.renderer
+                .device()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("frame encoder"),
+                });
         {
             let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("clear pass"),
@@ -196,7 +180,7 @@ impl Gfx {
                 ..Default::default()
             });
         }
-        if let Some(scene) = &self.scene {
+        if let Some((scene, _viewport)) = &self.scene {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("shape pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -210,13 +194,11 @@ impl Gfx {
                 })],
                 ..Default::default()
             });
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &scene.transform_bind_group, &[]);
-            pass.set_vertex_buffer(0, scene.vertex_buffer.slice(..));
-            pass.set_index_buffer(scene.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..scene.index_count, 0, 0..1);
+            self.renderer.draw(&mut pass, scene);
         }
-        self.queue.submit(std::iter::once(encoder.finish()));
+        self.renderer
+            .queue()
+            .submit(std::iter::once(encoder.finish()));
         frame.present();
     }
 
@@ -225,7 +207,7 @@ impl Gfx {
         match svg3_dom::parse(&self.svg_source) {
             Ok(document) => {
                 self.scene = self.build_draw_scene(&document);
-                match self.scene.as_ref().map(|scene| scene.viewport) {
+                match self.scene.as_ref().map(|(_, viewport)| *viewport) {
                     Some(viewport) => {
                         // A freshly loaded document gets a head-on framing.
                         self.camera.reset(viewport);
@@ -255,8 +237,9 @@ impl Gfx {
         self.window.request_redraw();
     }
 
-    /// Tessellate `document` into an object-space [`DrawScene`].
-    fn build_draw_scene(&self, document: &svg3_dom::Document) -> Option<DrawScene> {
+    /// Tessellate `document` into a GPU scene plus the document viewport it
+    /// was framed against. `None` when the document has no supported shapes.
+    fn build_draw_scene(&self, document: &svg3_dom::Document) -> Option<(GpuScene, Viewport)> {
         let width = self.config.width.max(1);
         let height = self.config.height.max(1);
         let target_viewport = Viewport {
@@ -265,59 +248,31 @@ impl Gfx {
         };
         let viewport = document_viewport(document, target_viewport);
         let mesh = build_scene(document, viewport);
-        if mesh.is_empty() {
-            return None;
-        }
+        let scene = self
+            .renderer
+            .create_scene(&mesh, self.view_projection(viewport))?;
+        Some((scene, viewport))
+    }
 
-        let render_config = RenderConfig {
+    /// The view-projection matrix for the current camera framing `viewport`.
+    fn view_projection(&self, viewport: Viewport) -> glam::Mat4 {
+        RenderConfig {
             format: self.config.format,
-            width,
-            height,
+            width: self.config.width.max(1),
+            height: self.config.height.max(1),
             camera: Some(self.camera.to_camera(viewport)),
-        };
-        let (transform_buffer, transform_bind_group) =
-            build_transform_bind_group(&self.device, &self.pipeline, render_config);
-        let vertex_buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("svg3 app vertex buffer"),
-                contents: bytemuck::cast_slice(&mesh.vertices),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-        let index_buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("svg3 app index buffer"),
-                contents: bytemuck::cast_slice(&mesh.indices),
-                usage: wgpu::BufferUsages::INDEX,
-            });
-        let index_count = mesh.indices.len() as u32;
-        Some(DrawScene {
-            viewport,
-            vertex_buffer,
-            index_buffer,
-            transform_buffer,
-            transform_bind_group,
-            index_count,
-        })
+        }
+        .view_projection()
     }
 
     /// Upload the current camera transform. Cheap enough to call on every
     /// camera or surface change.
     fn reproject(&self) {
-        let Some(scene) = &self.scene else {
+        let Some((scene, viewport)) = &self.scene else {
             return;
         };
-        let view_projection = RenderConfig {
-            format: self.config.format,
-            width: self.config.width.max(1),
-            height: self.config.height.max(1),
-            camera: Some(self.camera.to_camera(scene.viewport)),
-        }
-        .view_projection();
-        let transform = view_projection.to_cols_array_2d();
-        self.queue
-            .write_buffer(&scene.transform_buffer, 0, bytemuck::cast_slice(&transform));
+        self.renderer
+            .update_view_projection(scene, self.view_projection(*viewport));
         self.window.request_redraw();
     }
 
@@ -337,7 +292,7 @@ impl Gfx {
 
     /// Reframe the camera head-on for the current document.
     fn reset_camera(&mut self) {
-        let Some(viewport) = self.scene.as_ref().map(|scene| scene.viewport) else {
+        let Some(viewport) = self.scene.as_ref().map(|(_, viewport)| *viewport) else {
             return;
         };
         self.camera.reset(viewport);
@@ -515,66 +470,6 @@ impl ApplicationHandler for App {
             _ => {}
         }
     }
-}
-
-fn build_pipeline(device: &wgpu::Device, format: wgpu::TextureFormat) -> wgpu::RenderPipeline {
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("svg3 app shader"),
-        source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(include_str!(
-            "../../svg3-render/src/shader.wgsl"
-        ))),
-    });
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("svg3 app shape pipeline"),
-        layout: None,
-        vertex: wgpu::VertexState {
-            module: &shader,
-            entry_point: Some("vs_main"),
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-            buffers: &[wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
-                step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &VERTEX_ATTRIBUTES,
-            }],
-        },
-        primitive: wgpu::PrimitiveState::default(),
-        depth_stencil: None,
-        multisample: wgpu::MultisampleState::default(),
-        fragment: Some(wgpu::FragmentState {
-            module: &shader,
-            entry_point: Some("fs_main"),
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-            targets: &[Some(wgpu::ColorTargetState {
-                format,
-                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-        }),
-        multiview_mask: None,
-        cache: None,
-    })
-}
-
-fn build_transform_bind_group(
-    device: &wgpu::Device,
-    pipeline: &wgpu::RenderPipeline,
-    config: RenderConfig,
-) -> (wgpu::Buffer, wgpu::BindGroup) {
-    let view_projection = config.view_projection().to_cols_array_2d();
-    let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("svg3 app transform uniform"),
-        contents: bytemuck::cast_slice(&view_projection),
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-    });
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("svg3 app transform bind group"),
-        layout: &pipeline.get_bind_group_layout(0),
-        entries: &[wgpu::BindGroupEntry {
-            binding: 0,
-            resource: buffer.as_entire_binding(),
-        }],
-    });
-    (buffer, bind_group)
 }
 
 fn is_svg_input_shortcut(event: &winit::event::KeyEvent, modifiers: ModifiersState) -> bool {

@@ -42,7 +42,7 @@ pub fn render_str(input: &str, config: render::RenderConfig) -> Result<render::I
     let document = dom::parse(input)?;
     let styles = style::StyleEngine::new();
     styles.resolve(&document)?;
-    let image = render::Renderer::new().render_to_image(&document, config)?;
+    let image = render::Renderer::headless()?.render_to_image(&document, config)?;
     Ok(image)
 }
 
