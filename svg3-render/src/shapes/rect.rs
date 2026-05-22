@@ -7,12 +7,12 @@
 //! the SVG WPT suite (`svg/shapes/rect-0*.svg`).
 //!
 //! Length parsing and `fill` resolution are shared with the other basic
-//! shapes — see [`crate::shape`]. `transform` and grouping are not handled
+//! shapes — see [`crate::shapes`]. `transform` and grouping are not handled
 //! yet — see the crate roadmap.
 
 use svg3_dom::Element;
 
-use crate::shape::{sdf_quad, vertex, Length, Viewport, KIND_ROUND_BOX, SDF_PAD};
+use super::{resolve_length, sdf_quad, vertex, Length, Viewport, KIND_ROUND_BOX, SDF_PAD};
 use crate::Mesh;
 
 /// A `<rect>`'s geometry after SVG 1.1 defaulting and corner-radius
@@ -47,19 +47,10 @@ pub(crate) struct RectGeometry {
 /// neither is given both are `0`; a negative radius is treated as auto.
 /// Each radius is then clamped to half its side (WPT `import/shapes-rect-06`).
 pub(crate) fn resolve_rect(element: &Element, viewport: Viewport) -> Option<RectGeometry> {
-    let length = |name: &str, basis: f32| {
-        element
-            .attributes
-            .get(name)
-            .map(String::as_str)
-            .and_then(Length::parse)
-            .map(|len| len.resolve(basis))
-    };
-
-    let x = length("x", viewport.width).unwrap_or(0.0);
-    let y = length("y", viewport.height).unwrap_or(0.0);
-    let width = length("width", viewport.width).unwrap_or(0.0);
-    let height = length("height", viewport.height).unwrap_or(0.0);
+    let x = resolve_length(element, "x", viewport.width).unwrap_or(0.0);
+    let y = resolve_length(element, "y", viewport.height).unwrap_or(0.0);
+    let width = resolve_length(element, "width", viewport.width).unwrap_or(0.0);
+    let height = resolve_length(element, "height", viewport.height).unwrap_or(0.0);
 
     if width <= 0.0 || height <= 0.0 {
         return None;

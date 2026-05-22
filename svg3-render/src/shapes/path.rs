@@ -18,7 +18,7 @@ use lyon_tessellation::{
 use svg3_dom::Element;
 use svgtypes::{PathParser, PathSegment};
 
-use crate::shape::{resolve_stroke_width, vertex, Viewport};
+use super::{resolve_stroke_width, vertex, Viewport};
 use crate::{Mesh, Vertex};
 
 const FLATTENING_TOLERANCE: f32 = 0.1;
