@@ -1125,6 +1125,47 @@ mod tests {
     }
 
     #[test]
+    fn render_to_image_draws_concave_polyline_fill() {
+        // An L-shaped polyline exercises ear clipping through the public
+        // parse -> build_scene -> render path. The bottom-right notch must
+        // stay transparent while both bars are filled.
+        let document = svg3_dom::parse(
+            r#"<svg><polyline points="8,8 56,8 56,24 24,24 24,56 8,56" fill="blue"/></svg>"#,
+        )
+        .unwrap();
+        let config = RenderConfig {
+            width: 64,
+            height: 64,
+            ..RenderConfig::default()
+        };
+        let image = match Renderer::new().render_to_image(&document, config) {
+            Ok(image) => image,
+            Err(RenderError::NoAdapter) => {
+                eprintln!("skipping render_to_image_draws_concave_polyline_fill: no GPU adapter");
+                return;
+            }
+            Err(e) => panic!("headless render failed: {e}"),
+        };
+        assert_eq!((image.width, image.height), (64, 64));
+
+        for (x, y) in [(16, 16), (16, 48), (48, 16)] {
+            let px = image.pixel(x, y);
+            assert!(
+                px[2] > 200 && px[0] < 60 && px[1] < 60,
+                "filled pixel ({x}, {y}) not blue: {px:?}"
+            );
+        }
+
+        for (x, y) in [(48, 48), (4, 4)] {
+            assert_eq!(
+                image.pixel(x, y)[3],
+                0,
+                "pixel ({x}, {y}) should be transparent"
+            );
+        }
+    }
+
+    #[test]
     fn render_to_image_draws_rect_through_camera() {
         // The perspective camera path reaches pixels through the WGSL
         // transform uniform, not the CPU orthographic projection.

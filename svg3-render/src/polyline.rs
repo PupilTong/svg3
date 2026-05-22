@@ -351,6 +351,7 @@ mod tests {
         let mesh = tessellate_polyline(&geo, [1.0; 4]);
         assert_eq!(mesh.vertices.len(), 6);
         assert_eq!(mesh.indices.len(), 12);
+        assert!((mesh_area(&mesh) - signed_area(&geo.points).abs()).abs() < 1e-3);
     }
 
     #[test]
@@ -359,5 +360,17 @@ mod tests {
         let mesh = tessellate_polyline(&geo, [1.0; 4]);
         assert_eq!(mesh.vertices.len(), 3);
         assert_eq!(mesh.indices.len(), 3);
+    }
+
+    fn mesh_area(mesh: &Mesh) -> f32 {
+        mesh.indices
+            .chunks_exact(3)
+            .map(|triangle| {
+                let a = mesh.vertices[triangle[0] as usize].position;
+                let b = mesh.vertices[triangle[1] as usize].position;
+                let c = mesh.vertices[triangle[2] as usize].position;
+                ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])).abs() * 0.5
+            })
+            .sum()
     }
 }
