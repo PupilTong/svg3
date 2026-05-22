@@ -12,7 +12,7 @@
 
 use svg3_dom::Element;
 
-use crate::shape::{vertex, Length, Viewport};
+use crate::shape::{resolve_stroke_width, vertex, Length, Viewport};
 use crate::Mesh;
 
 /// A `<line>`'s geometry after SVG 1.1 defaulting. All values are in SVG
@@ -55,13 +55,7 @@ pub(crate) fn resolve_line(element: &Element, viewport: Viewport) -> Option<Line
     let y1 = length("y1", viewport.height).unwrap_or(0.0);
     let x2 = length("x2", viewport.width).unwrap_or(0.0);
     let y2 = length("y2", viewport.height).unwrap_or(0.0);
-    let stroke_width = element
-        .attributes
-        .get("stroke-width")
-        .map(String::as_str)
-        .and_then(Length::parse)
-        .map(|len| len.resolve(viewport.diagonal()))
-        .unwrap_or(1.0);
+    let stroke_width = resolve_stroke_width(element, viewport);
 
     if stroke_width <= 0.0 || (x1 == x2 && y1 == y2) {
         return None;

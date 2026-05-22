@@ -48,6 +48,21 @@ pub(crate) fn resolve_stroke(element: &Element) -> Option<[f32; 4]> {
     parse_color(value)
 }
 
+/// Resolve a shape's `stroke-width` presentation attribute.
+///
+/// The SVG 1.1 initial value is `1`; percentages resolve against the
+/// normalized viewport diagonal because stroke width is neither horizontal
+/// nor vertical ([SVG11] §7.10).
+pub(crate) fn resolve_stroke_width(element: &Element, viewport: Viewport) -> f32 {
+    element
+        .attributes
+        .get("stroke-width")
+        .map(String::as_str)
+        .and_then(Length::parse)
+        .map(|length| length.resolve(viewport.diagonal()))
+        .unwrap_or(1.0)
+}
+
 /// A mesh [`Vertex`] at `(x, y)` in SVG user space. Basic shapes are
 /// two-dimensional, so the position lies in the plane `z = 0`
 /// ([SPEC.md](../../SPEC.md) §3.1).
@@ -282,6 +297,40 @@ mod tests {
         );
         // Invalid stroke paint is ignored, leaving the initial `none`.
         assert_eq!(resolve_stroke(&element(&[("stroke", "bogus")])), None);
+    }
+
+    #[test]
+    fn resolve_stroke_width_defaults_and_resolves_percentages() {
+        assert_eq!(
+            resolve_stroke_width(
+                &element(&[]),
+                Viewport {
+                    width: 100.0,
+                    height: 100.0,
+                },
+            ),
+            1.0
+        );
+        assert_eq!(
+            resolve_stroke_width(
+                &element(&[("stroke-width", "6")]),
+                Viewport {
+                    width: 100.0,
+                    height: 100.0,
+                },
+            ),
+            6.0
+        );
+        assert_eq!(
+            resolve_stroke_width(
+                &element(&[("stroke-width", "10%")]),
+                Viewport {
+                    width: 300.0,
+                    height: 400.0,
+                },
+            ),
+            35.355_34
+        );
     }
 
     #[test]

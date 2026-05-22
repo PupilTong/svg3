@@ -1394,14 +1394,12 @@ mod tests {
             height: 64,
             ..RenderConfig::default()
         };
-        let image = match Renderer::new().render_to_image(&document, config) {
-            Ok(image) => image,
-            Err(RenderError::NoAdapter) => {
-                eprintln!("skipping render_to_image_draws_path_fill: no GPU adapter");
-                return;
-            }
-            Err(e) => panic!("headless render failed: {e}"),
+        let Some(renderer) = skip_or_renderer("render_to_image_draws_path_fill") else {
+            return;
         };
+        let image = renderer
+            .render_to_image(&document, config)
+            .expect("headless render failed");
         assert_eq!((image.width, image.height), (64, 64));
         let inside = image.pixel(32, 40);
         assert!(
@@ -1422,14 +1420,12 @@ mod tests {
             height: 64,
             ..RenderConfig::default()
         };
-        let image = match Renderer::new().render_to_image(&document, config) {
-            Ok(image) => image,
-            Err(RenderError::NoAdapter) => {
-                eprintln!("skipping render_to_image_draws_path_stroke: no GPU adapter");
-                return;
-            }
-            Err(e) => panic!("headless render failed: {e}"),
+        let Some(renderer) = skip_or_renderer("render_to_image_draws_path_stroke") else {
+            return;
         };
+        let image = renderer
+            .render_to_image(&document, config)
+            .expect("headless render failed");
         assert_eq!((image.width, image.height), (64, 64));
         let centre = image.pixel(32, 32);
         assert!(
@@ -1454,14 +1450,13 @@ mod tests {
             height: 64,
             ..RenderConfig::default()
         };
-        let image = match Renderer::new().render_to_image(&document, config) {
-            Ok(image) => image,
-            Err(RenderError::NoAdapter) => {
-                eprintln!("skipping render_to_image_honors_path_evenodd_fill_rule: no GPU adapter");
-                return;
-            }
-            Err(e) => panic!("headless render failed: {e}"),
+        let Some(renderer) = skip_or_renderer("render_to_image_honors_path_evenodd_fill_rule")
+        else {
+            return;
         };
+        let image = renderer
+            .render_to_image(&document, config)
+            .expect("headless render failed");
         let outer = image.pixel(12, 12);
         assert!(
             outer[2] > 200 && outer[0] < 60 && outer[1] < 60,

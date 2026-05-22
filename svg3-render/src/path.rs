@@ -18,12 +18,13 @@ use lyon_tessellation::{
 use svg3_dom::Element;
 use svgtypes::{PathParser, PathSegment};
 
-use crate::shape::{vertex, Length, Viewport};
+use crate::shape::{resolve_stroke_width, vertex, Viewport};
 use crate::{Mesh, Vertex};
 
 const FLATTENING_TOLERANCE: f32 = 0.1;
 
 /// A `<path>`'s resolved geometry and path-local paint parameters.
+#[derive(Debug)]
 pub(crate) struct PathGeometry {
     path: Path,
     fill_rule: FillRule,
@@ -115,7 +116,9 @@ fn parse_path(data: &str) -> Option<Path> {
         let Ok(segment) = segment else {
             break;
         };
-        apply_segment(segment, &mut builder)?;
+        if apply_segment(segment, &mut builder).is_none() {
+            break;
+        }
         saw_segment = true;
     }
 
@@ -241,16 +244,6 @@ fn resolve_fill_rule(element: &Element) -> FillRule {
     }
 }
 
-fn resolve_stroke_width(element: &Element, viewport: Viewport) -> f32 {
-    element
-        .attributes
-        .get("stroke-width")
-        .map(String::as_str)
-        .and_then(Length::parse)
-        .map(|length| length.resolve(viewport.diagonal()))
-        .unwrap_or(1.0)
-}
-
 fn resolve_linecap(element: &Element) -> LineCap {
     match element
         .attributes
@@ -336,6 +329,13 @@ mod tests {
     #[test]
     fn path_data_error_keeps_valid_prefix() {
         let geo = resolve_path(&path(&[("d", "M 10 10 L 50 10 L 30 40 nope")]), vp()).unwrap();
+        let mesh = tessellate_path_fill(&geo, [0.0, 0.0, 1.0, 1.0]);
+        assert!(!mesh.is_empty());
+    }
+
+    #[test]
+    fn non_finite_f32_coordinate_keeps_valid_prefix() {
+        let geo = resolve_path(&path(&[("d", "M 10 10 L 50 10 L 30 40 L 1e39 20")]), vp()).unwrap();
         let mesh = tessellate_path_fill(&geo, [0.0, 0.0, 1.0, 1.0]);
         assert!(!mesh.is_empty());
     }
