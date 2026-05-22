@@ -1,13 +1,13 @@
-//! End-to-end snapshot tests for `<rect>`, `<circle>` and `<ellipse>`
-//! rendering.
+//! End-to-end snapshot tests for `<rect>`, `<circle>`, `<ellipse>` and
+//! `<polygon>` rendering.
 //!
 //! Each case parses an svg3 document — the SVG WPT `shapes/rect-*`,
-//! `shapes/circle-*` and `shapes/ellipse-*` reference tests, plus the
-//! canonical SVG sample — renders it headlessly with
-//! [`Renderer::render_to_image`], and compares
-//! the result against a committed golden PNG in `tests/snapshots/`. Those
-//! PNGs are the reviewable snapshots — open them in a pull request to see
-//! what the renderer produces.
+//! `shapes/circle-*`, `shapes/ellipse-*` and `shapes/polygon-*` reference
+//! tests, plus the canonical SVG sample — renders it headlessly with
+//! [`Renderer::render_to_image`], and compares the result against a
+//! committed golden PNG in `tests/snapshots/`. Those PNGs are the
+//! reviewable snapshots — open them in a pull request to see what the
+//! renderer produces.
 //!
 //! After an intentional rendering change, regenerate the goldens and review
 //! the updated images in the diff:
@@ -180,6 +180,17 @@ fn cases() -> Vec<Case> {
         Case::square(
             "ellipse-overlap",
             r#"<svg><ellipse cx="40" cy="44" rx="38" ry="24" fill="blue"/><ellipse cx="62" cy="58" rx="30" ry="40" fill="red"/></svg>"#,
+        ),
+        // WPT `shapes/polygon-*`: a basic filled (convex) triangle.
+        Case::square(
+            "polygon-triangle",
+            r#"<svg><polygon points="50,10 90,85 10,85" fill="blue"/></svg>"#,
+        ),
+        // A concave star: its inner vertices are reflex, so a centre-pivoted
+        // fan would spill outside the outline — this exercises ear clipping.
+        Case::square(
+            "polygon-star",
+            r##"<svg><polygon points="50,5 61,35 93,36 67,56 76,86 50,68 24,86 33,56 7,36 39,35" fill="#11aa55"/></svg>"##,
         ),
         // The canonical SVG sample, rendered at its declared 300×200 size. The
         // `<rect width="100%">` exercises percentage lengths; the `<text>` is
