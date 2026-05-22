@@ -6,18 +6,18 @@
 //! the SVG 1.1 geometry rules ([SVG11] §9.4). The behavioural reference is
 //! the SVG WPT suite (`svg/shapes/ellipse-0*.svg`).
 //!
-//! It is the axis-independent radius counterpart of [`crate::circle`]: a
-//! circle is the special case `rx == ry`. SVG 1.1 §9.4 requires both radii
-//! and gives them no mutual "auto" defaulting — unlike a `<rect>`'s
-//! `rx`/`ry` ([`crate::rect`]).
+//! It is the axis-independent radius counterpart of
+//! [`crate::shapes::circle`]: a circle is the special case `rx == ry`. SVG
+//! 1.1 §9.4 requires both radii and gives them no mutual "auto" defaulting —
+//! unlike a `<rect>`'s `rx`/`ry` ([`crate::shapes::rect`]).
 //!
 //! Length parsing and `fill` resolution are shared with the other basic
-//! shapes — see [`crate::shape`]. `transform` and grouping are not handled
+//! shapes — see [`crate::shapes`]. `transform` and grouping are not handled
 //! yet — see the crate roadmap.
 
 use svg3_dom::Element;
 
-use crate::shape::{sdf_quad, Length, Viewport, KIND_ELLIPSE, SDF_PAD};
+use super::{resolve_length, sdf_quad, Viewport, KIND_ELLIPSE, SDF_PAD};
 use crate::Mesh;
 
 /// An `<ellipse>`'s geometry after SVG 1.1 defaulting. All values are in SVG
@@ -46,19 +46,10 @@ pub(crate) struct EllipseGeometry {
 /// required and have no mutual defaulting; an omitted radius is treated as
 /// zero and so also disables rendering. `cx`/`cy` default to `0`.
 pub(crate) fn resolve_ellipse(element: &Element, viewport: Viewport) -> Option<EllipseGeometry> {
-    let length = |name: &str, basis: f32| {
-        element
-            .attributes
-            .get(name)
-            .map(String::as_str)
-            .and_then(Length::parse)
-            .map(|len| len.resolve(basis))
-    };
-
-    let cx = length("cx", viewport.width).unwrap_or(0.0);
-    let cy = length("cy", viewport.height).unwrap_or(0.0);
-    let rx = length("rx", viewport.width).unwrap_or(0.0);
-    let ry = length("ry", viewport.height).unwrap_or(0.0);
+    let cx = resolve_length(element, "cx", viewport.width).unwrap_or(0.0);
+    let cy = resolve_length(element, "cy", viewport.height).unwrap_or(0.0);
+    let rx = resolve_length(element, "rx", viewport.width).unwrap_or(0.0);
+    let ry = resolve_length(element, "ry", viewport.height).unwrap_or(0.0);
 
     if rx <= 0.0 || ry <= 0.0 {
         return None;

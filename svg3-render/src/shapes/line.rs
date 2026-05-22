@@ -6,13 +6,13 @@
 //! geometry rules ([SVG11] §9.5) with the default butt line cap.
 //!
 //! Length parsing and stroke paint resolution are shared with the other
-//! basic shapes — see [`crate::shape`]. `transform`, grouping, dashed
+//! basic shapes — see [`crate::shapes`]. `transform`, grouping, dashed
 //! strokes, joins, caps other than the default butt cap, and CSS cascade
 //! input are not handled yet — see the crate roadmap.
 
 use svg3_dom::Element;
 
-use crate::shape::{resolve_stroke_width, sdf_quad, Length, Viewport, KIND_SEGMENT, SDF_PAD};
+use super::{resolve_length, resolve_stroke_width, sdf_quad, Viewport, KIND_SEGMENT, SDF_PAD};
 use crate::Mesh;
 
 /// A `<line>`'s geometry after SVG 1.1 defaulting. All values are in SVG
@@ -42,19 +42,10 @@ pub(crate) struct LineGeometry {
 /// Returns `None` when the line is not rendered: zero length, or a
 /// non-positive `stroke-width`.
 pub(crate) fn resolve_line(element: &Element, viewport: Viewport) -> Option<LineGeometry> {
-    let length = |name: &str, basis: f32| {
-        element
-            .attributes
-            .get(name)
-            .map(String::as_str)
-            .and_then(Length::parse)
-            .map(|len| len.resolve(basis))
-    };
-
-    let x1 = length("x1", viewport.width).unwrap_or(0.0);
-    let y1 = length("y1", viewport.height).unwrap_or(0.0);
-    let x2 = length("x2", viewport.width).unwrap_or(0.0);
-    let y2 = length("y2", viewport.height).unwrap_or(0.0);
+    let x1 = resolve_length(element, "x1", viewport.width).unwrap_or(0.0);
+    let y1 = resolve_length(element, "y1", viewport.height).unwrap_or(0.0);
+    let x2 = resolve_length(element, "x2", viewport.width).unwrap_or(0.0);
+    let y2 = resolve_length(element, "y2", viewport.height).unwrap_or(0.0);
     let stroke_width = resolve_stroke_width(element, viewport);
 
     if stroke_width <= 0.0 || (x1 == x2 && y1 == y2) {

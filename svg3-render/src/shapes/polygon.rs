@@ -9,12 +9,12 @@
 //! Unlike `<rect>` and `<circle>`, a polygon can be concave, so its fill is
 //! tessellated by ear clipping rather than a centre-pivoted triangle fan.
 //! `fill` resolution and the mesh [`Vertex`] constructor are shared with the
-//! other basic shapes — see [`crate::shape`]. `transform` and grouping are
+//! other basic shapes — see [`crate::shapes`]. `transform` and grouping are
 //! not handled yet — see the crate roadmap.
 
 use svg3_dom::Element;
 
-use crate::shape::vertex;
+use super::vertex;
 use crate::Mesh;
 
 /// A `<polygon>`'s geometry: its corner points in SVG user units, in

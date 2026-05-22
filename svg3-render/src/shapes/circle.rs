@@ -7,12 +7,12 @@
 //! the SVG WPT suite (`svg/shapes/circle-0*.svg`).
 //!
 //! Length parsing and `fill` resolution are shared with the other basic
-//! shapes — see [`crate::shape`]. `transform` and grouping are not handled
+//! shapes — see [`crate::shapes`]. `transform` and grouping are not handled
 //! yet — see the crate roadmap.
 
 use svg3_dom::Element;
 
-use crate::shape::{sdf_quad, Length, Viewport, KIND_ELLIPSE, SDF_PAD};
+use super::{resolve_length, sdf_quad, Viewport, KIND_ELLIPSE, SDF_PAD};
 use crate::Mesh;
 
 /// A `<circle>`'s geometry after SVG 1.1 defaulting. All values are in SVG
@@ -37,18 +37,9 @@ pub(crate) struct CircleGeometry {
 /// `r` disables rendering; a negative `r` is a document error, which svg3
 /// likewise skips rather than rendering. `cx`/`cy` default to `0`.
 pub(crate) fn resolve_circle(element: &Element, viewport: Viewport) -> Option<CircleGeometry> {
-    let length = |name: &str, basis: f32| {
-        element
-            .attributes
-            .get(name)
-            .map(String::as_str)
-            .and_then(Length::parse)
-            .map(|len| len.resolve(basis))
-    };
-
-    let cx = length("cx", viewport.width).unwrap_or(0.0);
-    let cy = length("cy", viewport.height).unwrap_or(0.0);
-    let r = length("r", viewport.diagonal()).unwrap_or(0.0);
+    let cx = resolve_length(element, "cx", viewport.width).unwrap_or(0.0);
+    let cy = resolve_length(element, "cy", viewport.height).unwrap_or(0.0);
+    let r = resolve_length(element, "r", viewport.diagonal()).unwrap_or(0.0);
 
     if r <= 0.0 {
         return None;

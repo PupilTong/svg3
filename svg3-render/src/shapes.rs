@@ -1,15 +1,24 @@
-//! Shared support for the SVG 1.1 shape modules ([`crate::rect`],
-//! [`crate::circle`], [`crate::ellipse`], [`crate::polygon`],
-//! [`crate::polyline`], [`crate::line`], and [`crate::path`]).
+//! Per-shape geometry resolution and tessellation, plus the support they
+//! share.
 //!
-//! Each shape module resolves its own geometry, but they share paint
-//! resolution and the mesh [`Vertex`] constructor — and, for the
+//! Each submodule — [`rect`], [`circle`], [`ellipse`], [`polygon`],
+//! [`polyline`], [`line`], and [`path`] — resolves one SVG 1.1 shape's
+//! attributes into geometry and tessellates it into a [`Mesh`]. They share
+//! paint resolution and the mesh [`Vertex`] constructors — and, for the
 //! `<length>`-based shapes, the SVG length grammar — collected here so a
 //! new shape reuses the SVG 1.1 attribute rules instead of reimplementing
 //! them.
 //!
 //! `fill-opacity`, `stroke-opacity`, CSS / `style=""`-set properties, and
 //! the Stylo cascade are not consulted yet — see the crate roadmap.
+
+pub(crate) mod circle;
+pub(crate) mod ellipse;
+pub(crate) mod line;
+pub(crate) mod path;
+pub(crate) mod polygon;
+pub(crate) mod polyline;
+pub(crate) mod rect;
 
 use svg3_dom::Element;
 
@@ -64,19 +73,27 @@ pub(crate) fn resolve_stroke(element: &Element) -> Option<[f32; 4]> {
     parse_color(value)
 }
 
+/// Resolve a named `<length>` presentation attribute to user units, taking a
+/// percentage relative to `basis`.
+///
+/// Returns `None` when the attribute is absent or unparseable, leaving the
+/// caller to apply that attribute's SVG 1.1 initial value.
+pub(crate) fn resolve_length(element: &Element, name: &str, basis: f32) -> Option<f32> {
+    element
+        .attributes
+        .get(name)
+        .map(String::as_str)
+        .and_then(Length::parse)
+        .map(|length| length.resolve(basis))
+}
+
 /// Resolve a shape's `stroke-width` presentation attribute.
 ///
 /// The SVG 1.1 initial value is `1`; percentages resolve against the
 /// normalized viewport diagonal because stroke width is neither horizontal
 /// nor vertical ([SVG11] §7.10).
 pub(crate) fn resolve_stroke_width(element: &Element, viewport: Viewport) -> f32 {
-    element
-        .attributes
-        .get("stroke-width")
-        .map(String::as_str)
-        .and_then(Length::parse)
-        .map(|length| length.resolve(viewport.diagonal()))
-        .unwrap_or(1.0)
+    resolve_length(element, "stroke-width", viewport.diagonal()).unwrap_or(1.0)
 }
 
 /// A solid-fill mesh [`Vertex`] at `(x, y)` in SVG user space. Basic shapes

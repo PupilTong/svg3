@@ -9,7 +9,7 @@
 
 use svg3_dom::Element;
 
-use crate::shape::vertex;
+use super::vertex;
 use crate::Mesh;
 
 // A small user-unit tolerance used both for point equality and near-zero
