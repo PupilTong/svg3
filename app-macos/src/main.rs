@@ -42,7 +42,7 @@ const CLEAR_COLOR: wgpu::Color = wgpu::Color {
     a: 1.0,
 };
 
-const DEFAULT_SVG: &str = r##"<svg><rect x="40" y="40" width="220" height="130" fill="#2563eb"/><circle cx="245" cy="155" r="64" fill="#f97316"/><ellipse cx="395" cy="130" rx="62" ry="38" fill="#a855f7"/><polygon points="505,58 565,170 448,170" fill="#facc15"/><polyline points="400,70 575,220 355,220" fill="#22c55e"/><line x1="48" y1="220" x2="330" y2="70" stroke="#111827" stroke-width="10"/></svg>"##;
+const DEFAULT_SVG: &str = r##"<svg><rect x="40" y="40" width="220" height="130" fill="#2563eb"/><circle cx="245" cy="155" r="64" fill="#f97316"/><ellipse cx="395" cy="130" rx="62" ry="38" fill="#a855f7"/><polygon points="505,58 565,170 448,170" fill="#facc15"/><polyline points="400,70 575,220 355,220" fill="#22c55e"/><line x1="48" y1="220" x2="330" y2="70" stroke="#111827" stroke-width="10"/><path d="M 620 58 C 675 58 690 148 635 178 Q 595 148 620 58 Z" fill="#14b8a6" stroke="#0f172a" stroke-width="6"/></svg>"##;
 
 /// GPU state, created once the window exists.
 ///
@@ -488,7 +488,7 @@ fn prompt_for_svg(default_source: &str) -> Result<Option<String>> {
         .arg(format!(
             "set promptText to {}",
             apple_script_string(
-                "Paste an SVG string. This demo currently renders <rect>, <circle>, <ellipse>, <polygon>, filled <polyline>, and <line> elements."
+                "Paste an SVG string. This demo currently renders <rect>, <circle>, <ellipse>, <polygon>, filled <polyline>, <line>, and <path> elements."
             )
         ))
         .arg("-e")

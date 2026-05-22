@@ -1,6 +1,6 @@
 //! Benchmarks for `svg3_render::build_scene` — basic-shape tessellation.
 //!
-//! Eight representative shapes:
+//! Nine representative shapes:
 //! - `sharp_100`: 100 sharp `<rect>`s — per-rect quad tessellation.
 //! - `rounded_100`: 100 rounded `<rect>`s — heavier corner-arc tessellation.
 //! - `single_rounded`: one rounded `<rect>` — fixed per-shape cost.
@@ -9,6 +9,7 @@
 //! - `polygon_100`: 100 concave-star `<polygon>`s — ear-clip triangulation.
 //! - `polyline_100`: 100 filled `<polyline>`s — per-polyline point-list tessellation.
 //! - `line_100`: 100 stroked `<line>`s — per-line quad tessellation.
+//! - `path_100`: 100 filled and stroked `<path>`s — SVG path parsing plus Lyon tessellation.
 //!
 //! Documents are built once at benchmark-group setup and passed by
 //! reference into the iter loop so we measure tessellation, not document
@@ -138,6 +139,32 @@ fn document_of_lines(n: usize) -> Document {
     doc
 }
 
+/// A document of `n` sibling filled and stroked cubic `<path>`s under the root.
+fn document_of_paths(n: usize) -> Document {
+    let mut doc = Document::new();
+    let root = doc.root();
+    for i in 0..n {
+        let x = (i * 2) as f32;
+        let id = doc.append_child(root, ElementKind::Path);
+        let attrs = &mut doc.node_mut(id).element.attributes;
+        attrs.insert(
+            "d".to_owned(),
+            format!(
+                "M {x} 0 C {} 6 {} 14 {} 20 L {} 20 L {} 0 Z",
+                x + 5.0,
+                x + 15.0,
+                x + 20.0,
+                x + 26.0,
+                x + 6.0,
+            ),
+        );
+        attrs.insert("fill".to_owned(), "blue".to_owned());
+        attrs.insert("stroke".to_owned(), "red".to_owned());
+        attrs.insert("stroke-width".to_owned(), "1.5".to_owned());
+    }
+    doc
+}
+
 fn bench_tessellate(c: &mut Criterion) {
     let sharp = document_of_rects(100, false);
     let rounded = document_of_rects(100, true);
@@ -147,6 +174,7 @@ fn bench_tessellate(c: &mut Criterion) {
     let polygons = document_of_polygons(100);
     let polylines = document_of_polylines(100);
     let lines = document_of_lines(100);
+    let paths = document_of_paths(100);
     // The fixtures use absolute coordinates, so the viewport only needs to be
     // a valid percentage basis.
     let viewport = Viewport {
@@ -178,6 +206,9 @@ fn bench_tessellate(c: &mut Criterion) {
     });
     group.bench_function("line_100", |b| {
         b.iter(|| build_scene(black_box(&lines), viewport))
+    });
+    group.bench_function("path_100", |b| {
+        b.iter(|| build_scene(black_box(&paths), viewport))
     });
     group.finish();
 }

@@ -1,8 +1,8 @@
-//! Shared support for the SVG 1.1 basic-shape modules ([`crate::rect`],
+//! Shared support for the SVG 1.1 shape modules ([`crate::rect`],
 //! [`crate::circle`], [`crate::ellipse`], [`crate::polygon`],
-//! [`crate::polyline`], and [`crate::line`]).
+//! [`crate::polyline`], [`crate::line`], and [`crate::path`]).
 //!
-//! Each basic-shape module resolves its own geometry, but they share paint
+//! Each shape module resolves its own geometry, but they share paint
 //! resolution and the mesh [`Vertex`] constructor — and, for the
 //! `<length>`-based shapes, the SVG length grammar — collected here so a
 //! new shape reuses the SVG 1.1 attribute rules instead of reimplementing

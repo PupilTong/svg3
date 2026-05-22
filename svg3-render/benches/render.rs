@@ -44,6 +44,12 @@ fn many_shapes_document() -> Document {
         svg.push_str(&format!(
             r##"<line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" stroke="#e2e8f0" stroke-width="{stroke_width}"/>"##
         ));
+
+        let px = 8 + (i * 19) % 280;
+        let py = 10 + (i * 13) % 200;
+        svg.push_str(&format!(
+            r##"<path d="M {px} {py} c 8 -10 28 -10 36 0 l 6 20 l -48 0 z" fill="#22c55e" stroke="#111827" stroke-width="1"/>"##
+        ));
     }
     svg.push_str("</svg>");
     parse(&svg).expect("benchmark fixture should parse")

@@ -39,6 +39,8 @@ pub enum ElementKind {
     Polyline,
     /// Line segment (SVG 1.1 `<line>` basic shape).
     Line,
+    /// General path (SVG 1.1 `<path>`).
+    Path,
     /// Axis-aligned box primitive.
     Cube,
     /// Ellipsoid primitive.
@@ -50,7 +52,7 @@ pub enum ElementKind {
 impl ElementKind {
     /// Map an XML tag name to an [`ElementKind`]. Unrecognised tags are
     /// preserved verbatim so SVG 1.1 markup that svg3 has not implemented
-    /// yet (paths, basic shapes, text, …) still round-trips through the
+    /// yet (text, gradients, filters, …) still round-trips through the
     /// DOM; the planned Stylo cascade can match selectors on the raw tag
     /// name regardless.
     pub fn from_tag(tag: &str) -> Self {
@@ -63,6 +65,7 @@ impl ElementKind {
             "polygon" => Self::Polygon,
             "polyline" => Self::Polyline,
             "line" => Self::Line,
+            "path" => Self::Path,
             "cube" => Self::Cube,
             "ellipsoid" => Self::Ellipsoid,
             other => Self::Unknown(other.to_owned()),
@@ -80,6 +83,7 @@ impl ElementKind {
             Self::Polygon => "polygon",
             Self::Polyline => "polyline",
             Self::Line => "line",
+            Self::Path => "path",
             Self::Cube => "cube",
             Self::Ellipsoid => "ellipsoid",
             Self::Unknown(t) => t.as_str(),
@@ -342,6 +346,7 @@ mod tests {
         assert_eq!(ElementKind::from_tag("polygon"), ElementKind::Polygon);
         assert_eq!(ElementKind::from_tag("polyline"), ElementKind::Polyline);
         assert_eq!(ElementKind::from_tag("line"), ElementKind::Line);
+        assert_eq!(ElementKind::from_tag("path"), ElementKind::Path);
         assert_eq!(ElementKind::from_tag("cube"), ElementKind::Cube);
         assert_eq!(ElementKind::from_tag("ellipsoid"), ElementKind::Ellipsoid);
         // `as_tag` round-trips a recognised kind back to its source name.
@@ -350,6 +355,7 @@ mod tests {
         assert_eq!(ElementKind::Polygon.as_tag(), "polygon");
         assert_eq!(ElementKind::Polyline.as_tag(), "polyline");
         assert_eq!(ElementKind::Line.as_tag(), "line");
+        assert_eq!(ElementKind::Path.as_tag(), "path");
         // `<group>` is not in SPEC.md; only `<g>` from SVG 1.1 is the
         // canonical grouping element.
         assert_eq!(
@@ -512,6 +518,32 @@ mod tests {
         );
         assert_eq!(
             line.attributes.get("stroke-width").map(String::as_str),
+            Some("3")
+        );
+    }
+
+    #[test]
+    fn parse_path_preserves_geometry_attributes() {
+        let xml =
+            r#"<svg><path d="M10 20 L50 20 Z" fill="blue" stroke="red" stroke-width="3"/></svg>"#;
+        let doc = parse(xml).unwrap();
+        let path_id = doc.node(doc.root()).children[0];
+        let path = doc.element(path_id);
+        assert_eq!(path.kind, ElementKind::Path);
+        assert_eq!(
+            path.attributes.get("d").map(String::as_str),
+            Some("M10 20 L50 20 Z")
+        );
+        assert_eq!(
+            path.attributes.get("fill").map(String::as_str),
+            Some("blue")
+        );
+        assert_eq!(
+            path.attributes.get("stroke").map(String::as_str),
+            Some("red")
+        );
+        assert_eq!(
+            path.attributes.get("stroke-width").map(String::as_str),
             Some("3")
         );
     }

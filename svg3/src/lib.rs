@@ -90,4 +90,18 @@ mod tests {
         );
         assert!(!mesh.is_empty());
     }
+
+    #[test]
+    fn build_scene_renders_path_across_crates() {
+        let document =
+            dom::parse(r#"<svg><path d="M 0 0 L 20 0 L 10 10 Z" fill="blue"/></svg>"#).unwrap();
+        let mesh = render::build_scene(
+            &document,
+            render::Viewport {
+                width: 20.0,
+                height: 10.0,
+            },
+        );
+        assert!(!mesh.is_empty());
+    }
 }

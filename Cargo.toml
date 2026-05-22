@@ -26,8 +26,12 @@ stylo = "0.17"            # latest Stylo (Paws referenced 0.13; this repo tracks
 # Math
 glam = "0.32"
 
+# Geometry
+lyon_tessellation = "1"
+
 # Parsing
 quick-xml = "0.40"
+svgtypes = "0.16"
 
 # Diagnostics
 log = "0.4"
