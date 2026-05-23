@@ -265,6 +265,25 @@ mod tests {
     }
 
     #[test]
+    fn build_scene_tessellates_rect_stroke() {
+        // WPT `svg/shapes/rect-04.svg`: a rounded rect with `fill="none"`
+        // and a visible stroke should render its stroke outline.
+        let document = svg3_dom::parse(
+            r#"<svg><rect x="10" y="10" width="50" height="50" rx="8" ry="8" fill="none" stroke="blue" stroke-width="4"/></svg>"#,
+        )
+        .unwrap();
+        let mesh = build_scene(&document, vp());
+        assert!(
+            !mesh.is_empty(),
+            "rect stroke geometry should be emitted even when fill is none"
+        );
+        assert!(mesh
+            .vertices
+            .iter()
+            .all(|vertex| vertex.color == [0.0, 0.0, 1.0, 1.0]));
+    }
+
+    #[test]
     fn build_scene_offsets_indices_across_rects() {
         let document = svg3_dom::parse(
             r#"<svg><rect width="10" height="10"/><rect x="20" width="10" height="10"/></svg>"#,
