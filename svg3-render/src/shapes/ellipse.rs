@@ -1,8 +1,8 @@
-//! SVG 1.1 `<ellipse>` — geometry resolution and fill tessellation.
+//! SVG 1.1 `<ellipse>` — geometry resolution plus fill and stroke tessellation.
 //!
 //! `<ellipse>` is a two-dimensional basic shape; per [`SPEC.md`](../../SPEC.md)
 //! §3.1 it lies in the plane `z = 0`. This module turns a parsed `<ellipse>`
-//! [`Element`] into a filled triangle [`Mesh`] in SVG user space, applying
+//! [`Element`] into filled and stroked triangle [`Mesh`]es in SVG user space, applying
 //! the SVG 1.1 geometry rules ([SVG11] §9.4). The behavioural reference is
 //! the SVG WPT suite (`svg/shapes/ellipse-0*.svg`).
 //!
@@ -11,12 +11,16 @@
 //! 1.1 §9.4 requires both radii and gives them no mutual "auto" defaulting —
 //! unlike a `<rect>`'s `rx`/`ry` ([`crate::shapes::rect`]).
 //!
-//! Length parsing and `fill` resolution are shared with the other basic
-//! shapes — see [`crate::shapes`]. `transform` and grouping are not handled
-//! yet — see the crate roadmap.
+//! Length parsing, `fill`, and stroke resolution are shared with the other
+//! basic shapes — see [`crate::shapes`]. `transform` and grouping are not
+//! handled yet — see the crate roadmap.
 
+use lyon_tessellation::path::builder::SvgPathBuilder;
+use lyon_tessellation::path::math::{point, vector, Angle};
+use lyon_tessellation::path::{ArcFlags, Path};
 use svg3_dom::Element;
 
+use super::stroke::{self, StrokeStyle};
 use super::{resolve_length, sdf_quad, Viewport, KIND_ELLIPSE, SDF_PAD};
 use crate::Mesh;
 
@@ -81,6 +85,38 @@ pub(crate) fn tessellate_ellipse(geo: &EllipseGeometry, color: [f32; 4]) -> Mesh
         KIND_ELLIPSE,
         color,
     )
+}
+
+/// Tessellate a resolved ellipse's stroke into triangle geometry.
+pub(crate) fn tessellate_ellipse_stroke(
+    geo: &EllipseGeometry,
+    style: &StrokeStyle,
+    color: [f32; 4],
+) -> Mesh {
+    stroke::tessellate_stroke_path(&to_path(geo), style, color)
+}
+
+/// Convert the ellipse outline to a Lyon path for stroke and marker logic.
+pub(crate) fn to_path(geo: &EllipseGeometry) -> Path {
+    ellipse_path(geo.cx, geo.cy, geo.rx, geo.ry)
+}
+
+pub(crate) fn ellipse_path(cx: f32, cy: f32, rx: f32, ry: f32) -> Path {
+    let mut builder = Path::builder().with_svg();
+    let radii = vector(rx, ry);
+    let rotation = Angle::degrees(0.0);
+    let flags = ArcFlags {
+        large_arc: false,
+        sweep: true,
+    };
+
+    builder.move_to(point(cx + rx, cy));
+    builder.arc_to(radii, rotation, flags, point(cx, cy + ry));
+    builder.arc_to(radii, rotation, flags, point(cx - rx, cy));
+    builder.arc_to(radii, rotation, flags, point(cx, cy - ry));
+    builder.arc_to(radii, rotation, flags, point(cx + rx, cy));
+    builder.close();
+    builder.build()
 }
 
 #[cfg(test)]

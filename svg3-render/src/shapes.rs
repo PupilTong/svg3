@@ -11,8 +11,8 @@
 //! [`triangulate`] ear clipper, since both fill an outline that may be
 //! concave.
 //!
-//! `fill-opacity`, `stroke-opacity`, CSS / `style=""`-set properties, and
-//! the Stylo cascade are not consulted yet — see the crate roadmap.
+//! CSS / `style=""`-set properties and the Stylo cascade are not consulted
+//! yet — see the crate roadmap.
 
 pub(crate) mod circle;
 pub(crate) mod ellipse;
@@ -21,6 +21,7 @@ pub(crate) mod path;
 pub(crate) mod polygon;
 pub(crate) mod polyline;
 pub(crate) mod rect;
+pub(crate) mod stroke;
 
 mod triangulate;
 
@@ -35,13 +36,12 @@ use crate::{Mesh, Vertex};
 const DEFAULT_FILL: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 
 /// Shape-kind tags carried in [`Vertex::kind`]. Solid triangle geometry is
-/// [`KIND_SOLID`]; the curved primitives and `<line>` carry an SDF kind whose
+/// [`KIND_SOLID`]; the curved primitives carry an SDF kind whose
 /// coverage the fragment shader computes analytically. Must stay in sync with
 /// the `KIND_*` constants in `shader.wgsl`.
 pub(crate) const KIND_SOLID: u32 = 0;
 pub(crate) const KIND_ELLIPSE: u32 = 1;
 pub(crate) const KIND_ROUND_BOX: u32 = 2;
-pub(crate) const KIND_SEGMENT: u32 = 3;
 
 /// Per-side margin, in user units, by which an SDF shape's bounding quad is
 /// inflated past the shape, giving the anti-aliasing band room beyond the
@@ -60,14 +60,13 @@ pub(crate) const LYON_FLATTENING_TOLERANCE: f32 = 0.1;
 /// `None` (no fill geometry). A missing or unparseable value falls back to
 /// the SVG 1.1 initial value, opaque black.
 pub(crate) fn resolve_fill(element: &Element) -> Option<[f32; 4]> {
-    let Some(value) = element.attributes.get("fill") else {
-        return Some(DEFAULT_FILL);
+    let mut color = match element.attributes.get("fill") {
+        Some(value) if value.trim().eq_ignore_ascii_case("none") => return None,
+        Some(value) => parse_color(value.trim()).unwrap_or(DEFAULT_FILL),
+        None => DEFAULT_FILL,
     };
-    let value = value.trim();
-    if value.eq_ignore_ascii_case("none") {
-        return None;
-    }
-    Some(parse_color(value).unwrap_or(DEFAULT_FILL))
+    color[3] *= resolve_opacity(element, "fill-opacity") * resolve_opacity(element, "opacity");
+    Some(color)
 }
 
 /// Resolve a shape's solid stroke as linear RGBA in `[0, 1]`.
@@ -80,7 +79,9 @@ pub(crate) fn resolve_stroke(element: &Element) -> Option<[f32; 4]> {
     if value.eq_ignore_ascii_case("none") {
         return None;
     }
-    parse_color(value)
+    let mut color = parse_color(value)?;
+    color[3] *= resolve_opacity(element, "stroke-opacity") * resolve_opacity(element, "opacity");
+    Some(color)
 }
 
 /// Resolve a named `<length>` presentation attribute to user units, taking a
@@ -313,6 +314,24 @@ pub(crate) fn parse_color_value(value: &str) -> Option<[f32; 4]> {
     }
 }
 
+fn resolve_opacity(element: &Element, name: &str) -> f32 {
+    element
+        .attributes
+        .get(name)
+        .and_then(|value| parse_opacity(value))
+        .unwrap_or(1.0)
+}
+
+fn parse_opacity(value: &str) -> Option<f32> {
+    let value = value.trim();
+    let opacity = if let Some(percent) = value.strip_suffix('%') {
+        percent.trim().parse::<f32>().ok()? / 100.0
+    } else {
+        value.parse::<f32>().ok()?
+    };
+    opacity.is_finite().then_some(opacity.clamp(0.0, 1.0))
+}
+
 fn parse_hex(hex: &str) -> Option<[f32; 4]> {
     if !hex.is_ascii() {
         return None;
@@ -435,6 +454,14 @@ mod tests {
             resolve_fill(&element(&[("fill", "bogus")])),
             Some([0.0, 0.0, 0.0, 1.0])
         );
+        assert_eq!(
+            resolve_fill(&element(&[("fill", "blue"), ("fill-opacity", "50%")])),
+            Some([0.0, 0.0, 1.0, 0.5])
+        );
+        assert_eq!(
+            resolve_fill(&element(&[("fill", "blue"), ("opacity", "0.25")])),
+            Some([0.0, 0.0, 1.0, 0.25])
+        );
     }
 
     #[test]
@@ -454,6 +481,14 @@ mod tests {
         );
         // Invalid stroke paint is ignored, leaving the initial `none`.
         assert_eq!(resolve_stroke(&element(&[("stroke", "bogus")])), None);
+        assert_eq!(
+            resolve_stroke(&element(&[("stroke", "blue"), ("stroke-opacity", "0.5")])),
+            Some([0.0, 0.0, 1.0, 0.5])
+        );
+        assert_eq!(
+            resolve_stroke(&element(&[("stroke", "blue"), ("opacity", "25%")])),
+            Some([0.0, 0.0, 1.0, 0.25])
+        );
     }
 
     #[test]

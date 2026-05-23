@@ -1,17 +1,20 @@
-//! SVG 1.1 `<circle>` — geometry resolution and fill tessellation.
+//! SVG 1.1 `<circle>` — geometry resolution plus fill and stroke tessellation.
 //!
 //! `<circle>` is a two-dimensional basic shape; per [`SPEC.md`](../../SPEC.md)
 //! §3.1 it lies in the plane `z = 0`. This module turns a parsed `<circle>`
-//! [`Element`] into a filled triangle [`Mesh`] in SVG user space, applying
+//! [`Element`] into filled and stroked triangle [`Mesh`]es in SVG user space, applying
 //! the SVG 1.1 geometry rules ([SVG11] §9.3). The behavioural reference is
 //! the SVG WPT suite (`svg/shapes/circle-0*.svg`).
 //!
-//! Length parsing and `fill` resolution are shared with the other basic
-//! shapes — see [`crate::shapes`]. `transform` and grouping are not handled
-//! yet — see the crate roadmap.
+//! Length parsing, `fill`, and stroke resolution are shared with the other
+//! basic shapes — see [`crate::shapes`]. `transform` and grouping are not
+//! handled yet — see the crate roadmap.
 
+use lyon_tessellation::path::Path;
 use svg3_dom::Element;
 
+use super::ellipse;
+use super::stroke::{self, StrokeStyle};
 use super::{resolve_length, sdf_quad, Viewport, KIND_ELLIPSE, SDF_PAD};
 use crate::Mesh;
 
@@ -70,6 +73,20 @@ pub(crate) fn tessellate_circle(geo: &CircleGeometry, color: [f32; 4]) -> Mesh {
         KIND_ELLIPSE,
         color,
     )
+}
+
+/// Tessellate a resolved circle's stroke into triangle geometry.
+pub(crate) fn tessellate_circle_stroke(
+    geo: &CircleGeometry,
+    style: &StrokeStyle,
+    color: [f32; 4],
+) -> Mesh {
+    stroke::tessellate_stroke_path(&to_path(geo), style, color)
+}
+
+/// Convert the circle outline to a Lyon path for stroke and marker logic.
+pub(crate) fn to_path(geo: &CircleGeometry) -> Path {
+    ellipse::ellipse_path(geo.cx, geo.cy, geo.r, geo.r)
 }
 
 #[cfg(test)]

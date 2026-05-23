@@ -27,6 +27,8 @@ pub enum ElementKind {
     Svg,
     /// Grouping / transform container (SVG 1.1 `<g>`).
     Group,
+    /// Definition container (SVG 1.1 `<defs>`).
+    Defs,
     /// Axis-aligned rectangle (SVG 1.1 `<rect>` basic shape).
     Rect,
     /// Circle (SVG 1.1 `<circle>` basic shape).
@@ -81,6 +83,8 @@ pub enum ElementKind {
     FePointLight,
     /// Spot light source for the lighting filter primitives.
     FeSpotLight,
+    /// Marker definition (SVG 1.1 `<marker>`).
+    Marker,
     /// Axis-aligned box primitive.
     Cube,
     /// Ellipsoid primitive.
@@ -99,6 +103,7 @@ impl ElementKind {
         match tag {
             "svg" => Self::Svg,
             "g" => Self::Group,
+            "defs" => Self::Defs,
             "rect" => Self::Rect,
             "circle" => Self::Circle,
             "ellipse" => Self::Ellipse,
@@ -126,6 +131,7 @@ impl ElementKind {
             "feDistantLight" => Self::FeDistantLight,
             "fePointLight" => Self::FePointLight,
             "feSpotLight" => Self::FeSpotLight,
+            "marker" => Self::Marker,
             "cube" => Self::Cube,
             "ellipsoid" => Self::Ellipsoid,
             other => Self::Unknown(other.to_owned()),
@@ -137,6 +143,7 @@ impl ElementKind {
         match self {
             Self::Svg => "svg",
             Self::Group => "g",
+            Self::Defs => "defs",
             Self::Rect => "rect",
             Self::Circle => "circle",
             Self::Ellipse => "ellipse",
@@ -164,6 +171,7 @@ impl ElementKind {
             Self::FeDistantLight => "feDistantLight",
             Self::FePointLight => "fePointLight",
             Self::FeSpotLight => "feSpotLight",
+            Self::Marker => "marker",
             Self::Cube => "cube",
             Self::Ellipsoid => "ellipsoid",
             Self::Unknown(t) => t.as_str(),
@@ -743,6 +751,25 @@ mod tests {
             image.attributes.get("height").map(String::as_str),
             Some("14")
         );
+    }
+
+    #[test]
+    fn parse_defs_and_marker_elements() {
+        let xml = r#"<svg><defs><marker id="arrow" markerWidth="10" markerHeight="8" refX="10" refY="4" orient="auto"><path d="M0 0 L10 4 L0 8 Z"/></marker></defs></svg>"#;
+        let doc = parse(xml).unwrap();
+        let defs_id = doc.node(doc.root()).children[0];
+        let defs = doc.node(defs_id);
+        assert_eq!(defs.element.kind, ElementKind::Defs);
+        assert_eq!(defs.children.len(), 1);
+
+        let marker = doc.node(defs.children[0]);
+        assert_eq!(marker.element.kind, ElementKind::Marker);
+        assert_eq!(
+            marker.element.attributes.get("id").map(String::as_str),
+            Some("arrow")
+        );
+        assert_eq!(marker.children.len(), 1);
+        assert_eq!(doc.element(marker.children[0]).kind, ElementKind::Path);
     }
 
     #[test]
