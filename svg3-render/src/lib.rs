@@ -5,12 +5,18 @@
 //!
 //! This milestone implements the SVG 1.1 `<rect>`, `<circle>`, `<ellipse>`,
 //! `<polygon>`, `<polyline>`, `<line>`, and `<path>` shapes plus referenced
-//! `<filter>` elements whose first supported primitive is `<feGaussianBlur>`.
-//! [`Renderer::encode_document`] is the single GPU entry point: it walks a
-//! parsed document, tessellates every supported shape, applies any
-//! referenced Gaussian blur through offscreen render/composite passes, and
-//! encodes the draws into a caller-supplied [`wgpu::CommandEncoder`] /
-//! [`wgpu::TextureView`]. Both render paths are built on top of it:
+//! `<filter>` elements composed from a multi-primitive chain executed
+//! end-to-end on the GPU. The supported primitives are `<feGaussianBlur>`,
+//! `<feColorMatrix>`, `<feTurbulence>`, `<feSpecularLighting>`,
+//! `<feDiffuseLighting>`, `<feMorphology>`, `<feFlood>`, `<feDropShadow>`,
+//! `<feDisplacementMap>`, `<feConvolveMatrix>`, and `<feComponentTransfer>`.
+//! Every primitive ships as a fragment-shader pipeline backed by
+//! `filter.wgsl`; there is no CPU filter path. [`Renderer::encode_document`]
+//! is the single GPU entry point: it walks a parsed document, tessellates
+//! every supported shape, runs each referenced filter's primitive chain
+//! through offscreen ping/pong textures, and encodes the draws into a
+//! caller-supplied [`wgpu::CommandEncoder`] / [`wgpu::TextureView`]. Both
+//! render paths are built on top of it:
 //! [`Renderer::render_to_image`] wraps it with offscreen-texture allocation,
 //! a transparent [`clear_target`], and CPU readback to produce an [`Image`];
 //! a windowed caller (see the `app-macos` demo) wraps it with surface

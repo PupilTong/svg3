@@ -1,22 +1,49 @@
 // Full-screen GPU post-processing for SVG filters.
 //
-// Filtered geometry is first drawn into an offscreen texture by the regular
-// shape pipeline. Because that pass uses alpha blending over transparent, the
-// texture stores premultiplied RGB. The blur pass therefore accumulates and
-// writes premultiplied colour, and the composite pass uses premultiplied alpha
-// blending when it lands on the final target.
+// All filter passes share the same fullscreen-quad vertex stage and the same
+// bind-group layout:
+//   @binding(0) — input texture 1 (the current chain output)
+//   @binding(1) — sampler
+//   @binding(2) — input texture 2 (the immutable SourceGraphic; used by
+//                 multi-input primitives such as feDisplacementMap and the
+//                 drop-shadow composite step)
+//   @binding(3) — FilterUniform
 //
-// The sampler clamps at the render-target edge. Shapes blurred against the
-// canvas boundary therefore smear their edge texels instead of sampling an SVG
-// filter region expanded with transparent pixels; bbox-derived filter regions
-// are a future renderer milestone.
+// Each filter primitive picks the fragment entry point it needs; the renderer
+// fills in only the FilterUniform fields that entry point reads, leaving the
+// rest zeroed.
+//
+// All offscreen filter targets use premultiplied RGBA in linear space. The
+// blur kernel and convolution accumulate premultiplied colour; the final
+// composite pass blends back onto the destination with premultiplied alpha.
 
 struct FilterUniform {
     texel_size: vec2<f32>,
     direction: vec2<f32>,
+    color: vec4<f32>,
+    extra: vec4<f32>,
+    light: vec4<f32>,
+    light_dir: vec4<f32>,
+    lighting: vec4<f32>,
+    matrix_r0: vec4<f32>,
+    matrix_r1: vec4<f32>,
+    matrix_r2: vec4<f32>,
+    matrix_r3: vec4<f32>,
+    matrix_col4: vec4<f32>,
+    transfer_r0: vec4<f32>,
+    transfer_r1: vec4<f32>,
+    transfer_g0: vec4<f32>,
+    transfer_g1: vec4<f32>,
+    transfer_b0: vec4<f32>,
+    transfer_b1: vec4<f32>,
+    transfer_a0: vec4<f32>,
+    transfer_a1: vec4<f32>,
+    transfer_kinds: vec4<u32>,
+    transfer_counts: vec4<u32>,
     sigma: f32,
     radius: u32,
-    _pad: vec2<u32>,
+    mode: u32,
+    flags: u32,
 }
 
 @group(0) @binding(0)
@@ -24,6 +51,8 @@ var source_texture: texture_2d<f32>;
 @group(0) @binding(1)
 var source_sampler: sampler;
 @group(0) @binding(2)
+var source_texture2: texture_2d<f32>;
+@group(0) @binding(3)
 var<uniform> filter_params: FilterUniform;
 
 struct VertexOutput {
@@ -46,10 +75,40 @@ fn vs_fullscreen(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     return out;
 }
 
+// ---- Helpers ---------------------------------------------------------------
+
+fn sample_in1(uv: vec2<f32>) -> vec4<f32> {
+    return textureSample(source_texture, source_sampler, uv);
+}
+
+fn sample_in2(uv: vec2<f32>) -> vec4<f32> {
+    return textureSample(source_texture2, source_sampler, uv);
+}
+
+fn unpremultiply(color: vec4<f32>) -> vec4<f32> {
+    if (color.a <= 0.0) {
+        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    }
+    return vec4<f32>(color.rgb / color.a, color.a);
+}
+
+fn premultiply(color: vec4<f32>) -> vec4<f32> {
+    return vec4<f32>(color.rgb * color.a, color.a);
+}
+
+fn channel_value(color: vec4<f32>, channel: u32) -> f32 {
+    if (channel == 0u) { return color.r; }
+    if (channel == 1u) { return color.g; }
+    if (channel == 2u) { return color.b; }
+    return color.a;
+}
+
+// ---- Gaussian blur (separable) --------------------------------------------
+
 @fragment
 fn fs_blur(in: VertexOutput) -> @location(0) vec4<f32> {
     if (filter_params.radius == 0u || filter_params.sigma <= 0.0) {
-        return textureSample(source_texture, source_sampler, in.uv);
+        return sample_in1(in.uv);
     }
 
     let two_sigma_sq = 2.0 * filter_params.sigma * filter_params.sigma;
@@ -61,7 +120,7 @@ fn fs_blur(in: VertexOutput) -> @location(0) vec4<f32> {
         let offset = f32(i);
         let weight = exp(-(offset * offset) / two_sigma_sq);
         let uv = in.uv + filter_params.direction * filter_params.texel_size * offset;
-        let sample = textureSample(source_texture, source_sampler, uv);
+        let sample = sample_in1(uv);
         weighted_sum += sample * weight;
         weight_sum += weight;
     }
@@ -69,7 +128,393 @@ fn fs_blur(in: VertexOutput) -> @location(0) vec4<f32> {
     return weighted_sum / weight_sum;
 }
 
+// ---- Final composite ------------------------------------------------------
+
 @fragment
 fn fs_composite(in: VertexOutput) -> @location(0) vec4<f32> {
-    return textureSample(source_texture, source_sampler, in.uv);
+    return sample_in1(in.uv);
+}
+
+// ---- feColorMatrix --------------------------------------------------------
+
+@fragment
+fn fs_color_matrix(in: VertexOutput) -> @location(0) vec4<f32> {
+    let src = sample_in1(in.uv);
+    let straight = unpremultiply(src);
+    let c = vec4<f32>(straight.r, straight.g, straight.b, straight.a);
+    let bias = filter_params.matrix_col4;
+    let result = vec4<f32>(
+        dot(filter_params.matrix_r0, c) + bias.x,
+        dot(filter_params.matrix_r1, c) + bias.y,
+        dot(filter_params.matrix_r2, c) + bias.z,
+        dot(filter_params.matrix_r3, c) + bias.w,
+    );
+    let clamped = clamp(result, vec4<f32>(0.0), vec4<f32>(1.0));
+    return premultiply(clamped);
+}
+
+// ---- feTurbulence ---------------------------------------------------------
+//
+// Value-noise approximation: we sample a hash on the integer lattice and
+// bilinearly interpolate inside each cell, then sum octaves. This is not the
+// SVG 1.1 reference Perlin noise but produces visually similar fractal output
+// and is fully on-GPU. The `fractalNoise` type maps the result to [0, 1]; the
+// classic `turbulence` type maps it to [-1, 1] then `abs()`.
+
+fn hash21(p: vec2<f32>, seed: f32) -> f32 {
+    let q = vec2<f32>(p.x * 127.1 + seed, p.y * 311.7 - seed);
+    let s = sin(dot(q, vec2<f32>(12.9898, 78.233)));
+    return fract(s * 43758.5453);
+}
+
+fn value_noise(p: vec2<f32>, seed: f32) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    let a = hash21(i + vec2<f32>(0.0, 0.0), seed);
+    let b = hash21(i + vec2<f32>(1.0, 0.0), seed);
+    let c = hash21(i + vec2<f32>(0.0, 1.0), seed);
+    let d = hash21(i + vec2<f32>(1.0, 1.0), seed);
+    let x = mix(a, b, u.x);
+    let y = mix(c, d, u.x);
+    return mix(x, y, u.y);
+}
+
+@fragment
+fn fs_turbulence(in: VertexOutput) -> @location(0) vec4<f32> {
+    let octaves = max(filter_params.radius, 1u);
+    let seed = filter_params.sigma;
+    let base = filter_params.extra.xy;
+    let canvas = vec2<f32>(1.0 / max(filter_params.texel_size.x, 1e-6),
+                           1.0 / max(filter_params.texel_size.y, 1e-6));
+    var amp = 1.0;
+    var sum = 0.0;
+    var norm = 0.0;
+    var freq = base;
+    let fractal = filter_params.flags == 1u;
+    for (var i = 0u; i < octaves; i = i + 1u) {
+        let p = in.uv * canvas * freq;
+        var n = value_noise(p, seed + f32(i) * 13.37);
+        if (!fractal) {
+            n = abs(n * 2.0 - 1.0);
+        }
+        sum += amp * n;
+        norm += amp;
+        amp = amp * 0.5;
+        freq = freq * 2.0;
+    }
+    let value = sum / max(norm, 1e-6);
+    return vec4<f32>(value, value, value, 1.0);
+}
+
+// ---- feSpecularLighting / feDiffuseLighting -------------------------------
+
+fn surface_normal(uv: vec2<f32>) -> vec3<f32> {
+    let dx = filter_params.texel_size.x;
+    let dy = filter_params.texel_size.y;
+    let surface_scale = filter_params.lighting.x;
+    // Sobel filter on the alpha channel; the height field is `alpha * surface_scale`.
+    let tl = sample_in1(uv + vec2<f32>(-dx, -dy)).a;
+    let tc = sample_in1(uv + vec2<f32>(0.0, -dy)).a;
+    let tr = sample_in1(uv + vec2<f32>(dx, -dy)).a;
+    let ml = sample_in1(uv + vec2<f32>(-dx, 0.0)).a;
+    let mr = sample_in1(uv + vec2<f32>(dx, 0.0)).a;
+    let bl = sample_in1(uv + vec2<f32>(-dx, dy)).a;
+    let bc = sample_in1(uv + vec2<f32>(0.0, dy)).a;
+    let br = sample_in1(uv + vec2<f32>(dx, dy)).a;
+    let sx = (tr + 2.0 * mr + br) - (tl + 2.0 * ml + bl);
+    let sy = (bl + 2.0 * bc + br) - (tl + 2.0 * tc + tr);
+    // Texel-size cancels out: `sx * texel_size / texel_size` collapses to `sx / 4`.
+    let nx = -sx * 0.25 * surface_scale;
+    let ny = -sy * 0.25 * surface_scale;
+    return normalize(vec3<f32>(nx, ny, 1.0));
+}
+
+// `lighting.w` light-source tag: keep in sync with `LIGHT_TYPE_*` constants
+// in `renderer.rs`'s `lighting_uniform` builder.
+const LIGHT_TYPE_DISTANT: f32 = 0.0;
+const LIGHT_TYPE_POINT: f32 = 1.0;
+const LIGHT_TYPE_SPOT: f32 = 2.0;
+
+fn light_vector(uv: vec2<f32>, surface_z: f32) -> vec3<f32> {
+    let kind = filter_params.lighting.w;
+    if (kind >= LIGHT_TYPE_POINT - 0.5) {
+        // Point and spot lights both store an x/y/z position; the light
+        // vector is the unit vector from the surface point toward the light.
+        let pos_x = filter_params.light.x * filter_params.texel_size.x;
+        let pos_y = filter_params.light.y * filter_params.texel_size.y;
+        let pos_z = filter_params.light.z;
+        let diff = vec3<f32>(pos_x - uv.x, pos_y - uv.y, pos_z - surface_z);
+        return normalize(diff);
+    }
+    return normalize(filter_params.light.xyz);
+}
+
+/// Cone-falloff factor for `<feSpotLight>`. Returns 1.0 for non-spot lights
+/// so the regular diffuse/specular paths are unaffected. Per SVG 1.1 §15.21.1,
+/// the cone factor is `max(-dot(L, axis), 0)^specularExponent`, zero outside
+/// `limitingConeAngle`.
+///
+/// The cone is evaluated in filter-pixel space rather than UV space so the
+/// angle math is dimensionally consistent — the existing diffuse/specular
+/// `light_vector` mixes UV (x, y) with pixel (z), which would degenerate the
+/// cone test for any light positioned above the surface.
+fn spot_cone_factor(uv: vec2<f32>, surface_z: f32) -> f32 {
+    if (filter_params.lighting.w < LIGHT_TYPE_SPOT - 0.5) {
+        return 1.0;
+    }
+    let axis = normalize(filter_params.light_dir.xyz);
+    let surface_pixel = vec3<f32>(
+        uv.x / filter_params.texel_size.x,
+        uv.y / filter_params.texel_size.y,
+        surface_z,
+    );
+    let light_pixel = filter_params.light.xyz;
+    let diff = surface_pixel - light_pixel;
+    if (dot(diff, diff) <= 1e-6) {
+        // Surface coincides with the light origin — fully lit.
+        return 1.0;
+    }
+    let to_surface = normalize(diff);
+    let cos_angle = dot(to_surface, axis);
+    if (cos_angle <= 0.0) {
+        return 0.0;
+    }
+    let cos_limit = filter_params.light_dir.w;
+    // `cos_limit < 0` encodes "no limiting cone".
+    if (cos_limit >= 0.0 && cos_angle < cos_limit) {
+        return 0.0;
+    }
+    let exponent = filter_params.extra.x;
+    return pow(cos_angle, exponent);
+}
+
+@fragment
+fn fs_lighting(in: VertexOutput) -> @location(0) vec4<f32> {
+    let normal = surface_normal(in.uv);
+    let surface_z = sample_in1(in.uv).a * filter_params.lighting.x;
+    let light_dir = light_vector(in.uv, surface_z);
+    let cone = spot_cone_factor(in.uv, surface_z);
+    let lighting_color = filter_params.color;
+    let constant = filter_params.lighting.y;
+    let specular = filter_params.lighting.z > 0.5;
+
+    if (specular) {
+        // Halfway vector between the view direction (looking straight down at
+        // the surface, `(0, 0, 1)`) and the light. SVG 1.1 §15.22.
+        let view = vec3<f32>(0.0, 0.0, 1.0);
+        let half_vec = normalize(light_dir + view);
+        let n_dot_h = max(dot(normal, half_vec), 0.0);
+        let exponent = filter_params.light.w;
+        let intensity = constant * pow(n_dot_h, exponent) * cone;
+        let rgb = lighting_color.rgb * intensity;
+        // Specular alpha = max(R, G, B), per SVG 1.1 §15.22.
+        let alpha = clamp(max(rgb.r, max(rgb.g, rgb.b)), 0.0, 1.0);
+        return vec4<f32>(clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0)) * alpha, alpha);
+    } else {
+        let n_dot_l = max(dot(normal, light_dir), 0.0);
+        let intensity = constant * n_dot_l * cone;
+        let rgb = clamp(lighting_color.rgb * intensity, vec3<f32>(0.0), vec3<f32>(1.0));
+        // Diffuse output alpha is opaque per SVG 1.1 §15.21.
+        return vec4<f32>(rgb, 1.0);
+    }
+}
+
+// ---- feMorphology ---------------------------------------------------------
+
+@fragment
+fn fs_morphology(in: VertexOutput) -> @location(0) vec4<f32> {
+    let radius = filter_params.radius;
+    if (radius == 0u) {
+        return sample_in1(in.uv);
+    }
+    let dilate = filter_params.flags == 1u;
+    let axis = filter_params.direction;
+    var acc: vec4<f32>;
+    if (dilate) {
+        acc = vec4<f32>(0.0);
+    } else {
+        acc = vec4<f32>(1.0);
+    }
+    let r = i32(radius);
+    for (var i = -r; i <= r; i = i + 1) {
+        let uv = in.uv + axis * filter_params.texel_size * f32(i);
+        let s = sample_in1(uv);
+        if (dilate) {
+            acc = max(acc, s);
+        } else {
+            acc = min(acc, s);
+        }
+    }
+    return acc;
+}
+
+// ---- feFlood --------------------------------------------------------------
+
+@fragment
+fn fs_flood(in: VertexOutput) -> @location(0) vec4<f32> {
+    // The flood region is the entire filter primitive area, which in this
+    // renderer is the full offscreen target. `in.uv` is unused here.
+    _ = in.uv;
+    return premultiply(filter_params.color);
+}
+
+// ---- feDropShadow ---------------------------------------------------------
+//
+// Step 1 (`fs_drop_shadow_alpha`): sample the source at uv - offset and emit
+// `color * source.a` premultiplied, isolating the alpha-coloured silhouette.
+// Steps 2/3: the standard separable Gaussian blur (`fs_blur`).
+// Step 4 (`fs_drop_shadow_composite`): "source over shadow" between
+// `source_texture2` (SourceGraphic) and `source_texture` (the blurred shadow).
+
+@fragment
+fn fs_drop_shadow_alpha(in: VertexOutput) -> @location(0) vec4<f32> {
+    let offset_uv = filter_params.direction;
+    let s = sample_in1(in.uv - offset_uv);
+    let alpha = s.a * filter_params.color.a;
+    return vec4<f32>(filter_params.color.rgb * alpha, alpha);
+}
+
+@fragment
+fn fs_drop_shadow_composite(in: VertexOutput) -> @location(0) vec4<f32> {
+    // `source_texture` carries the blurred shadow; `source_texture2` carries
+    // the original SourceGraphic. SourceGraphic-over-shadow, both premultiplied.
+    let shadow = sample_in1(in.uv);
+    let source = sample_in2(in.uv);
+    return source + shadow * (1.0 - source.a);
+}
+
+// ---- feDisplacementMap ----------------------------------------------------
+
+@fragment
+fn fs_displacement(in: VertexOutput) -> @location(0) vec4<f32> {
+    // The map lives on `source_texture2` (SourceGraphic by default in this
+    // renderer); the displaced graphic lives on `source_texture` (in1).
+    let map = sample_in2(in.uv);
+    let x_channel = filter_params.transfer_kinds.x;
+    let y_channel = filter_params.transfer_kinds.y;
+    let scale = filter_params.extra.x;
+    let dx = (channel_value(map, x_channel) - 0.5) * scale;
+    let dy = (channel_value(map, y_channel) - 0.5) * scale;
+    let displaced = in.uv + vec2<f32>(dx, dy) * filter_params.texel_size;
+    return sample_in1(displaced);
+}
+
+// ---- feConvolveMatrix -----------------------------------------------------
+
+@fragment
+fn fs_convolve(in: VertexOutput) -> @location(0) vec4<f32> {
+    let row0 = filter_params.matrix_r0;
+    let row1 = filter_params.matrix_r1;
+    let row2 = filter_params.matrix_r2;
+    let divisor = filter_params.matrix_col4.x;
+    let bias = filter_params.matrix_col4.y;
+    let preserve_alpha = filter_params.flags == 1u;
+    let tx = filter_params.texel_size.x;
+    let ty = filter_params.texel_size.y;
+
+    // 3×3 kernel sampled with the source target's bilinear sampler.
+    var acc = vec4<f32>(0.0);
+    let offsets = array<vec2<f32>, 9>(
+        vec2<f32>(-tx, -ty), vec2<f32>(0.0, -ty), vec2<f32>(tx, -ty),
+        vec2<f32>(-tx, 0.0), vec2<f32>(0.0, 0.0), vec2<f32>(tx, 0.0),
+        vec2<f32>(-tx, ty), vec2<f32>(0.0, ty), vec2<f32>(tx, ty),
+    );
+    let weights = array<f32, 9>(
+        row0.x, row0.y, row0.z,
+        row1.x, row1.y, row1.z,
+        row2.x, row2.y, row2.z,
+    );
+    for (var i = 0u; i < 9u; i = i + 1u) {
+        acc += sample_in1(in.uv + offsets[i]) * weights[i];
+    }
+    var result = acc / divisor + vec4<f32>(bias);
+    if (preserve_alpha) {
+        result.a = sample_in1(in.uv).a;
+    }
+    return clamp(result, vec4<f32>(0.0), vec4<f32>(1.0));
+}
+
+// ---- feComponentTransfer --------------------------------------------------
+
+// Index up to eight floats stored in two vec4s, returning zero out of range.
+fn table_pick(p0: vec4<f32>, p1: vec4<f32>, idx: i32) -> f32 {
+    if (idx == 0) { return p0.x; }
+    if (idx == 1) { return p0.y; }
+    if (idx == 2) { return p0.z; }
+    if (idx == 3) { return p0.w; }
+    if (idx == 4) { return p1.x; }
+    if (idx == 5) { return p1.y; }
+    if (idx == 6) { return p1.z; }
+    if (idx == 7) { return p1.w; }
+    return 0.0;
+}
+
+fn transfer_apply(value: f32, kind: u32, p0: vec4<f32>, p1: vec4<f32>, count: u32) -> f32 {
+    if (kind == 0u) {
+        // Identity.
+        return value;
+    }
+    if (kind == 3u) {
+        // Linear: y = slope * C + intercept (params in p0.x / p0.y).
+        return p0.x * value + p0.y;
+    }
+    if (kind == 4u) {
+        // Gamma: y = amplitude * C^exponent + offset (params in p0.x / p0.y / p0.z).
+        return p0.x * pow(max(value, 0.0), p0.y) + p0.z;
+    }
+    // Table / discrete share the same up-to-eight-entry storage.
+    let n = i32(count);
+    if (n < 2) {
+        return value;
+    }
+    let v = clamp(value, 0.0, 1.0);
+    if (kind == 1u) {
+        // Table: piecewise-linear over N control points spanning [0, 1].
+        // N points define N - 1 segments.
+        let segments = f32(n - 1);
+        let scaled = v * segments;
+        let i0 = clamp(i32(floor(scaled)), 0, n - 2);
+        let i1 = i0 + 1;
+        let t = clamp(scaled - f32(i0), 0.0, 1.0);
+        let a = table_pick(p0, p1, i0);
+        let b = table_pick(p0, p1, i1);
+        return mix(a, b, t);
+    }
+    if (kind == 2u) {
+        // Discrete: piecewise-constant over N equal buckets.
+        let idx = clamp(i32(floor(v * f32(n))), 0, n - 1);
+        return table_pick(p0, p1, idx);
+    }
+    return value;
+}
+
+@fragment
+fn fs_component_transfer(in: VertexOutput) -> @location(0) vec4<f32> {
+    let src = sample_in1(in.uv);
+    let straight = unpremultiply(src);
+    let kinds = filter_params.transfer_kinds;
+    let counts = filter_params.transfer_counts;
+    let r = transfer_apply(
+        straight.r, kinds.x,
+        filter_params.transfer_r0, filter_params.transfer_r1,
+        counts.x,
+    );
+    let g = transfer_apply(
+        straight.g, kinds.y,
+        filter_params.transfer_g0, filter_params.transfer_g1,
+        counts.y,
+    );
+    let b = transfer_apply(
+        straight.b, kinds.z,
+        filter_params.transfer_b0, filter_params.transfer_b1,
+        counts.z,
+    );
+    let a = transfer_apply(
+        straight.a, kinds.w,
+        filter_params.transfer_a0, filter_params.transfer_a1,
+        counts.w,
+    );
+    let result = clamp(vec4<f32>(r, g, b, a), vec4<f32>(0.0), vec4<f32>(1.0));
+    return premultiply(result);
 }

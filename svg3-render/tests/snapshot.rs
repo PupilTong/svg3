@@ -321,6 +321,180 @@ fn cases() -> Vec<Case> {
             "filter-blur-zero",
             r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="none"><feGaussianBlur stdDeviation="0"/></filter><rect x="26" y="26" width="48" height="48" fill="#f2c14e" filter="url(#none)"/></svg>"##,
         ),
+        // `feColorMatrix type="saturate" values="0"` desaturates the source —
+        // the orange rect becomes a mid grey while everything else keeps its
+        // colour.
+        Case::square(
+            "filter-color-matrix-saturate",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="gray"><feColorMatrix type="saturate" values="0"/></filter><rect x="20" y="20" width="60" height="60" fill="#c14b2b" filter="url(#gray)"/></svg>"##,
+        ),
+        // `feColorMatrix type="luminanceToAlpha"` collapses RGB to luma in
+        // alpha, leaving a translucent silhouette.
+        Case::square(
+            "filter-color-matrix-luminance",
+            r##"<svg><rect width="100%" height="100%" fill="#888888"/><filter id="lum"><feColorMatrix type="luminanceToAlpha"/></filter><rect x="20" y="20" width="60" height="60" fill="#ffffff" filter="url(#lum)"/></svg>"##,
+        ),
+        // `feColorMatrix type="hueRotate"` rotates the chrominance plane —
+        // here `180deg` swaps reds toward cyans.
+        Case::square(
+            "filter-color-matrix-hue-rotate",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="hue"><feColorMatrix type="hueRotate" values="180"/></filter><rect x="20" y="20" width="60" height="60" fill="#c14b2b" filter="url(#hue)"/></svg>"##,
+        ),
+        // `feTurbulence` fills the filter region with deterministic
+        // value-noise; the golden captures the seeded pattern.
+        Case::square(
+            "filter-turbulence",
+            r##"<svg><filter id="noise"><feTurbulence baseFrequency="0.08" numOctaves="3" seed="1"/></filter><rect x="10" y="10" width="80" height="80" filter="url(#noise)"/></svg>"##,
+        ),
+        // `feTurbulence type="fractalNoise"` produces smoother
+        // [0, 1]-mapped noise (no abs reflection).
+        Case::square(
+            "filter-turbulence-fractal",
+            r##"<svg><filter id="noise"><feTurbulence baseFrequency="0.12" numOctaves="4" seed="3" type="fractalNoise"/></filter><rect x="10" y="10" width="80" height="80" filter="url(#noise)"/></svg>"##,
+        ),
+        // `feFlood` replaces the filter source with a solid colour, modulated
+        // by `flood-opacity` — the source rect's blue is gone.
+        Case::square(
+            "filter-flood",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="fl"><feFlood flood-color="#c14b2b" flood-opacity="0.7"/></filter><rect x="20" y="20" width="60" height="60" fill="blue" filter="url(#fl)"/></svg>"##,
+        ),
+        // `feMorphology operator="dilate"` grows the silhouette by `radius`
+        // pixels in each direction.
+        Case::square(
+            "filter-morphology-dilate",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="grow"><feMorphology operator="dilate" radius="4"/></filter><circle cx="50" cy="50" r="14" fill="#f2c14e" filter="url(#grow)"/></svg>"##,
+        ),
+        // `feMorphology operator="erode"` shrinks the silhouette; a 4px erode
+        // pulls the square's edges 4 pixels inward.
+        Case::square(
+            "filter-morphology-erode",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="shrink"><feMorphology operator="erode" radius="4"/></filter><rect x="30" y="30" width="40" height="40" fill="#f2c14e" filter="url(#shrink)"/></svg>"##,
+        ),
+        // `feDropShadow` offsets and blurs the source alpha behind the
+        // original geometry.
+        Case::square(
+            "filter-drop-shadow",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="sh"><feDropShadow dx="6" dy="6" stdDeviation="3" flood-color="#000000" flood-opacity="1"/></filter><rect x="24" y="24" width="40" height="40" fill="#c14b2b" filter="url(#sh)"/></svg>"##,
+        ),
+        // `feDisplacementMap scale="0"` is an identity passthrough — the
+        // golden should look exactly like the underlying rect.
+        Case::square(
+            "filter-displacement-map-identity",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="warp"><feDisplacementMap scale="0"/></filter><rect x="20" y="20" width="60" height="60" fill="#f2c14e" filter="url(#warp)"/></svg>"##,
+        ),
+        // The MDN canonical `feDisplacementMap` example: a turbulence noise
+        // texture (named via `result="turbulence"`) displaces the circle from
+        // SourceGraphic, producing a black ink-blot outline. This pins the
+        // DAG-input semantics — `in="SourceGraphic"` + `in2="turbulence"` —
+        // not just per-primitive shader output.
+        Case::sized(
+            "filter-displacement-map-mdn",
+            r##"<svg width="220" height="220" viewBox="0 0 220 220" xmlns="http://www.w3.org/2000/svg">
+  <filter id="displacementFilter">
+    <feTurbulence type="turbulence" baseFrequency="0.05" numOctaves="2" result="turbulence"/>
+    <feDisplacementMap in2="turbulence" in="SourceGraphic" scale="50" xChannelSelector="R" yChannelSelector="G"/>
+  </filter>
+  <circle cx="100" cy="100" r="100" filter="url(#displacementFilter)"/>
+</svg>"##,
+            220,
+            220,
+        ),
+        // A 3×3 sharpen kernel boosts the rect edges; the kernel sum is 1
+        // so colours stay near their input intensity.
+        Case::square(
+            "filter-convolve-sharpen",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="sharp"><feConvolveMatrix kernelMatrix="0 -1 0 -1 5 -1 0 -1 0"/></filter><rect x="20" y="20" width="60" height="60" fill="#c14b2b" filter="url(#sharp)"/></svg>"##,
+        ),
+        // `feComponentTransfer` linear functions doubled the red channel and
+        // halved the blue channel of an olive-grey source.
+        Case::square(
+            "filter-component-transfer",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="tr"><feComponentTransfer><feFuncR type="linear" slope="2" intercept="0"/><feFuncB type="linear" slope="0.5" intercept="0"/></feComponentTransfer></filter><rect x="20" y="20" width="60" height="60" fill="#888844" filter="url(#tr)"/></svg>"##,
+        ),
+        // `feDiffuseLighting` treats source alpha as a height field; the
+        // distant light shades the disc into a lit cap.
+        Case::square(
+            "filter-diffuse-lighting",
+            r##"<svg><filter id="light"><feDiffuseLighting surfaceScale="5" diffuseConstant="1" lighting-color="#ffffff"><feDistantLight azimuth="45" elevation="60"/></feDiffuseLighting></filter><circle cx="50" cy="50" r="30" fill="#888888" filter="url(#light)"/></svg>"##,
+        ),
+        // `feSpecularLighting` adds a Phong highlight on the same surface,
+        // tightening into a small bright spot at the lit pole.
+        Case::square(
+            "filter-specular-lighting",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="spec"><feSpecularLighting surfaceScale="5" specularConstant="1" specularExponent="20" lighting-color="#ffffff"><feDistantLight azimuth="135" elevation="30"/></feSpecularLighting></filter><circle cx="50" cy="50" r="32" fill="#444444" filter="url(#spec)"/></svg>"##,
+        ),
+        // A multi-primitive chain: blur first, then desaturate. The result is
+        // a soft grey halo around the original red rect.
+        Case::square(
+            "filter-chain-blur-saturate",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="chain"><feGaussianBlur stdDeviation="3"/><feColorMatrix type="saturate" values="0"/></filter><rect x="32" y="32" width="36" height="36" fill="red" filter="url(#chain)"/></svg>"##,
+        ),
+        // --- DAG wiring snapshots --------------------------------------
+        //
+        // `in="SourceAlpha"` strips RGB and hands only the source alpha to
+        // the next primitive. Here a colour-matrix recolours the silhouette
+        // from blue to pure red — the blue is *gone*, proving SourceAlpha
+        // (not SourceGraphic) was the input.
+        Case::square(
+            "filter-source-alpha",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="silhouette"><feColorMatrix in="SourceAlpha" type="matrix" values="0 0 0 0 1   0 0 0 0 0   0 0 0 0 0   0 0 0 1 0"/></filter><circle cx="50" cy="50" r="28" fill="blue" filter="url(#silhouette)"/></svg>"##,
+        ),
+        // `feGaussianBlur in="SourceAlpha"` blurs only the silhouette, which
+        // is the canonical "build a soft shadow" recipe; the source RGB
+        // never reaches the blur kernel, so the halo is purely the alpha
+        // gradient — no colour bleed from the original blue circle.
+        Case::square(
+            "filter-blur-source-alpha",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="alphablur"><feGaussianBlur in="SourceAlpha" stdDeviation="5"/></filter><circle cx="50" cy="50" r="22" fill="blue" filter="url(#alphablur)"/></svg>"##,
+        ),
+        // `result="foo"` followed by a later `in="foo"`. The middle primitive
+        // is `feFlood` (which writes a flat colour and discards any input);
+        // the third primitive references the FIRST primitive's named output,
+        // so the flood is shadowed and the recoloured red rect emerges.
+        // A naive linear chain would surface the flood instead.
+        Case::square(
+            "filter-named-result-dag",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="dag"><feColorMatrix type="matrix" values="0 0 0 0 1   0 0 0 0 0   0 0 0 0 0   0 0 0 1 0" result="red"/><feFlood flood-color="#ffffff"/><feColorMatrix in="red" type="matrix" values="1 0 0 0 0   0 1 0 0 0   0 0 1 0 0   0 0 0 1 0"/></filter><rect x="30" y="30" width="40" height="40" fill="blue" filter="url(#dag)"/></svg>"##,
+        ),
+        // `in="SourceGraphic"` on the LAST primitive ignores everything the
+        // chain computed and just composites the original source — proving
+        // `SourceGraphic` keeps the original RGB+alpha addressable from any
+        // position in the chain, not only at the start.
+        Case::square(
+            "filter-source-graphic-late",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="late"><feGaussianBlur stdDeviation="6"/><feColorMatrix in="SourceGraphic" type="matrix" values="0 0 0 0 0   0 1 0 0 0   0 0 0 0 0   0 0 0 1 0"/></filter><circle cx="50" cy="50" r="28" fill="#c14b2b" filter="url(#late)"/></svg>"##,
+        ),
+        // Generators chained: `feTurbulence` produces noise (no input), then
+        // `feColorMatrix` (default `in` = previous primitive's output) tints
+        // it green. Pins the "Default input on a non-first primitive" path.
+        Case::square(
+            "filter-turbulence-recolour",
+            r##"<svg><filter id="green-noise"><feTurbulence baseFrequency="0.08" numOctaves="2" seed="2"/><feColorMatrix type="matrix" values="0 0 0 0 0   1 0 0 0 0   0 0 0 0 0   0 0 0 0 1"/></filter><rect x="10" y="10" width="80" height="80" filter="url(#green-noise)"/></svg>"##,
+        ),
+        // Bug guard (review P2): a parameter-wise no-op primitive with a
+        // non-default `in` must still run through the chain. A naive
+        // visibility gate would treat `stdDeviation="0"` as identity and
+        // surface the original *blue* circle; the correct output is a
+        // black SourceAlpha silhouette.
+        Case::square(
+            "filter-source-alpha-zero-blur",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="strip"><feGaussianBlur in="SourceAlpha" stdDeviation="0"/></filter><circle cx="50" cy="50" r="28" fill="blue" filter="url(#strip)"/></svg>"##,
+        ),
+        // Bug guard (review P2): a 2-entry `tableValues="0 1"` is identity.
+        // The previous fixed-4-entry implementation incorrectly stored
+        // `[0, 1, 0, 0]` and would have produced very wrong values for the
+        // upper half of the input range.
+        Case::square(
+            "filter-component-transfer-table-identity",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="t"><feComponentTransfer><feFuncR type="table" tableValues="0 1"/><feFuncG type="table" tableValues="0 1"/><feFuncB type="table" tableValues="0 1"/></feComponentTransfer></filter><rect x="20" y="20" width="60" height="60" fill="#c14b2b" filter="url(#t)"/></svg>"##,
+        ),
+        // Bug guard (review P3): `feSpotLight` used to be silently dropped
+        // and fell back to a default distant light. With proper cone math
+        // the disc shows a bright on-axis hotspot and dark off-axis edges.
+        Case::square(
+            "filter-spot-lighting",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="spot"><feDiffuseLighting surfaceScale="5" diffuseConstant="1" lighting-color="#ffffff"><feSpotLight x="50" y="50" z="40" pointsAtX="50" pointsAtY="50" pointsAtZ="0" specularExponent="4" limitingConeAngle="35"/></feDiffuseLighting></filter><circle cx="50" cy="50" r="28" fill="#888888" filter="url(#spot)"/></svg>"##,
+        ),
         // The canonical SVG sample, rendered at its declared 300×200 size. The
         // `<rect width="100%">` exercises percentage lengths; the `<text>` is
         // parsed but not yet rendered (text rendering is a separate milestone),
