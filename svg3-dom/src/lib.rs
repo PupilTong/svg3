@@ -41,6 +41,10 @@ pub enum ElementKind {
     Line,
     /// General path (SVG 1.1 `<path>`).
     Path,
+    /// Filter definition container (SVG 1.1 `<filter>`).
+    Filter,
+    /// Gaussian blur filter primitive (SVG 1.1 `<feGaussianBlur>`).
+    FeGaussianBlur,
     /// Axis-aligned box primitive.
     Cube,
     /// Ellipsoid primitive.
@@ -52,7 +56,7 @@ pub enum ElementKind {
 impl ElementKind {
     /// Map an XML tag name to an [`ElementKind`]. Unrecognised tags are
     /// preserved verbatim so SVG 1.1 markup that svg3 has not implemented
-    /// yet (text, gradients, filters, …) still round-trips through the
+    /// yet (text, gradients, masks, …) still round-trips through the
     /// DOM; the planned Stylo cascade can match selectors on the raw tag
     /// name regardless.
     pub fn from_tag(tag: &str) -> Self {
@@ -66,6 +70,8 @@ impl ElementKind {
             "polyline" => Self::Polyline,
             "line" => Self::Line,
             "path" => Self::Path,
+            "filter" => Self::Filter,
+            "feGaussianBlur" => Self::FeGaussianBlur,
             "cube" => Self::Cube,
             "ellipsoid" => Self::Ellipsoid,
             other => Self::Unknown(other.to_owned()),
@@ -84,6 +90,8 @@ impl ElementKind {
             Self::Polyline => "polyline",
             Self::Line => "line",
             Self::Path => "path",
+            Self::Filter => "filter",
+            Self::FeGaussianBlur => "feGaussianBlur",
             Self::Cube => "cube",
             Self::Ellipsoid => "ellipsoid",
             Self::Unknown(t) => t.as_str(),
@@ -347,6 +355,11 @@ mod tests {
         assert_eq!(ElementKind::from_tag("polyline"), ElementKind::Polyline);
         assert_eq!(ElementKind::from_tag("line"), ElementKind::Line);
         assert_eq!(ElementKind::from_tag("path"), ElementKind::Path);
+        assert_eq!(ElementKind::from_tag("filter"), ElementKind::Filter);
+        assert_eq!(
+            ElementKind::from_tag("feGaussianBlur"),
+            ElementKind::FeGaussianBlur
+        );
         assert_eq!(ElementKind::from_tag("cube"), ElementKind::Cube);
         assert_eq!(ElementKind::from_tag("ellipsoid"), ElementKind::Ellipsoid);
         // `as_tag` round-trips a recognised kind back to its source name.
@@ -356,6 +369,8 @@ mod tests {
         assert_eq!(ElementKind::Polyline.as_tag(), "polyline");
         assert_eq!(ElementKind::Line.as_tag(), "line");
         assert_eq!(ElementKind::Path.as_tag(), "path");
+        assert_eq!(ElementKind::Filter.as_tag(), "filter");
+        assert_eq!(ElementKind::FeGaussianBlur.as_tag(), "feGaussianBlur");
         // `<group>` is not in SPEC.md; only `<g>` from SVG 1.1 is the
         // canonical grouping element.
         assert_eq!(
@@ -545,6 +560,27 @@ mod tests {
         assert_eq!(
             path.attributes.get("stroke-width").map(String::as_str),
             Some("3")
+        );
+    }
+
+    #[test]
+    fn parse_filter_preserves_gaussian_blur_attributes() {
+        let xml = r#"<svg><filter id="soft"><feGaussianBlur stdDeviation="4 2"/></filter></svg>"#;
+        let doc = parse(xml).unwrap();
+        let filter_id = doc.node(doc.root()).children[0];
+        let filter = doc.node(filter_id);
+        assert_eq!(filter.element.kind, ElementKind::Filter);
+        assert_eq!(
+            filter.element.attributes.get("id").map(String::as_str),
+            Some("soft")
+        );
+        assert_eq!(filter.children.len(), 1);
+
+        let blur = doc.element(filter.children[0]);
+        assert_eq!(blur.kind, ElementKind::FeGaussianBlur);
+        assert_eq!(
+            blur.attributes.get("stdDeviation").map(String::as_str),
+            Some("4 2")
         );
     }
 

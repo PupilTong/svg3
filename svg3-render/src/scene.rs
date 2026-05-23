@@ -7,8 +7,19 @@
 
 use svg3_dom::{Document, ElementKind};
 
+use crate::filters::{FilterDefinitions, GaussianBlur};
 use crate::shapes;
 use crate::{Mesh, Viewport};
+
+/// A headless render operation in SVG painter's order.
+#[derive(Debug, Clone)]
+pub(crate) enum RenderOp {
+    /// Draw a mesh directly into the destination target.
+    Mesh(Mesh),
+    /// Draw a mesh into an offscreen target, blur it on the GPU, then
+    /// composite the result into the destination target.
+    GaussianBlur { mesh: Mesh, blur: GaussianBlur },
+}
 
 /// Walk `document` and tessellate every supported 2D SVG shape into one
 /// combined [`Mesh`].
@@ -23,75 +34,155 @@ use crate::{Mesh, Viewport};
 /// own coordinates regardless of any ancestor `<g>`.
 pub fn build_scene(document: &Document, viewport: Viewport) -> Mesh {
     let mut mesh = Mesh::default();
-    // Pre-order DFS; children pushed in reverse so they pop in document
-    // order, giving the painter's-algorithm draw order.
-    let mut stack = vec![document.root()];
-    while let Some(id) = stack.pop() {
-        let node = document.node(id);
-        match &node.element.kind {
-            ElementKind::Rect => {
-                if let (Some(geo), Some(color)) = (
-                    shapes::rect::resolve_rect(&node.element, viewport),
-                    shapes::resolve_fill(&node.element),
-                ) {
-                    mesh.append(shapes::rect::tessellate_rect(&geo, color));
-                }
-            }
-            ElementKind::Circle => {
-                if let (Some(geo), Some(color)) = (
-                    shapes::circle::resolve_circle(&node.element, viewport),
-                    shapes::resolve_fill(&node.element),
-                ) {
-                    mesh.append(shapes::circle::tessellate_circle(&geo, color));
-                }
-            }
-            ElementKind::Ellipse => {
-                if let (Some(geo), Some(color)) = (
-                    shapes::ellipse::resolve_ellipse(&node.element, viewport),
-                    shapes::resolve_fill(&node.element),
-                ) {
-                    mesh.append(shapes::ellipse::tessellate_ellipse(&geo, color));
-                }
-            }
-            ElementKind::Polygon => {
-                if let (Some(geo), Some(color)) = (
-                    shapes::polygon::resolve_polygon(&node.element),
-                    shapes::resolve_fill(&node.element),
-                ) {
-                    mesh.append(shapes::polygon::tessellate_polygon(&geo, color));
-                }
-            }
-            ElementKind::Polyline => {
-                if let (Some(geo), Some(color)) = (
-                    shapes::polyline::resolve_polyline(&node.element),
-                    shapes::resolve_fill(&node.element),
-                ) {
-                    mesh.append(shapes::polyline::tessellate_polyline(&geo, color));
-                }
-            }
-            ElementKind::Line => {
-                if let (Some(geo), Some(color)) = (
-                    shapes::line::resolve_line(&node.element, viewport),
-                    shapes::resolve_stroke(&node.element),
-                ) {
-                    mesh.append(shapes::line::tessellate_line(&geo, color));
-                }
-            }
-            ElementKind::Path => {
-                if let Some(geo) = shapes::path::resolve_path(&node.element, viewport) {
-                    if let Some(color) = shapes::resolve_fill(&node.element) {
-                        mesh.append(shapes::path::tessellate_path_fill(&geo, color));
-                    }
-                    if let Some(color) = shapes::resolve_stroke(&node.element) {
-                        mesh.append(shapes::path::tessellate_path_stroke(&geo, color));
-                    }
-                }
-            }
-            _ => {}
-        }
-        stack.extend(node.children.iter().rev().copied());
+    for child in document.node(document.root()).children.iter().copied() {
+        append_subtree_mesh(document, child, viewport, &mut mesh);
     }
     mesh
+}
+
+/// Build headless render operations that preserve SVG painter's order while
+/// isolating filtered subtrees into their own GPU post-process pass.
+pub(crate) fn build_render_plan(document: &Document, viewport: Viewport) -> Vec<RenderOp> {
+    let filters = FilterDefinitions::collect(document);
+    let mut plan = Vec::new();
+    let mut pending_mesh = Mesh::default();
+    for child in document.node(document.root()).children.iter().copied() {
+        append_render_ops(
+            document,
+            child,
+            viewport,
+            &filters,
+            &mut pending_mesh,
+            &mut plan,
+        );
+    }
+    flush_mesh(&mut pending_mesh, &mut plan);
+    plan
+}
+
+fn append_render_ops(
+    document: &Document,
+    id: svg3_dom::NodeId,
+    viewport: Viewport,
+    filters: &FilterDefinitions,
+    pending_mesh: &mut Mesh,
+    plan: &mut Vec<RenderOp>,
+) {
+    let node = document.node(id);
+    if node.element.kind == ElementKind::Filter {
+        return;
+    }
+
+    if let Some(blur) = filters.resolve(&node.element) {
+        let mut filtered_mesh = Mesh::default();
+        append_subtree_mesh(document, id, viewport, &mut filtered_mesh);
+        if !filtered_mesh.is_empty() {
+            if blur.is_visible() {
+                flush_mesh(pending_mesh, plan);
+                plan.push(RenderOp::GaussianBlur {
+                    mesh: filtered_mesh,
+                    blur,
+                });
+            } else {
+                pending_mesh.append(filtered_mesh);
+            }
+        }
+        return;
+    }
+
+    append_element_mesh(&node.element, viewport, pending_mesh);
+    for child in node.children.iter().copied() {
+        append_render_ops(document, child, viewport, filters, pending_mesh, plan);
+    }
+}
+
+fn append_subtree_mesh(
+    document: &Document,
+    id: svg3_dom::NodeId,
+    viewport: Viewport,
+    mesh: &mut Mesh,
+) {
+    let node = document.node(id);
+    if node.element.kind == ElementKind::Filter {
+        return;
+    }
+    append_element_mesh(&node.element, viewport, mesh);
+    for child in node.children.iter().copied() {
+        // TODO: Nested filters need their own render plan and offscreen pass.
+        // This first filter milestone treats a filtered subtree as raw source
+        // geometry for the outer filter.
+        append_subtree_mesh(document, child, viewport, mesh);
+    }
+}
+
+fn append_element_mesh(element: &svg3_dom::Element, viewport: Viewport, mesh: &mut Mesh) {
+    match &element.kind {
+        ElementKind::Rect => {
+            if let (Some(geo), Some(color)) = (
+                shapes::rect::resolve_rect(element, viewport),
+                shapes::resolve_fill(element),
+            ) {
+                mesh.append(shapes::rect::tessellate_rect(&geo, color));
+            }
+        }
+        ElementKind::Circle => {
+            if let (Some(geo), Some(color)) = (
+                shapes::circle::resolve_circle(element, viewport),
+                shapes::resolve_fill(element),
+            ) {
+                mesh.append(shapes::circle::tessellate_circle(&geo, color));
+            }
+        }
+        ElementKind::Ellipse => {
+            if let (Some(geo), Some(color)) = (
+                shapes::ellipse::resolve_ellipse(element, viewport),
+                shapes::resolve_fill(element),
+            ) {
+                mesh.append(shapes::ellipse::tessellate_ellipse(&geo, color));
+            }
+        }
+        ElementKind::Polygon => {
+            if let (Some(geo), Some(color)) = (
+                shapes::polygon::resolve_polygon(element),
+                shapes::resolve_fill(element),
+            ) {
+                mesh.append(shapes::polygon::tessellate_polygon(&geo, color));
+            }
+        }
+        ElementKind::Polyline => {
+            if let (Some(geo), Some(color)) = (
+                shapes::polyline::resolve_polyline(element),
+                shapes::resolve_fill(element),
+            ) {
+                mesh.append(shapes::polyline::tessellate_polyline(&geo, color));
+            }
+        }
+        ElementKind::Line => {
+            if let (Some(geo), Some(color)) = (
+                shapes::line::resolve_line(element, viewport),
+                shapes::resolve_stroke(element),
+            ) {
+                mesh.append(shapes::line::tessellate_line(&geo, color));
+            }
+        }
+        ElementKind::Path => {
+            if let Some(geo) = shapes::path::resolve_path(element, viewport) {
+                if let Some(color) = shapes::resolve_fill(element) {
+                    mesh.append(shapes::path::tessellate_path_fill(&geo, color));
+                }
+                if let Some(color) = shapes::resolve_stroke(element) {
+                    mesh.append(shapes::path::tessellate_path_stroke(&geo, color));
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn flush_mesh(mesh: &mut Mesh, plan: &mut Vec<RenderOp>) {
+    if !mesh.is_empty() {
+        plan.push(RenderOp::Mesh(std::mem::take(mesh)));
+    }
 }
 
 /// Resolve the document viewport from the root `<svg width>` / `<svg height>`.
@@ -163,6 +254,35 @@ mod tests {
     fn build_scene_is_empty_without_shapes() {
         let document = svg3_dom::parse("<svg><g/></svg>").unwrap();
         assert!(build_scene(&document, vp()).is_empty());
+    }
+
+    #[test]
+    fn build_scene_skips_filter_definition_subtrees() {
+        let document = svg3_dom::parse(
+            r##"<svg><filter id="unused"><rect width="100" height="100" fill="red"/><feGaussianBlur stdDeviation="4"/></filter><rect width="10" height="10" fill="blue"/></svg>"##,
+        )
+        .unwrap();
+        let mesh = build_scene(&document, vp());
+
+        assert_eq!(mesh.vertices.len(), 4);
+        assert!(mesh
+            .vertices
+            .iter()
+            .all(|vertex| vertex.color == [0.0, 0.0, 1.0, 1.0]));
+    }
+
+    #[test]
+    fn render_plan_isolates_filtered_subtree_in_painter_order() {
+        let document = svg3_dom::parse(
+            r##"<svg><rect width="10" height="10" fill="blue"/><filter id="soft"><feGaussianBlur stdDeviation="3"/></filter><g filter="url(#soft)"><rect x="20" width="10" height="10" fill="red"/></g><rect x="40" width="10" height="10" fill="green"/></svg>"##,
+        )
+        .unwrap();
+        let plan = build_render_plan(&document, vp());
+
+        assert_eq!(plan.len(), 3);
+        assert!(matches!(plan[0], RenderOp::Mesh(_)));
+        assert!(matches!(plan[1], RenderOp::GaussianBlur { .. }));
+        assert!(matches!(plan[2], RenderOp::Mesh(_)));
     }
 
     #[test]
