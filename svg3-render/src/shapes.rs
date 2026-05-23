@@ -229,6 +229,13 @@ impl Viewport {
 /// Parse an sRGB colour — `#rgb`, `#rrggbb`, or a named colour — into
 /// linear RGBA. Returns `None` for an unrecognised value.
 fn parse_color(value: &str) -> Option<[f32; 4]> {
+    parse_color_value(value)
+}
+
+/// Crate-visible colour parser shared with the filter primitives (e.g.
+/// `flood-color`, `lighting-color`).
+pub(crate) fn parse_color_value(value: &str) -> Option<[f32; 4]> {
+    let value = value.trim();
     match value.strip_prefix('#') {
         Some(hex) => parse_hex(hex),
         None => parse_named(value),

@@ -7,7 +7,7 @@
 
 use svg3_dom::{Document, ElementKind};
 
-use crate::filters::{FilterDefinitions, GaussianBlur};
+use crate::filters::{FilterDefinitions, FilterPrimitive, FilterPrimitiveKind};
 use crate::shapes;
 use crate::{Mesh, Viewport};
 
@@ -16,9 +16,15 @@ use crate::{Mesh, Viewport};
 pub(crate) enum RenderOp {
     /// Draw a mesh directly into the destination target.
     Mesh(Mesh),
-    /// Draw a mesh into an offscreen target, blur it on the GPU, then
-    /// composite the result into the destination target.
-    GaussianBlur { mesh: Mesh, blur: GaussianBlur },
+    /// Draw a mesh into an offscreen target, run the filter primitive chain
+    /// through ping/pong GPU passes, then composite the result into the
+    /// destination target.
+    Filter {
+        /// The geometry that produces the filter's source graphic.
+        mesh: Mesh,
+        /// Ordered list of primitive passes to apply.
+        primitives: Vec<FilterPrimitive>,
+    },
 }
 
 /// Walk `document` and tessellate every supported 2D SVG shape into one
@@ -73,15 +79,22 @@ fn append_render_ops(
         return;
     }
 
-    if let Some(blur) = filters.resolve(&node.element) {
+    if let Some(chain) = filters.resolve(&node.element) {
         let mut filtered_mesh = Mesh::default();
         append_subtree_mesh(document, id, viewport, &mut filtered_mesh);
-        if !filtered_mesh.is_empty() {
-            if blur.is_visible() {
+        let visible = chain.iter().any(FilterPrimitive::is_visible);
+        let generator = chain.iter().any(|primitive| {
+            matches!(
+                primitive.kind,
+                FilterPrimitiveKind::Flood(_) | FilterPrimitiveKind::Turbulence(_)
+            )
+        });
+        if !filtered_mesh.is_empty() || generator {
+            if visible {
                 flush_mesh(pending_mesh, plan);
-                plan.push(RenderOp::GaussianBlur {
+                plan.push(RenderOp::Filter {
                     mesh: filtered_mesh,
-                    blur,
+                    primitives: chain.to_vec(),
                 });
             } else {
                 pending_mesh.append(filtered_mesh);
@@ -281,7 +294,7 @@ mod tests {
 
         assert_eq!(plan.len(), 3);
         assert!(matches!(plan[0], RenderOp::Mesh(_)));
-        assert!(matches!(plan[1], RenderOp::GaussianBlur { .. }));
+        assert!(matches!(plan[1], RenderOp::Filter { .. }));
         assert!(matches!(plan[2], RenderOp::Mesh(_)));
     }
 

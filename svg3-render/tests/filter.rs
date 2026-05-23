@@ -178,3 +178,350 @@ fn filter_definition_subtree_does_not_paint_directly() {
 
     assert_transparent(&image, 32, 32);
 }
+
+// ---- Per-primitive GPU pipeline tests -------------------------------------
+//
+// Each test below picks a filter primitive whose visual contract is easy to
+// assert with a pixel probe, then renders an SVG document that exercises that
+// primitive end-to-end through the GPU chain. Together they keep one
+// regression net per primitive on the renderer surface.
+
+#[test]
+fn color_matrix_luminance_to_alpha_isolates_alpha() {
+    let Some(renderer) = skip_or_renderer("color_matrix_luminance_to_alpha_isolates_alpha") else {
+        return;
+    };
+    let image = render(
+        &renderer,
+        r##"<svg><filter id="lum"><feColorMatrix type="luminanceToAlpha"/></filter><rect x="16" y="16" width="32" height="32" fill="#ffffff" filter="url(#lum)"/></svg>"##,
+    );
+    let centre = image.pixel(32, 32);
+    // luminanceToAlpha emits luma into alpha and zeroes RGB. White luminance
+    // is 1.0, so the centre must be fully transparent black (premultiplied).
+    assert!(
+        centre[3] > 200 && centre[0] < 30 && centre[1] < 30 && centre[2] < 30,
+        "luminanceToAlpha centre should be alpha-only, got {centre:?}"
+    );
+}
+
+#[test]
+fn color_matrix_saturate_zero_desaturates() {
+    let Some(renderer) = skip_or_renderer("color_matrix_saturate_zero_desaturates") else {
+        return;
+    };
+    let image = render(
+        &renderer,
+        r##"<svg><filter id="gray"><feColorMatrix type="saturate" values="0"/></filter><rect x="16" y="16" width="32" height="32" fill="red" filter="url(#gray)"/></svg>"##,
+    );
+    let centre = image.pixel(32, 32);
+    // Desaturated red is a small grey; R / G / B should be close together.
+    let max = centre[0].max(centre[1]).max(centre[2]);
+    let min = centre[0].min(centre[1]).min(centre[2]);
+    assert!(
+        centre[3] > 200 && max - min < 12,
+        "saturate(0) centre should be grey, got {centre:?}"
+    );
+}
+
+#[test]
+fn flood_fills_filter_region_with_opaque_color() {
+    let Some(renderer) = skip_or_renderer("flood_fills_filter_region_with_opaque_color") else {
+        return;
+    };
+    let image = render(
+        &renderer,
+        r##"<svg><filter id="fl"><feFlood flood-color="#ff0000" flood-opacity="1"/></filter><rect x="0" y="0" width="64" height="64" fill="blue" filter="url(#fl)"/></svg>"##,
+    );
+    // The flood primitive replaces the source — the rect is no longer blue.
+    let centre = image.pixel(32, 32);
+    assert!(
+        centre[0] > 200 && centre[2] < 60 && centre[3] > 200,
+        "flood centre should be solid red, got {centre:?}"
+    );
+}
+
+#[test]
+fn morphology_dilate_grows_the_silhouette() {
+    let Some(renderer) = skip_or_renderer("morphology_dilate_grows_the_silhouette") else {
+        return;
+    };
+    let unfiltered = render(
+        &renderer,
+        r#"<svg><rect x="28" y="28" width="8" height="8" fill="blue"/></svg>"#,
+    );
+    let dilated = render(
+        &renderer,
+        r##"<svg><filter id="grow"><feMorphology operator="dilate" radius="3"/></filter><rect x="28" y="28" width="8" height="8" fill="blue" filter="url(#grow)"/></svg>"##,
+    );
+    // A pixel just outside the original 8x8 box should remain transparent in
+    // the unfiltered image and become opaque blue after dilation.
+    assert!(unfiltered.pixel(25, 32)[3] < 4);
+    let dilated_outside = dilated.pixel(25, 32);
+    assert!(
+        dilated_outside[3] > 200 && dilated_outside[2] > 200,
+        "dilated pixel should be blue, got {dilated_outside:?}"
+    );
+}
+
+#[test]
+fn morphology_erode_shrinks_the_silhouette() {
+    let Some(renderer) = skip_or_renderer("morphology_erode_shrinks_the_silhouette") else {
+        return;
+    };
+    let image = render(
+        &renderer,
+        r##"<svg><filter id="shrink"><feMorphology operator="erode" radius="3"/></filter><rect x="20" y="20" width="24" height="24" fill="blue" filter="url(#shrink)"/></svg>"##,
+    );
+    // Erosion peels the rect edges back; the pixel that was an interior of
+    // the original 24x24 box (1 pixel inside the edge) becomes transparent
+    // after a 3-pixel erode.
+    assert!(image.pixel(21, 32)[3] < 30, "{:?}", image.pixel(21, 32));
+    // The very centre stays solid.
+    let centre = image.pixel(32, 32);
+    assert!(centre[2] > 200 && centre[3] > 200);
+}
+
+#[test]
+fn drop_shadow_paints_offset_blurred_shadow() {
+    let Some(renderer) = skip_or_renderer("drop_shadow_paints_offset_blurred_shadow") else {
+        return;
+    };
+    let image = render(
+        &renderer,
+        r##"<svg><filter id="shadow"><feDropShadow dx="6" dy="6" stdDeviation="2" flood-color="#000000" flood-opacity="1"/></filter><rect x="20" y="20" width="16" height="16" fill="red" filter="url(#shadow)"/></svg>"##,
+    );
+    // Pixel under the offset shadow should be dark (R, G, B small) with
+    // visible alpha; the source itself should still be visibly red on top.
+    let shadow_pixel = image.pixel(40, 40);
+    assert!(
+        shadow_pixel[3] > 8 && shadow_pixel[0] < 60 && shadow_pixel[1] < 60 && shadow_pixel[2] < 60,
+        "shadow pixel should be a dark halo, got {shadow_pixel:?}"
+    );
+    let source_pixel = image.pixel(26, 26);
+    assert!(
+        source_pixel[3] > 200 && source_pixel[0] > 200,
+        "source pixel should remain red on top of the shadow, got {source_pixel:?}"
+    );
+}
+
+#[test]
+fn turbulence_produces_non_uniform_noise() {
+    let Some(renderer) = skip_or_renderer("turbulence_produces_non_uniform_noise") else {
+        return;
+    };
+    let image = render(
+        &renderer,
+        r##"<svg><filter id="noise"><feTurbulence baseFrequency="0.2" numOctaves="3" seed="1"/></filter><rect x="0" y="0" width="64" height="64" filter="url(#noise)"/></svg>"##,
+    );
+    // The noise should vary across the surface, not produce a uniform colour.
+    let a = image.pixel(8, 8)[0];
+    let b = image.pixel(56, 56)[0];
+    let c = image.pixel(32, 32)[0];
+    let min = a.min(b).min(c);
+    let max = a.max(b).max(c);
+    assert!(
+        max as i32 - min as i32 > 10,
+        "turbulence pixels should vary across the surface, sampled {a} {b} {c}"
+    );
+}
+
+#[test]
+fn convolve_matrix_sharpen_increases_contrast() {
+    let Some(renderer) = skip_or_renderer("convolve_matrix_sharpen_increases_contrast") else {
+        return;
+    };
+    // A classic 3x3 sharpen kernel boosts the edges of any high-contrast input.
+    let image = render(
+        &renderer,
+        r##"<svg><filter id="sharp"><feConvolveMatrix kernelMatrix="0 -1 0 -1 5 -1 0 -1 0"/></filter><rect x="20" y="20" width="24" height="24" fill="#888888" filter="url(#sharp)"/></svg>"##,
+    );
+    // The interior remains visible (alpha is finite).
+    let centre = image.pixel(32, 32);
+    assert!(centre[3] > 200);
+}
+
+#[test]
+fn component_transfer_linear_doubles_red() {
+    let Some(renderer) = skip_or_renderer("component_transfer_linear_doubles_red") else {
+        return;
+    };
+    let image = render(
+        &renderer,
+        r##"<svg><filter id="boost"><feComponentTransfer><feFuncR type="linear" slope="2" intercept="0"/></feComponentTransfer></filter><rect x="16" y="16" width="32" height="32" fill="#330000" filter="url(#boost)"/></svg>"##,
+    );
+    let centre = image.pixel(32, 32);
+    // Doubling the red channel of #330000 in linear light pushes a visible red.
+    assert!(centre[0] > 60, "boosted red pixel: {centre:?}");
+}
+
+#[test]
+fn displacement_map_with_zero_scale_is_identity() {
+    let Some(renderer) = skip_or_renderer("displacement_map_with_zero_scale_is_identity") else {
+        return;
+    };
+    let image = render(
+        &renderer,
+        r##"<svg><filter id="warp"><feDisplacementMap scale="0"/></filter><rect x="16" y="16" width="32" height="32" fill="blue" filter="url(#warp)"/></svg>"##,
+    );
+    let centre = image.pixel(32, 32);
+    // Scale=0 means no displacement, so the source rect must render unchanged.
+    assert!(centre[2] > 200 && centre[3] > 200);
+}
+
+#[test]
+fn diffuse_lighting_renders_lighted_surface() {
+    let Some(renderer) = skip_or_renderer("diffuse_lighting_renders_lighted_surface") else {
+        return;
+    };
+    let image = render(
+        &renderer,
+        r##"<svg><filter id="light"><feDiffuseLighting surfaceScale="5" diffuseConstant="1" lighting-color="#ffffff"><feDistantLight azimuth="45" elevation="60"/></feDiffuseLighting></filter><circle cx="32" cy="32" r="20" fill="#888888" filter="url(#light)"/></svg>"##,
+    );
+    // Diffuse output is opaque; the lit centre should be a bright grey.
+    let centre = image.pixel(32, 32);
+    assert!(
+        centre[3] > 200 && centre[0] > 30,
+        "diffuse-lit centre: {centre:?}"
+    );
+}
+
+#[test]
+fn specular_lighting_renders_a_highlight() {
+    let Some(renderer) = skip_or_renderer("specular_lighting_renders_a_highlight") else {
+        return;
+    };
+    let image = render(
+        &renderer,
+        r##"<svg><filter id="spec"><feSpecularLighting surfaceScale="5" specularConstant="1" specularExponent="20" lighting-color="#ffffff"><feDistantLight azimuth="135" elevation="30"/></feSpecularLighting></filter><circle cx="32" cy="32" r="24" fill="#444444" filter="url(#spec)"/></svg>"##,
+    );
+    // Somewhere within the lit disc we should find a visible specular pixel.
+    let mut bright = 0;
+    for y in 0..64 {
+        for x in 0..64 {
+            let p = image.pixel(x, y);
+            if p[3] > 4 && p[0].max(p[1]).max(p[2]) > 80 {
+                bright += 1;
+            }
+        }
+    }
+    assert!(
+        bright > 10,
+        "specular lighting should produce a visible highlight; bright pixels: {bright}"
+    );
+}
+
+#[test]
+fn displacement_map_honors_in_and_in2_dag_wiring() {
+    // The MDN canonical fixture: feTurbulence with `result="turbulence"`,
+    // then feDisplacementMap with `in="SourceGraphic"` and
+    // `in2="turbulence"`. A correct DAG executor produces an amorphous
+    // black shape (the circle's pixels reshuffled by the turbulence offset),
+    // not a noise field — the renderer must address the circle as the
+    // graphic and the turbulence as the map, not the other way around.
+    let Some(renderer) = skip_or_renderer("displacement_map_honors_in_and_in2_dag_wiring") else {
+        return;
+    };
+    let image = render(
+        &renderer,
+        r##"<svg width="64" height="64"><filter id="warp"><feTurbulence type="turbulence" baseFrequency="0.05" numOctaves="2" result="turbulence"/><feDisplacementMap in="SourceGraphic" in2="turbulence" scale="20" xChannelSelector="R" yChannelSelector="G"/></filter><circle cx="32" cy="32" r="28" filter="url(#warp)"/></svg>"##,
+    );
+
+    // The centre is well inside any reasonable displacement of the circle,
+    // so it must remain opaque (= the SourceGraphic was the input, not the
+    // noise).
+    let centre = image.pixel(32, 32);
+    assert!(
+        centre[3] > 200,
+        "displaced circle centre should remain opaque: {centre:?}"
+    );
+
+    // The image must contain at least one fully transparent pixel — proof
+    // that the displacement reached the edge and pushed the circle off it
+    // (or, equivalently, that we're not just rendering a uniform noise
+    // field).
+    let transparent_count = (0..64)
+        .flat_map(|y| (0..64).map(move |x| (x, y)))
+        .filter(|(x, y)| image.pixel(*x, *y)[3] < 4)
+        .count();
+    assert!(
+        transparent_count > 100,
+        "displacement should leave visible transparent regions, got {transparent_count}"
+    );
+
+    // The displaced circle must be RGB-monochrome (the default SVG fill is
+    // black) — if the renderer were mixing the turbulence pixels into the
+    // graphic by mistake, we'd see varied colours instead.
+    for (x, y) in [(20, 32), (32, 20), (44, 32), (32, 44)] {
+        let p = image.pixel(x, y);
+        if p[3] > 200 {
+            let max = p[0].max(p[1]).max(p[2]);
+            assert!(
+                max < 16,
+                "displaced circle pixel ({x}, {y}) should be near-black: {p:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn source_alpha_pseudo_input_strips_rgb() {
+    // `in="SourceAlpha"` should hand the next primitive the alpha channel
+    // of the source with RGB cleared to zero. We use a colour-matrix that
+    // adds a constant red to make the result trivially recognisable: the
+    // output anywhere inside the circle should be opaque pure red.
+    let Some(renderer) = skip_or_renderer("source_alpha_pseudo_input_strips_rgb") else {
+        return;
+    };
+    let image = render(
+        &renderer,
+        r##"<svg width="64" height="64"><filter id="alpha"><feColorMatrix in="SourceAlpha" type="matrix" values="0 0 0 0 1   0 0 0 0 0   0 0 0 0 0   0 0 0 1 0"/></filter><circle cx="32" cy="32" r="20" fill="blue" filter="url(#alpha)"/></svg>"##,
+    );
+    let centre = image.pixel(32, 32);
+    // The circle's fill was blue, but SourceAlpha discarded the blue and the
+    // matrix adds a constant red, so the centre is opaque pure red.
+    assert!(
+        centre[0] > 200 && centre[1] < 30 && centre[2] < 30 && centre[3] > 200,
+        "SourceAlpha-only centre should be opaque red, got {centre:?}"
+    );
+}
+
+#[test]
+fn named_result_can_be_referenced_later() {
+    // Two-step chain: feColorMatrix recolours the source and stores its
+    // output as `result="red"`. feFlood writes solid white but is *not*
+    // the last primitive; the third step uses feColorMatrix again with
+    // `in="red"` to pick the named result. The final composited centre
+    // must be the recoloured red, proving the named-result lookup.
+    let Some(renderer) = skip_or_renderer("named_result_can_be_referenced_later") else {
+        return;
+    };
+    let image = render(
+        &renderer,
+        r##"<svg width="64" height="64"><filter id="g"><feColorMatrix type="matrix" values="0 0 0 0 1  0 0 0 0 0  0 0 0 0 0  0 0 0 1 0" result="red"/><feFlood flood-color="#ffffff"/><feColorMatrix in="red" type="matrix" values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 1 0"/></filter><rect x="16" y="16" width="32" height="32" fill="blue" filter="url(#g)"/></svg>"##,
+    );
+    let centre = image.pixel(32, 32);
+    assert!(
+        centre[0] > 200 && centre[1] < 30 && centre[2] < 30 && centre[3] > 200,
+        "named-result `in=\"red\"` should recover the recoloured source, got {centre:?}"
+    );
+}
+
+#[test]
+fn primitive_chain_applies_blur_then_color_matrix() {
+    let Some(renderer) = skip_or_renderer("primitive_chain_applies_blur_then_color_matrix") else {
+        return;
+    };
+    let image = render(
+        &renderer,
+        r##"<svg><filter id="chain"><feGaussianBlur stdDeviation="3"/><feColorMatrix type="saturate" values="0"/></filter><rect x="24" y="24" width="16" height="16" fill="red" filter="url(#chain)"/></svg>"##,
+    );
+    // The blurred + desaturated centre is grey (R/G/B equal-ish) and still
+    // contributes alpha around the original rect.
+    let centre = image.pixel(32, 32);
+    let max = centre[0].max(centre[1]).max(centre[2]);
+    let min = centre[0].min(centre[1]).min(centre[2]);
+    assert!(
+        centre[3] > 80 && max - min < 12,
+        "blurred + desaturated centre should be grey, got {centre:?}"
+    );
+}

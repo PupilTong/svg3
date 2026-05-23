@@ -20,12 +20,18 @@
 //! API for callers that pre-tessellate a [`Mesh`] outside the document walk;
 //! the high-level paths go through [`Renderer::encode_document`].
 
+use std::collections::BTreeMap;
+
 use glam::Mat4;
 use svg3_dom::Document;
 use thiserror::Error;
 use wgpu::util::DeviceExt;
 
-use crate::filters::GaussianBlur;
+use crate::filters::{
+    ColorMatrix, ComponentTransfer, ConvolveMatrix, DisplacementMap, DropShadow, FilterInput,
+    FilterPrimitive, FilterPrimitiveKind, Flood, GaussianBlur, LightSource, Lighting, Morphology,
+    Turbulence,
+};
 use crate::mesh::VERTEX_ATTRIBUTES;
 use crate::scene::{build_render_plan, RenderOp};
 use crate::{document_viewport, Mesh, RenderConfig, Vertex, Viewport};
@@ -46,42 +52,218 @@ struct TransformUniform {
 }
 
 /// Uniform data consumed by `filter.wgsl`.
+///
+/// One shared layout fills every filter pass; only the fields a particular
+/// fragment entry point reads are meaningful, the rest are zeroed. Field
+/// names map 1:1 to the WGSL `FilterUniform` struct in `filter.wgsl`.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct FilterUniform {
-    /// One source texel in normalised texture coordinates.
     texel_size: [f32; 2],
-    /// Blur axis: `[1, 0]` for horizontal, `[0, 1]` for vertical.
     direction: [f32; 2],
-    /// Gaussian standard deviation for this axis, in render pixels.
+    color: [f32; 4],
+    extra: [f32; 4],
+    light: [f32; 4],
+    lighting: [f32; 4],
+    matrix_r0: [f32; 4],
+    matrix_r1: [f32; 4],
+    matrix_r2: [f32; 4],
+    matrix_r3: [f32; 4],
+    matrix_col4: [f32; 4],
+    transfer_r: [f32; 4],
+    transfer_g: [f32; 4],
+    transfer_b: [f32; 4],
+    transfer_a: [f32; 4],
+    transfer_kinds: [u32; 4],
     sigma: f32,
-    /// One-sided sample radius, derived from `sigma`.
     radius: u32,
-    /// Explicit padding so the Rust and WGSL uniform layouts stay aligned.
-    _pad: [u32; 2],
+    mode: u32,
+    flags: u32,
 }
 
 impl FilterUniform {
+    fn empty(width: u32, height: u32) -> Self {
+        let mut uniform = Self::zeroed();
+        uniform.texel_size = [1.0 / width as f32, 1.0 / height as f32];
+        uniform
+    }
+
+    fn zeroed() -> Self {
+        bytemuck::Zeroable::zeroed()
+    }
+
     fn blur(width: u32, height: u32, direction: [f32; 2], sigma: f32) -> Self {
-        let radius = (sigma * 3.0).ceil().clamp(0.0, MAX_BLUR_RADIUS as f32) as u32;
-        Self {
-            texel_size: [1.0 / width as f32, 1.0 / height as f32],
-            direction,
-            sigma,
-            radius,
-            _pad: [0; 2],
-        }
+        let mut uniform = Self::empty(width, height);
+        uniform.direction = direction;
+        uniform.sigma = sigma;
+        uniform.radius = (sigma * 3.0).ceil().clamp(0.0, MAX_BLUR_RADIUS as f32) as u32;
+        uniform
     }
 
     fn composite(width: u32, height: u32) -> Self {
-        Self {
-            texel_size: [1.0 / width as f32, 1.0 / height as f32],
-            direction: [0.0, 0.0],
-            sigma: 0.0,
-            radius: 0,
-            _pad: [0; 2],
+        Self::empty(width, height)
+    }
+
+    /// An identity colour matrix in the matrix block — used to copy the
+    /// source verbatim through the colour-matrix pipeline when a chain step
+    /// reduces to a passthrough (e.g. a zero-deviation Gaussian blur).
+    fn passthrough(width: u32, height: u32) -> Self {
+        let mut uniform = Self::empty(width, height);
+        uniform.matrix_r0 = [1.0, 0.0, 0.0, 0.0];
+        uniform.matrix_r1 = [0.0, 1.0, 0.0, 0.0];
+        uniform.matrix_r2 = [0.0, 0.0, 1.0, 0.0];
+        uniform.matrix_r3 = [0.0, 0.0, 0.0, 1.0];
+        uniform
+    }
+
+    /// SourceAlpha extractor: RGB rows zero, A row copies input alpha. Used
+    /// to derive the filter's `SourceAlpha` pseudo-input from `SourceGraphic`
+    /// via the colour-matrix pipeline.
+    fn source_alpha(width: u32, height: u32) -> Self {
+        let mut uniform = Self::empty(width, height);
+        // R = G = B = 0; A = 0*R + 0*G + 0*B + 1*A + 0 = src.a.
+        uniform.matrix_r3 = [0.0, 0.0, 0.0, 1.0];
+        uniform
+    }
+}
+
+/// Pick the texture view that satisfies a primitive's `in` / `in2` reference.
+///
+/// Unresolvable references — a `Named` reference with no matching earlier
+/// `result`, or `Default` for the very first primitive — fall back to
+/// `SourceGraphic`, matching SVG's "if the value is unresolved, use
+/// SourceGraphic" behaviour.
+fn resolve_input<'a>(
+    input: &FilterInput,
+    prev_index: Option<usize>,
+    source: &'a FilterTexture,
+    source_alpha: &'a FilterTexture,
+    outputs: &'a [FilterTexture],
+    named: &BTreeMap<&str, usize>,
+) -> &'a wgpu::TextureView {
+    match input {
+        FilterInput::Default => match prev_index {
+            Some(i) => &outputs[i].view,
+            None => &source.view,
+        },
+        FilterInput::SourceGraphic => &source.view,
+        FilterInput::SourceAlpha => &source_alpha.view,
+        FilterInput::Named(name) => match named.get(name.as_str()) {
+            Some(i) => &outputs[*i].view,
+            None => &source.view,
+        },
+    }
+}
+
+fn color_matrix_uniform(extent: wgpu::Extent3d, cm: &ColorMatrix) -> FilterUniform {
+    let mut uniform = FilterUniform::empty(extent.width, extent.height);
+    let m = &cm.matrix;
+    uniform.matrix_r0 = [m[0][0], m[0][1], m[0][2], m[0][3]];
+    uniform.matrix_r1 = [m[1][0], m[1][1], m[1][2], m[1][3]];
+    uniform.matrix_r2 = [m[2][0], m[2][1], m[2][2], m[2][3]];
+    uniform.matrix_r3 = [m[3][0], m[3][1], m[3][2], m[3][3]];
+    uniform.matrix_col4 = [m[0][4], m[1][4], m[2][4], m[3][4]];
+    uniform
+}
+
+fn turbulence_uniform(extent: wgpu::Extent3d, t: Turbulence) -> FilterUniform {
+    let mut uniform = FilterUniform::empty(extent.width, extent.height);
+    uniform.extra = [t.base_frequency[0], t.base_frequency[1], 0.0, 0.0];
+    uniform.radius = t.num_octaves;
+    uniform.sigma = t.seed;
+    uniform.flags = if t.fractal_noise { 1 } else { 0 };
+    uniform
+}
+
+fn lighting_uniform(extent: wgpu::Extent3d, l: Lighting, specular: bool) -> FilterUniform {
+    let mut uniform = FilterUniform::empty(extent.width, extent.height);
+    uniform.color = l.lighting_color;
+    match l.light {
+        LightSource::Distant(dir) => {
+            uniform.light = [dir[0], dir[1], dir[2], l.specular_exponent];
+            uniform.lighting = [
+                l.surface_scale,
+                l.constant,
+                if specular { 1.0 } else { 0.0 },
+                0.0,
+            ];
+        }
+        LightSource::Point(pos) => {
+            uniform.light = [pos[0], pos[1], pos[2], l.specular_exponent];
+            uniform.lighting = [
+                l.surface_scale,
+                l.constant,
+                if specular { 1.0 } else { 0.0 },
+                1.0,
+            ];
         }
     }
+    uniform
+}
+
+fn morphology_uniform(
+    extent: wgpu::Extent3d,
+    m: Morphology,
+    direction: [f32; 2],
+    radius_pixels: f32,
+) -> FilterUniform {
+    let mut uniform = FilterUniform::empty(extent.width, extent.height);
+    uniform.direction = direction;
+    uniform.radius = radius_pixels.round().clamp(0.0, MAX_BLUR_RADIUS as f32) as u32;
+    uniform.flags = if m.dilate { 1 } else { 0 };
+    uniform
+}
+
+fn flood_uniform(extent: wgpu::Extent3d, f: Flood) -> FilterUniform {
+    let mut uniform = FilterUniform::empty(extent.width, extent.height);
+    uniform.color = f.color;
+    uniform
+}
+
+fn drop_shadow_alpha_uniform(extent: wgpu::Extent3d, shadow: DropShadow) -> FilterUniform {
+    let mut uniform = FilterUniform::empty(extent.width, extent.height);
+    uniform.color = shadow.color;
+    // The shader subtracts `direction` in UV space, so convert the pixel offset.
+    uniform.direction = [
+        shadow.offset[0] * uniform.texel_size[0],
+        shadow.offset[1] * uniform.texel_size[1],
+    ];
+    uniform
+}
+
+fn displacement_uniform(extent: wgpu::Extent3d, d: DisplacementMap) -> FilterUniform {
+    let mut uniform = FilterUniform::empty(extent.width, extent.height);
+    uniform.extra = [d.scale, 0.0, 0.0, 0.0];
+    uniform.transfer_kinds = [d.x_channel, d.y_channel, 0, 0];
+    uniform
+}
+
+fn convolve_uniform(extent: wgpu::Extent3d, c: ConvolveMatrix) -> FilterUniform {
+    let mut uniform = FilterUniform::empty(extent.width, extent.height);
+    uniform.matrix_r0 = [c.kernel[0][0], c.kernel[0][1], c.kernel[0][2], 0.0];
+    uniform.matrix_r1 = [c.kernel[1][0], c.kernel[1][1], c.kernel[1][2], 0.0];
+    uniform.matrix_r2 = [c.kernel[2][0], c.kernel[2][1], c.kernel[2][2], 0.0];
+    uniform.matrix_col4 = [c.divisor, c.bias, 0.0, 0.0];
+    uniform.flags = if c.preserve_alpha { 1 } else { 0 };
+    uniform
+}
+
+fn component_transfer_uniform(
+    extent: wgpu::Extent3d,
+    transfer: ComponentTransfer,
+) -> FilterUniform {
+    let mut uniform = FilterUniform::empty(extent.width, extent.height);
+    uniform.transfer_r = transfer.r.params;
+    uniform.transfer_g = transfer.g.params;
+    uniform.transfer_b = transfer.b.params;
+    uniform.transfer_a = transfer.a.params;
+    uniform.transfer_kinds = [
+        transfer.r.kind,
+        transfer.g.kind,
+        transfer.b.kind,
+        transfer.a.kind,
+    ];
+    uniform
 }
 
 impl TransformUniform {
@@ -156,6 +338,16 @@ pub struct Renderer {
     filter_bind_group_layout: wgpu::BindGroupLayout,
     blur_pipeline: wgpu::RenderPipeline,
     composite_pipeline: wgpu::RenderPipeline,
+    color_matrix_pipeline: wgpu::RenderPipeline,
+    turbulence_pipeline: wgpu::RenderPipeline,
+    lighting_pipeline: wgpu::RenderPipeline,
+    morphology_pipeline: wgpu::RenderPipeline,
+    flood_pipeline: wgpu::RenderPipeline,
+    drop_shadow_alpha_pipeline: wgpu::RenderPipeline,
+    drop_shadow_composite_pipeline: wgpu::RenderPipeline,
+    displacement_pipeline: wgpu::RenderPipeline,
+    convolve_pipeline: wgpu::RenderPipeline,
+    component_transfer_pipeline: wgpu::RenderPipeline,
     filter_sampler: wgpu::Sampler,
     format: wgpu::TextureFormat,
 }
@@ -205,13 +397,97 @@ impl Renderer {
             "fs_composite",
             Some(premultiplied_alpha_blend()),
         );
+        let color_matrix_pipeline = build_filter_pipeline(
+            &device,
+            format,
+            &filter_bind_group_layout,
+            "svg3 feColorMatrix pipeline",
+            "fs_color_matrix",
+            None,
+        );
+        let turbulence_pipeline = build_filter_pipeline(
+            &device,
+            format,
+            &filter_bind_group_layout,
+            "svg3 feTurbulence pipeline",
+            "fs_turbulence",
+            None,
+        );
+        let lighting_pipeline = build_filter_pipeline(
+            &device,
+            format,
+            &filter_bind_group_layout,
+            "svg3 feLighting pipeline",
+            "fs_lighting",
+            None,
+        );
+        let morphology_pipeline = build_filter_pipeline(
+            &device,
+            format,
+            &filter_bind_group_layout,
+            "svg3 feMorphology pipeline",
+            "fs_morphology",
+            None,
+        );
+        let flood_pipeline = build_filter_pipeline(
+            &device,
+            format,
+            &filter_bind_group_layout,
+            "svg3 feFlood pipeline",
+            "fs_flood",
+            None,
+        );
+        let drop_shadow_alpha_pipeline = build_filter_pipeline(
+            &device,
+            format,
+            &filter_bind_group_layout,
+            "svg3 feDropShadow alpha pipeline",
+            "fs_drop_shadow_alpha",
+            None,
+        );
+        let drop_shadow_composite_pipeline = build_filter_pipeline(
+            &device,
+            format,
+            &filter_bind_group_layout,
+            "svg3 feDropShadow composite pipeline",
+            "fs_drop_shadow_composite",
+            None,
+        );
+        let displacement_pipeline = build_filter_pipeline(
+            &device,
+            format,
+            &filter_bind_group_layout,
+            "svg3 feDisplacementMap pipeline",
+            "fs_displacement",
+            None,
+        );
+        let convolve_pipeline = build_filter_pipeline(
+            &device,
+            format,
+            &filter_bind_group_layout,
+            "svg3 feConvolveMatrix pipeline",
+            "fs_convolve",
+            None,
+        );
+        let component_transfer_pipeline = build_filter_pipeline(
+            &device,
+            format,
+            &filter_bind_group_layout,
+            "svg3 feComponentTransfer pipeline",
+            "fs_component_transfer",
+            None,
+        );
+        // Filter passes need bilinear sampling for fractional displacements
+        // (feDisplacementMap, feConvolveMatrix kernel taps); the blur kernel
+        // is fine with either filter mode because it samples on the integer
+        // pixel grid.
         let filter_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("svg3 filter sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
             mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
@@ -223,6 +499,16 @@ impl Renderer {
             filter_bind_group_layout,
             blur_pipeline,
             composite_pipeline,
+            color_matrix_pipeline,
+            turbulence_pipeline,
+            lighting_pipeline,
+            morphology_pipeline,
+            flood_pipeline,
+            drop_shadow_alpha_pipeline,
+            drop_shadow_composite_pipeline,
+            displacement_pipeline,
+            convolve_pipeline,
+            component_transfer_pipeline,
             filter_sampler,
             format,
         }
@@ -459,12 +745,12 @@ impl Renderer {
                         self.encode_scene_draw(encoder, target, &scene, "svg3 shape pass");
                     }
                 }
-                RenderOp::GaussianBlur { mesh, blur } => {
-                    self.encode_gaussian_blur(
+                RenderOp::Filter { mesh, primitives } => {
+                    self.encode_filter_chain(
                         encoder,
                         target,
                         mesh,
-                        *blur,
+                        primitives,
                         view_projection,
                         target_extent,
                     );
@@ -496,17 +782,25 @@ impl Renderer {
         self.draw(&mut pass, scene);
     }
 
-    fn encode_gaussian_blur(
+    fn encode_filter_chain(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         target: &wgpu::TextureView,
         mesh: &Mesh,
-        blur: GaussianBlur,
+        primitives: &[FilterPrimitive],
         view_projection: Mat4,
         extent: wgpu::Extent3d,
     ) {
+        // SVG filter graphs are DAGs, not linear chains: a primitive's `in` /
+        // `in2` can reference SourceGraphic, SourceAlpha, or an earlier
+        // primitive's named `result`. The executor keeps one immutable
+        // texture per node — `source`, `source_alpha`, and one
+        // `outputs[i]` per primitive — and a shared `scratch` for multi-pass
+        // primitives (separable blurs, drop shadow). When a primitive's `in`
+        // is the default, it picks up the previous primitive's output, which
+        // recovers the linear-chain behaviour for documents that don't use
+        // `result`.
         let source = self.create_filter_texture(extent, "svg3 filter source");
-        let ping = self.create_filter_texture(extent, "svg3 filter ping");
 
         if let Some(scene) = self.create_scene(mesh, view_projection) {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -523,52 +817,393 @@ impl Renderer {
                 ..Default::default()
             });
             self.draw(&mut pass, &scene);
-        }
-
-        let mut current = &source;
-        let mut wrote_ping = false;
-        if blur.std_deviation_x > 0.0 {
-            self.encode_blur_pass(
+        } else {
+            // No geometry — leave the source texture transparent so that
+            // generator primitives (feFlood, feTurbulence) still produce
+            // useful output, and so an `in="SourceAlpha"` reference is
+            // a well-defined zero.
+            clear_target(
                 encoder,
                 &source.view,
-                &ping.view,
+                wgpu::Color::TRANSPARENT,
+                "svg3 filter empty source clear",
+            );
+        }
+
+        // SourceAlpha = (0, 0, 0, src.a). Derive it through the colour-matrix
+        // pipeline once — primitives that don't reference SourceAlpha still
+        // pay this one pass, but the cost is trivial and the code stays
+        // simple.
+        let source_alpha = self.create_filter_texture(extent, "svg3 filter source alpha");
+        let alpha_uniform = FilterUniform::source_alpha(extent.width, extent.height);
+        self.encode_filter_pass(
+            encoder,
+            &self.color_matrix_pipeline,
+            &source.view,
+            &source.view,
+            &source_alpha.view,
+            &alpha_uniform,
+            "svg3 SourceAlpha derivation",
+        );
+
+        // One output texture per primitive, plus one shared scratch buffer.
+        let outputs: Vec<FilterTexture> = (0..primitives.len())
+            .map(|i| self.create_filter_texture(extent, &format!("svg3 filter output {i}")))
+            .collect();
+        let scratch = self.create_filter_texture(extent, "svg3 filter scratch");
+
+        let mut named: BTreeMap<&str, usize> = BTreeMap::new();
+        let mut prev_index: Option<usize> = None;
+        for (i, primitive) in primitives.iter().enumerate() {
+            let in1_view = resolve_input(
+                &primitive.input,
+                prev_index,
+                &source,
+                &source_alpha,
+                &outputs,
+                &named,
+            );
+            let in2_view = resolve_input(
+                &primitive.input2,
+                prev_index,
+                &source,
+                &source_alpha,
+                &outputs,
+                &named,
+            );
+            let output_view = &outputs[i].view;
+            self.encode_primitive(
+                encoder,
+                primitive,
+                in1_view,
+                in2_view,
+                output_view,
+                &scratch.view,
                 extent,
+            );
+            if let Some(name) = primitive.result.as_deref() {
+                named.insert(name, i);
+            }
+            prev_index = Some(i);
+        }
+
+        // Composite the last primitive's output onto the destination. Falling
+        // back to the raw source covers the "filter with no primitives" case,
+        // which `scene.rs` already filters out — but the guard keeps this
+        // path safe if a caller invokes the renderer differently.
+        let final_view = match prev_index {
+            Some(i) => &outputs[i].view,
+            None => &source.view,
+        };
+        self.encode_composite_pass(encoder, final_view, &source.view, target, extent);
+    }
+
+    /// Encode one primitive's GPU pass(es). Reads `in1` / `in2`, writes to
+    /// `output`, and may use `scratch` as an internal bounce buffer for
+    /// multi-pass primitives.
+    #[allow(clippy::too_many_arguments)]
+    fn encode_primitive(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        primitive: &FilterPrimitive,
+        in1: &wgpu::TextureView,
+        in2: &wgpu::TextureView,
+        output: &wgpu::TextureView,
+        scratch: &wgpu::TextureView,
+        extent: wgpu::Extent3d,
+    ) {
+        match &primitive.kind {
+            FilterPrimitiveKind::GaussianBlur(blur) => {
+                self.encode_gaussian_blur_chain(encoder, in1, output, scratch, *blur, extent);
+            }
+            FilterPrimitiveKind::ColorMatrix(cm) => {
+                let uniform = color_matrix_uniform(extent, cm);
+                self.encode_filter_pass(
+                    encoder,
+                    &self.color_matrix_pipeline,
+                    in1,
+                    in2,
+                    output,
+                    &uniform,
+                    "svg3 feColorMatrix pass",
+                );
+            }
+            FilterPrimitiveKind::Turbulence(t) => {
+                let uniform = turbulence_uniform(extent, *t);
+                self.encode_filter_pass(
+                    encoder,
+                    &self.turbulence_pipeline,
+                    in1,
+                    in2,
+                    output,
+                    &uniform,
+                    "svg3 feTurbulence pass",
+                );
+            }
+            FilterPrimitiveKind::SpecularLighting(l) | FilterPrimitiveKind::DiffuseLighting(l) => {
+                let specular = matches!(primitive.kind, FilterPrimitiveKind::SpecularLighting(_));
+                let uniform = lighting_uniform(extent, *l, specular);
+                self.encode_filter_pass(
+                    encoder,
+                    &self.lighting_pipeline,
+                    in1,
+                    in2,
+                    output,
+                    &uniform,
+                    "svg3 feLighting pass",
+                );
+            }
+            FilterPrimitiveKind::Morphology(m) => {
+                // Separable: X pass writes scratch, Y pass writes output.
+                let uniform_x = morphology_uniform(extent, *m, [1.0, 0.0], m.radius_x);
+                self.encode_filter_pass(
+                    encoder,
+                    &self.morphology_pipeline,
+                    in1,
+                    in2,
+                    scratch,
+                    &uniform_x,
+                    "svg3 feMorphology X pass",
+                );
+                let uniform_y = morphology_uniform(extent, *m, [0.0, 1.0], m.radius_y);
+                self.encode_filter_pass(
+                    encoder,
+                    &self.morphology_pipeline,
+                    scratch,
+                    in2,
+                    output,
+                    &uniform_y,
+                    "svg3 feMorphology Y pass",
+                );
+            }
+            FilterPrimitiveKind::Flood(f) => {
+                let uniform = flood_uniform(extent, *f);
+                self.encode_filter_pass(
+                    encoder,
+                    &self.flood_pipeline,
+                    in1,
+                    in2,
+                    output,
+                    &uniform,
+                    "svg3 feFlood pass",
+                );
+            }
+            FilterPrimitiveKind::DropShadow(d) => {
+                self.encode_drop_shadow(encoder, in1, output, scratch, *d, extent);
+            }
+            FilterPrimitiveKind::DisplacementMap(d) => {
+                let uniform = displacement_uniform(extent, *d);
+                self.encode_filter_pass(
+                    encoder,
+                    &self.displacement_pipeline,
+                    in1,
+                    in2,
+                    output,
+                    &uniform,
+                    "svg3 feDisplacementMap pass",
+                );
+            }
+            FilterPrimitiveKind::ConvolveMatrix(c) => {
+                let uniform = convolve_uniform(extent, *c);
+                self.encode_filter_pass(
+                    encoder,
+                    &self.convolve_pipeline,
+                    in1,
+                    in2,
+                    output,
+                    &uniform,
+                    "svg3 feConvolveMatrix pass",
+                );
+            }
+            FilterPrimitiveKind::ComponentTransfer(t) => {
+                let uniform = component_transfer_uniform(extent, *t);
+                self.encode_filter_pass(
+                    encoder,
+                    &self.component_transfer_pipeline,
+                    in1,
+                    in2,
+                    output,
+                    &uniform,
+                    "svg3 feComponentTransfer pass",
+                );
+            }
+        }
+    }
+
+    /// Separable Gaussian blur (input -> scratch -> output). For a single-
+    /// axis or identity blur the helper still ends on `output`, so the
+    /// caller's invariant ("output texture holds this primitive's result")
+    /// always holds.
+    fn encode_gaussian_blur_chain(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        input: &wgpu::TextureView,
+        output: &wgpu::TextureView,
+        scratch: &wgpu::TextureView,
+        blur: GaussianBlur,
+        extent: wgpu::Extent3d,
+    ) {
+        let want_x = blur.std_deviation_x > 0.0;
+        let want_y = blur.std_deviation_y > 0.0;
+
+        if !want_x && !want_y {
+            // Identity blur — copy through using the colour-matrix pipeline
+            // with an identity matrix.
+            let uniform = FilterUniform::passthrough(extent.width, extent.height);
+            self.encode_filter_pass(
+                encoder,
+                &self.color_matrix_pipeline,
+                input,
+                input,
+                output,
+                &uniform,
+                "svg3 Gaussian blur (passthrough) pass",
+            );
+            return;
+        }
+
+        if want_x && want_y {
+            // input -> scratch (X), then scratch -> output (Y).
+            let uniform_x = FilterUniform::blur(
+                extent.width,
+                extent.height,
                 [1.0, 0.0],
                 blur.std_deviation_x,
             );
-            current = &ping;
-            wrote_ping = true;
-        }
-        if blur.std_deviation_y > 0.0 {
-            let destination = if wrote_ping { &source } else { &ping };
-            self.encode_blur_pass(
+            self.encode_filter_pass(
                 encoder,
-                &current.view,
-                &destination.view,
-                extent,
+                &self.blur_pipeline,
+                input,
+                input,
+                scratch,
+                &uniform_x,
+                "svg3 Gaussian blur X pass",
+            );
+            let uniform_y = FilterUniform::blur(
+                extent.width,
+                extent.height,
                 [0.0, 1.0],
                 blur.std_deviation_y,
             );
-            current = destination;
+            self.encode_filter_pass(
+                encoder,
+                &self.blur_pipeline,
+                scratch,
+                scratch,
+                output,
+                &uniform_y,
+                "svg3 Gaussian blur Y pass",
+            );
+            return;
         }
-        self.encode_composite_pass(encoder, &current.view, target, extent);
+
+        // Single-axis blur — one pass, input -> output.
+        let (direction, sigma) = if want_x {
+            ([1.0, 0.0], blur.std_deviation_x)
+        } else {
+            ([0.0, 1.0], blur.std_deviation_y)
+        };
+        let uniform = FilterUniform::blur(extent.width, extent.height, direction, sigma);
+        self.encode_filter_pass(
+            encoder,
+            &self.blur_pipeline,
+            input,
+            input,
+            output,
+            &uniform,
+            "svg3 Gaussian blur axis pass",
+        );
     }
 
-    fn encode_blur_pass(
+    /// `feDropShadow` is a five-step pipeline; the helper ping-pongs through
+    /// `output` and `scratch` so the primitive's own input texture stays
+    /// untouched (it must remain readable, e.g. for an upstream `result`).
+    fn encode_drop_shadow(
         &self,
         encoder: &mut wgpu::CommandEncoder,
-        source: &wgpu::TextureView,
-        destination: &wgpu::TextureView,
+        input: &wgpu::TextureView,
+        output: &wgpu::TextureView,
+        scratch: &wgpu::TextureView,
+        shadow: DropShadow,
         extent: wgpu::Extent3d,
-        direction: [f32; 2],
-        sigma: f32,
     ) {
-        let uniform = FilterUniform::blur(extent.width, extent.height, direction, sigma);
-        let bind_group = self.create_filter_bind_group(source, &uniform, "svg3 blur bind group");
+        // 1) Colour the source alpha at offset uv into `scratch`. `input` is
+        //    the SVG-level "input image" for the shadow (typically the
+        //    SourceGraphic).
+        let uniform_alpha = drop_shadow_alpha_uniform(extent, shadow);
+        self.encode_filter_pass(
+            encoder,
+            &self.drop_shadow_alpha_pipeline,
+            input,
+            input,
+            scratch,
+            &uniform_alpha,
+            "svg3 feDropShadow alpha pass",
+        );
+        // 2) Blur X: scratch -> output.
+        let uniform_blur_x = FilterUniform::blur(
+            extent.width,
+            extent.height,
+            [1.0, 0.0],
+            shadow.std_deviation_x,
+        );
+        self.encode_filter_pass(
+            encoder,
+            &self.blur_pipeline,
+            scratch,
+            scratch,
+            output,
+            &uniform_blur_x,
+            "svg3 feDropShadow blur X pass",
+        );
+        // 3) Blur Y: output -> scratch. After this, `scratch` holds the final
+        //    blurred shadow.
+        let uniform_blur_y = FilterUniform::blur(
+            extent.width,
+            extent.height,
+            [0.0, 1.0],
+            shadow.std_deviation_y,
+        );
+        self.encode_filter_pass(
+            encoder,
+            &self.blur_pipeline,
+            output,
+            output,
+            scratch,
+            &uniform_blur_y,
+            "svg3 feDropShadow blur Y pass",
+        );
+        // 4) Composite: the shadow (in1 = scratch) under the primitive's own
+        //    input image (in2 = input), into `output`. SVG-spec semantics:
+        //    feDropShadow composites the input image on top of the shadow.
+        let uniform_composite = FilterUniform::composite(extent.width, extent.height);
+        self.encode_filter_pass(
+            encoder,
+            &self.drop_shadow_composite_pipeline,
+            scratch,
+            input,
+            output,
+            &uniform_composite,
+            "svg3 feDropShadow composite pass",
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encode_filter_pass(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        pipeline: &wgpu::RenderPipeline,
+        in1: &wgpu::TextureView,
+        in2: &wgpu::TextureView,
+        output: &wgpu::TextureView,
+        uniform: &FilterUniform,
+        label: &str,
+    ) {
+        let bind_group = self.create_filter_bind_group(in1, in2, uniform, "svg3 filter bind");
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("svg3 Gaussian blur pass"),
+            label: Some(label),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: destination,
+                view: output,
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
@@ -578,7 +1213,7 @@ impl Renderer {
             })],
             ..Default::default()
         });
-        pass.set_pipeline(&self.blur_pipeline);
+        pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
         pass.draw(0..3, 0..1);
     }
@@ -586,13 +1221,18 @@ impl Renderer {
     fn encode_composite_pass(
         &self,
         encoder: &mut wgpu::CommandEncoder,
-        source: &wgpu::TextureView,
+        chain_output: &wgpu::TextureView,
+        source_view: &wgpu::TextureView,
         destination: &wgpu::TextureView,
         extent: wgpu::Extent3d,
     ) {
         let uniform = FilterUniform::composite(extent.width, extent.height);
-        let bind_group =
-            self.create_filter_bind_group(source, &uniform, "svg3 filter composite bind group");
+        let bind_group = self.create_filter_bind_group(
+            chain_output,
+            source_view,
+            &uniform,
+            "svg3 filter composite bind group",
+        );
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("svg3 filter composite pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -614,6 +1254,7 @@ impl Renderer {
     fn create_filter_bind_group(
         &self,
         source: &wgpu::TextureView,
+        source2: &wgpu::TextureView,
         uniform: &FilterUniform,
         label: &str,
     ) -> wgpu::BindGroup {
@@ -638,6 +1279,10 @@ impl Renderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
+                    resource: wgpu::BindingResource::TextureView(source2),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
                     resource: uniform_buffer.as_entire_binding(),
                 },
             ],
@@ -771,6 +1416,16 @@ fn build_filter_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayou
             },
             wgpu::BindGroupLayoutEntry {
                 binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
@@ -924,10 +1579,14 @@ mod tests {
 
     #[test]
     fn filter_uniform_matches_wgsl_layout() {
-        assert_eq!(
-            std::mem::size_of::<FilterUniform>(),
-            8 * std::mem::size_of::<f32>()
-        );
+        // The shared filter uniform packs:
+        //   texel_size(2) + direction(2)                        = 4 floats
+        //   + color + extra + light + lighting                  = 4 * 4 = 16 floats
+        //   + matrix rows r0..r3 + matrix_col4                  = 5 * 4 = 20 floats
+        //   + transfer_r + g + b + a + transfer_kinds(u32 ×4)   = 5 * 4 = 20 (4-byte words)
+        //   + sigma, radius, mode, flags                        = 4 (4-byte words)
+        // Total = 64 * 4 = 256 bytes, matching WGSL std140-style alignment.
+        assert_eq!(std::mem::size_of::<FilterUniform>(), 256);
     }
 
     #[test]

@@ -45,6 +45,40 @@ pub enum ElementKind {
     Filter,
     /// Gaussian blur filter primitive (SVG 1.1 `<feGaussianBlur>`).
     FeGaussianBlur,
+    /// Colour matrix filter primitive (SVG 1.1 `<feColorMatrix>`).
+    FeColorMatrix,
+    /// Turbulence / fractal-noise filter primitive (SVG 1.1 `<feTurbulence>`).
+    FeTurbulence,
+    /// Specular lighting filter primitive (SVG 1.1 `<feSpecularLighting>`).
+    FeSpecularLighting,
+    /// Diffuse lighting filter primitive (SVG 1.1 `<feDiffuseLighting>`).
+    FeDiffuseLighting,
+    /// Morphology (dilate / erode) filter primitive (SVG 1.1 `<feMorphology>`).
+    FeMorphology,
+    /// Flood fill filter primitive (SVG 1.1 `<feFlood>`).
+    FeFlood,
+    /// Drop shadow filter primitive (SVG Filter Effects 1 `<feDropShadow>`).
+    FeDropShadow,
+    /// Displacement map filter primitive (SVG 1.1 `<feDisplacementMap>`).
+    FeDisplacementMap,
+    /// Convolution matrix filter primitive (SVG 1.1 `<feConvolveMatrix>`).
+    FeConvolveMatrix,
+    /// Component transfer filter primitive (SVG 1.1 `<feComponentTransfer>`).
+    FeComponentTransfer,
+    /// Per-channel transfer function for the R channel of `<feComponentTransfer>`.
+    FeFuncR,
+    /// Per-channel transfer function for the G channel of `<feComponentTransfer>`.
+    FeFuncG,
+    /// Per-channel transfer function for the B channel of `<feComponentTransfer>`.
+    FeFuncB,
+    /// Per-channel transfer function for the A channel of `<feComponentTransfer>`.
+    FeFuncA,
+    /// Directional light source for the lighting filter primitives.
+    FeDistantLight,
+    /// Point light source for the lighting filter primitives.
+    FePointLight,
+    /// Spot light source for the lighting filter primitives.
+    FeSpotLight,
     /// Axis-aligned box primitive.
     Cube,
     /// Ellipsoid primitive.
@@ -72,6 +106,23 @@ impl ElementKind {
             "path" => Self::Path,
             "filter" => Self::Filter,
             "feGaussianBlur" => Self::FeGaussianBlur,
+            "feColorMatrix" => Self::FeColorMatrix,
+            "feTurbulence" => Self::FeTurbulence,
+            "feSpecularLighting" => Self::FeSpecularLighting,
+            "feDiffuseLighting" => Self::FeDiffuseLighting,
+            "feMorphology" => Self::FeMorphology,
+            "feFlood" => Self::FeFlood,
+            "feDropShadow" => Self::FeDropShadow,
+            "feDisplacementMap" => Self::FeDisplacementMap,
+            "feConvolveMatrix" => Self::FeConvolveMatrix,
+            "feComponentTransfer" => Self::FeComponentTransfer,
+            "feFuncR" => Self::FeFuncR,
+            "feFuncG" => Self::FeFuncG,
+            "feFuncB" => Self::FeFuncB,
+            "feFuncA" => Self::FeFuncA,
+            "feDistantLight" => Self::FeDistantLight,
+            "fePointLight" => Self::FePointLight,
+            "feSpotLight" => Self::FeSpotLight,
             "cube" => Self::Cube,
             "ellipsoid" => Self::Ellipsoid,
             other => Self::Unknown(other.to_owned()),
@@ -92,6 +143,23 @@ impl ElementKind {
             Self::Path => "path",
             Self::Filter => "filter",
             Self::FeGaussianBlur => "feGaussianBlur",
+            Self::FeColorMatrix => "feColorMatrix",
+            Self::FeTurbulence => "feTurbulence",
+            Self::FeSpecularLighting => "feSpecularLighting",
+            Self::FeDiffuseLighting => "feDiffuseLighting",
+            Self::FeMorphology => "feMorphology",
+            Self::FeFlood => "feFlood",
+            Self::FeDropShadow => "feDropShadow",
+            Self::FeDisplacementMap => "feDisplacementMap",
+            Self::FeConvolveMatrix => "feConvolveMatrix",
+            Self::FeComponentTransfer => "feComponentTransfer",
+            Self::FeFuncR => "feFuncR",
+            Self::FeFuncG => "feFuncG",
+            Self::FeFuncB => "feFuncB",
+            Self::FeFuncA => "feFuncA",
+            Self::FeDistantLight => "feDistantLight",
+            Self::FePointLight => "fePointLight",
+            Self::FeSpotLight => "feSpotLight",
             Self::Cube => "cube",
             Self::Ellipsoid => "ellipsoid",
             Self::Unknown(t) => t.as_str(),
@@ -360,6 +428,57 @@ mod tests {
             ElementKind::from_tag("feGaussianBlur"),
             ElementKind::FeGaussianBlur
         );
+        assert_eq!(
+            ElementKind::from_tag("feColorMatrix"),
+            ElementKind::FeColorMatrix
+        );
+        assert_eq!(
+            ElementKind::from_tag("feTurbulence"),
+            ElementKind::FeTurbulence
+        );
+        assert_eq!(
+            ElementKind::from_tag("feSpecularLighting"),
+            ElementKind::FeSpecularLighting
+        );
+        assert_eq!(
+            ElementKind::from_tag("feDiffuseLighting"),
+            ElementKind::FeDiffuseLighting
+        );
+        assert_eq!(
+            ElementKind::from_tag("feMorphology"),
+            ElementKind::FeMorphology
+        );
+        assert_eq!(ElementKind::from_tag("feFlood"), ElementKind::FeFlood);
+        assert_eq!(
+            ElementKind::from_tag("feDropShadow"),
+            ElementKind::FeDropShadow
+        );
+        assert_eq!(
+            ElementKind::from_tag("feDisplacementMap"),
+            ElementKind::FeDisplacementMap
+        );
+        assert_eq!(
+            ElementKind::from_tag("feConvolveMatrix"),
+            ElementKind::FeConvolveMatrix
+        );
+        assert_eq!(
+            ElementKind::from_tag("feComponentTransfer"),
+            ElementKind::FeComponentTransfer
+        );
+        assert_eq!(ElementKind::from_tag("feFuncR"), ElementKind::FeFuncR);
+        assert_eq!(ElementKind::from_tag("feFuncA"), ElementKind::FeFuncA);
+        assert_eq!(
+            ElementKind::from_tag("feDistantLight"),
+            ElementKind::FeDistantLight
+        );
+        assert_eq!(
+            ElementKind::from_tag("fePointLight"),
+            ElementKind::FePointLight
+        );
+        assert_eq!(
+            ElementKind::from_tag("feSpotLight"),
+            ElementKind::FeSpotLight
+        );
         assert_eq!(ElementKind::from_tag("cube"), ElementKind::Cube);
         assert_eq!(ElementKind::from_tag("ellipsoid"), ElementKind::Ellipsoid);
         // `as_tag` round-trips a recognised kind back to its source name.
@@ -371,6 +490,15 @@ mod tests {
         assert_eq!(ElementKind::Path.as_tag(), "path");
         assert_eq!(ElementKind::Filter.as_tag(), "filter");
         assert_eq!(ElementKind::FeGaussianBlur.as_tag(), "feGaussianBlur");
+        assert_eq!(ElementKind::FeColorMatrix.as_tag(), "feColorMatrix");
+        assert_eq!(ElementKind::FeFlood.as_tag(), "feFlood");
+        assert_eq!(ElementKind::FeDropShadow.as_tag(), "feDropShadow");
+        assert_eq!(
+            ElementKind::FeComponentTransfer.as_tag(),
+            "feComponentTransfer"
+        );
+        assert_eq!(ElementKind::FeFuncR.as_tag(), "feFuncR");
+        assert_eq!(ElementKind::FeDistantLight.as_tag(), "feDistantLight");
         // `<group>` is not in SPEC.md; only `<g>` from SVG 1.1 is the
         // canonical grouping element.
         assert_eq!(
