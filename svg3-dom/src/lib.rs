@@ -10,12 +10,14 @@
 //! The parser is structural only at this milestone: attribute *values* are
 //! preserved as raw strings (so the planned Stylo cascade can consume
 //! `class`, `id`, `style`, …) but no attribute values are interpreted into
-//! typed representations. Text content inside elements is ignored.
-//! Namespaces are not handled.
+//! typed representations. Text content is captured only inside `<style>`
+//! elements (their inline CSS); other element text is ignored. Namespaces
+//! are not handled.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
-use quick_xml::events::{BytesStart, Event};
+use quick_xml::events::{BytesRef, BytesStart, Event};
 use quick_xml::{Reader, XmlVersion};
 use thiserror::Error;
 
@@ -45,6 +47,9 @@ pub enum ElementKind {
     Filter,
     /// Gaussian blur filter primitive (SVG 1.1 `<feGaussianBlur>`).
     FeGaussianBlur,
+    /// Inline stylesheet (SVG 1.1 `<style>`); its CSS text is captured in
+    /// [`Element::text`].
+    Style,
     /// Axis-aligned box primitive.
     Cube,
     /// Ellipsoid primitive.
@@ -72,6 +77,7 @@ impl ElementKind {
             "path" => Self::Path,
             "filter" => Self::Filter,
             "feGaussianBlur" => Self::FeGaussianBlur,
+            "style" => Self::Style,
             "cube" => Self::Cube,
             "ellipsoid" => Self::Ellipsoid,
             other => Self::Unknown(other.to_owned()),
@@ -92,6 +98,7 @@ impl ElementKind {
             Self::Path => "path",
             Self::Filter => "filter",
             Self::FeGaussianBlur => "feGaussianBlur",
+            Self::Style => "style",
             Self::Cube => "cube",
             Self::Ellipsoid => "ellipsoid",
             Self::Unknown(t) => t.as_str(),
@@ -112,14 +119,19 @@ pub struct Element {
     pub kind: ElementKind,
     /// Raw attributes, keyed by name.
     pub attributes: BTreeMap<String, String>,
+    /// Text content. Captured only for [`ElementKind::Style`] elements — it
+    /// holds their inline CSS for the style engine to parse. Every other
+    /// element keeps this empty; general element text is not modelled yet.
+    pub text: String,
 }
 
 impl Element {
-    /// Construct an element with the given kind and no attributes.
+    /// Construct an element with the given kind, no attributes and no text.
     pub fn new(kind: ElementKind) -> Self {
         Self {
             kind,
             attributes: BTreeMap::new(),
+            text: String::new(),
         }
     }
 }
@@ -247,6 +259,15 @@ pub enum ParseError {
     /// Tag name or attribute key was not valid UTF-8.
     #[error("invalid UTF-8 in document: {0}")]
     Utf8(#[from] std::str::Utf8Error),
+    /// An XML general entity reference uses a name svg3 does not recognise.
+    /// Only the five XML 1.0 predefined entities (`amp`, `lt`, `gt`, `quot`,
+    /// `apos`) and numeric character references are resolved; DTD-defined
+    /// custom entities are not supported.
+    #[error("unknown XML entity reference: &{name};")]
+    UnknownEntity {
+        /// The undefined entity name.
+        name: String,
+    },
 }
 
 /// Parse an svg3 document from XML text.
@@ -280,9 +301,32 @@ pub fn parse(input: &str) -> Result<Document, ParseError> {
             Event::End(_) => {
                 parents.pop().ok_or(ParseError::EmptyDocument)?;
             }
+            Event::Text(e) => {
+                // quick-xml emits XML entity references as their own
+                // `GeneralRef` events, so this `Text` carries no entities to
+                // resolve — just decode the bytes as UTF-8.
+                let bytes = e.into_inner();
+                capture_style_text(&mut arena, &parents, std::str::from_utf8(&bytes)?);
+            }
+            Event::CData(e) => {
+                // CDATA content is literal per the XML spec — no entity
+                // expansion. Pass the bytes through as-is.
+                let bytes = e.into_inner();
+                capture_style_text(&mut arena, &parents, std::str::from_utf8(&bytes)?);
+            }
+            Event::GeneralRef(e) => {
+                // An entity reference embedded in element text — resolve and
+                // append the character(s) it stands for so the captured CSS
+                // matches the author's intent. CSS does not interpret XML
+                // entities, so leaving `&amp;` etc. unresolved would corrupt
+                // the stylesheet text.
+                let resolved = resolve_general_entity(&e)?;
+                capture_style_text(&mut arena, &parents, &resolved);
+            }
             Event::Eof => break,
-            // Text, comments, CDATA, processing instructions, XML
-            // declarations and DOCTYPEs are ignored at this milestone.
+            // Comments, processing instructions, XML declarations and
+            // DOCTYPEs are ignored; element text is captured only inside
+            // `<style>` (see `capture_style_text`).
             _ => {}
         }
         buf.clear();
@@ -340,6 +384,43 @@ fn attach(arena: &mut [Node], parents: &[NodeId], root: &mut Option<NodeId>, id:
     }
 }
 
+/// Append parsed text to the innermost open element's content, but only when
+/// that element is a `<style>` — its CSS is the one kind of text content the
+/// model keeps. Text anywhere else is dropped. Callers pass already-decoded
+/// text: `Event::Text` / `Event::CData` bytes as UTF-8, entity references
+/// resolved through [`resolve_general_entity`].
+fn capture_style_text(arena: &mut [Node], parents: &[NodeId], text: &str) {
+    if let Some(&parent) = parents.last() {
+        let element = &mut arena[parent.0 as usize].element;
+        if element.kind == ElementKind::Style {
+            element.text.push_str(text);
+        }
+    }
+}
+
+/// Resolve one XML general entity reference into the text it stands for.
+///
+/// Handles the two forms that need no DTD: numeric character references
+/// (`&#48;`, `&#x30;`) via quick-xml's resolver, and the five XML 1.0
+/// predefined named entities (`amp`, `lt`, `gt`, `quot`, `apos`). svg3 does
+/// not parse DOCTYPEs, so any other name is a [`ParseError::UnknownEntity`].
+fn resolve_general_entity(reference: &BytesRef<'_>) -> Result<Cow<'static, str>, ParseError> {
+    if let Some(ch) = reference.resolve_char_ref()? {
+        return Ok(Cow::Owned(ch.to_string()));
+    }
+    let name = std::str::from_utf8(reference)?;
+    match name {
+        "amp" => Ok(Cow::Borrowed("&")),
+        "lt" => Ok(Cow::Borrowed("<")),
+        "gt" => Ok(Cow::Borrowed(">")),
+        "quot" => Ok(Cow::Borrowed("\"")),
+        "apos" => Ok(Cow::Borrowed("'")),
+        _ => Err(ParseError::UnknownEntity {
+            name: name.to_owned(),
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -360,6 +441,7 @@ mod tests {
             ElementKind::from_tag("feGaussianBlur"),
             ElementKind::FeGaussianBlur
         );
+        assert_eq!(ElementKind::from_tag("style"), ElementKind::Style);
         assert_eq!(ElementKind::from_tag("cube"), ElementKind::Cube);
         assert_eq!(ElementKind::from_tag("ellipsoid"), ElementKind::Ellipsoid);
         // `as_tag` round-trips a recognised kind back to its source name.
@@ -371,6 +453,7 @@ mod tests {
         assert_eq!(ElementKind::Path.as_tag(), "path");
         assert_eq!(ElementKind::Filter.as_tag(), "filter");
         assert_eq!(ElementKind::FeGaussianBlur.as_tag(), "feGaussianBlur");
+        assert_eq!(ElementKind::Style.as_tag(), "style");
         // `<group>` is not in SPEC.md; only `<g>` from SVG 1.1 is the
         // canonical grouping element.
         assert_eq!(
@@ -582,6 +665,74 @@ mod tests {
             blur.attributes.get("stdDeviation").map(String::as_str),
             Some("4 2")
         );
+    }
+
+    #[test]
+    fn parse_captures_style_element_css() {
+        let doc = parse(r#"<svg><style>rect { fill: red; }</style></svg>"#).unwrap();
+        let style_id = doc.node(doc.root()).children[0];
+        let style = doc.element(style_id);
+        assert_eq!(style.kind, ElementKind::Style);
+        assert_eq!(style.text, "rect { fill: red; }");
+    }
+
+    #[test]
+    fn parse_unescapes_xml_entities_in_style_text() {
+        // `Event::Text` content is XML-escaped at the markup level; the parser
+        // resolves entity references so the captured CSS matches the author's
+        // intent — CSS does not interpret XML entities.
+        let doc = parse(r#"<svg><style>g[name="a &amp; b"] { fill: red; }</style></svg>"#).unwrap();
+        let style_id = doc.node(doc.root()).children[0];
+        assert_eq!(
+            doc.element(style_id).text,
+            r#"g[name="a & b"] { fill: red; }"#
+        );
+    }
+
+    #[test]
+    fn parse_captures_cdata_wrapped_style_css() {
+        let doc = parse(r#"<svg><style><![CDATA[circle{stroke:blue}]]></style></svg>"#).unwrap();
+        let style_id = doc.node(doc.root()).children[0];
+        assert_eq!(doc.element(style_id).text, "circle{stroke:blue}");
+    }
+
+    #[test]
+    fn parse_resolves_numeric_character_references_in_style_text() {
+        // `&#x26;` is the hex character reference for `&` — same outcome as
+        // `&amp;`. Numeric references are resolved alongside named ones.
+        let doc = parse(r#"<svg><style>a &#x26; b</style></svg>"#).unwrap();
+        let style_id = doc.node(doc.root()).children[0];
+        assert_eq!(doc.element(style_id).text, "a & b");
+    }
+
+    #[test]
+    fn parse_unknown_entity_in_style_text_errors() {
+        // An entity svg3 does not recognise (no DTD parsing) surfaces as
+        // ParseError::UnknownEntity rather than silently dropping the entity.
+        let err = parse(r#"<svg><style>a &nbsp; b</style></svg>"#).unwrap_err();
+        match err {
+            ParseError::UnknownEntity { name } => assert_eq!(name, "nbsp"),
+            other => panic!("expected UnknownEntity, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_keeps_cdata_style_text_literal() {
+        // CDATA content is literal per the XML spec — entity-like sequences
+        // are not expanded, so the captured CSS keeps `&amp;` verbatim.
+        let doc =
+            parse(r#"<svg><style><![CDATA[g[x="&amp;"] { fill: red; }]]></style></svg>"#).unwrap();
+        let style_id = doc.node(doc.root()).children[0];
+        assert_eq!(doc.element(style_id).text, r#"g[x="&amp;"] { fill: red; }"#);
+    }
+
+    #[test]
+    fn parse_ignores_text_outside_style_elements() {
+        // Only `<style>` keeps text; other elements drop their content.
+        let doc = parse("<svg>loose<rect>inner</rect></svg>").unwrap();
+        assert!(doc.element(doc.root()).text.is_empty());
+        let rect_id = doc.node(doc.root()).children[0];
+        assert!(doc.element(rect_id).text.is_empty());
     }
 
     #[test]
