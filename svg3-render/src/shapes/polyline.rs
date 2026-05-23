@@ -9,11 +9,12 @@
 
 use svg3_dom::Element;
 
+use super::triangulate::triangulate;
 use super::vertex;
 use crate::Mesh;
 
-// A small user-unit tolerance used both for point equality and near-zero
-// triangle/polygon area checks in the current scaffold renderer.
+// A small user-unit tolerance used both for point equality and the
+// near-zero outline-area check that rejects a degenerate point list.
 const EPSILON: f32 = 1e-5;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -50,19 +51,13 @@ pub(crate) fn resolve_polyline(element: &Element) -> Option<PolylineGeometry> {
 /// simple polygons; self-intersecting point lists may produce incorrect
 /// geometry until the fill-rule pipeline exists.
 pub(crate) fn tessellate_polyline(geo: &PolylineGeometry, color: [f32; 4]) -> Mesh {
-    let indices = triangulate(&geo.points);
-    if indices.is_empty() {
-        return Mesh::default();
-    }
-
-    Mesh {
-        vertices: geo
-            .points
-            .iter()
-            .map(|point| vertex(point.x, point.y, color))
-            .collect(),
-        indices,
-    }
+    let points: Vec<(f32, f32)> = geo.points.iter().map(|p| (p.x, p.y)).collect();
+    let vertices = points.iter().map(|&(x, y)| vertex(x, y, color)).collect();
+    let indices = triangulate(&points)
+        .into_iter()
+        .flat_map(|tri| tri.map(|index| index as u32))
+        .collect();
+    Mesh { vertices, indices }
 }
 
 fn parse_points(value: &str) -> Option<Vec<Point>> {
@@ -198,70 +193,6 @@ fn same_point(a: Point, b: Point) -> bool {
     (a.x - b.x).abs() <= EPSILON && (a.y - b.y).abs() <= EPSILON
 }
 
-fn triangulate(points: &[Point]) -> Vec<u32> {
-    let area = signed_area(points);
-    if points.len() < 3 || area.abs() <= EPSILON {
-        return Vec::new();
-    }
-
-    let winding = area.signum();
-    let mut remaining: Vec<usize> = (0..points.len()).collect();
-    let mut indices = Vec::with_capacity((points.len() - 2) * 3);
-
-    while remaining.len() > 3 {
-        let Some(ear) = find_ear(points, &remaining, winding) else {
-            return Vec::new();
-        };
-        let count = remaining.len();
-        let prev = remaining[(ear + count - 1) % count];
-        let curr = remaining[ear];
-        let next = remaining[(ear + 1) % count];
-        indices.extend_from_slice(&[prev as u32, curr as u32, next as u32]);
-        remaining.remove(ear);
-    }
-
-    if remaining.len() == 3 {
-        let [a, b, c] = [remaining[0], remaining[1], remaining[2]];
-        if winding * cross(points[a], points[b], points[c]) > EPSILON {
-            indices.extend_from_slice(&[a as u32, b as u32, c as u32]);
-        }
-    }
-
-    indices
-}
-
-fn find_ear(points: &[Point], remaining: &[usize], winding: f32) -> Option<usize> {
-    let count = remaining.len();
-    (0..count).find(|&i| {
-        let prev = remaining[(i + count - 1) % count];
-        let curr = remaining[i];
-        let next = remaining[(i + 1) % count];
-        is_convex(points[prev], points[curr], points[next], winding)
-            && !remaining.iter().copied().any(|candidate| {
-                candidate != prev
-                    && candidate != curr
-                    && candidate != next
-                    && point_in_triangle(
-                        points[candidate],
-                        points[prev],
-                        points[curr],
-                        points[next],
-                        winding,
-                    )
-            })
-    })
-}
-
-fn is_convex(a: Point, b: Point, c: Point, winding: f32) -> bool {
-    winding * cross(a, b, c) > EPSILON
-}
-
-fn point_in_triangle(point: Point, a: Point, b: Point, c: Point, winding: f32) -> bool {
-    winding * cross(a, b, point) >= -EPSILON
-        && winding * cross(b, c, point) >= -EPSILON
-        && winding * cross(c, a, point) >= -EPSILON
-}
-
 fn signed_area(points: &[Point]) -> f32 {
     points
         .iter()
@@ -269,10 +200,6 @@ fn signed_area(points: &[Point]) -> f32 {
         .map(|(a, b)| a.x * b.y - b.x * a.y)
         .sum::<f32>()
         * 0.5
-}
-
-fn cross(a: Point, b: Point, c: Point) -> f32 {
-    (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
 }
 
 #[cfg(test)]
