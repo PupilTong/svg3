@@ -156,8 +156,7 @@ fn wpt_polygon_polyline_and_path_fill_cases_pass() {
 }
 
 #[test]
-#[ignore = "known WPT failure dump: rect stroke geometry is not implemented yet"]
-fn known_wpt_failure_rect_stroke() {
+fn wpt_rect_stroke_case_passes() {
     // WPT `svg/shapes/rect-02.svg`: a non-rounded `fill="none"` rect with a
     // visible stroke should render the stroke outline.
     let mesh = renderable_mesh(

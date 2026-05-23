@@ -1,19 +1,26 @@
-//! SVG 1.1 `<rect>` — geometry resolution and fill tessellation.
+//! SVG 1.1 `<rect>` — geometry resolution plus fill/stroke tessellation.
 //!
 //! `<rect>` is a two-dimensional basic shape; per [`SPEC.md`](../../SPEC.md)
 //! §3.1 it lies in the plane `z = 0`. This module turns a parsed `<rect>`
-//! [`Element`] into a filled triangle [`Mesh`] in SVG user space, applying
+//! [`Element`] into triangle [`Mesh`] geometry in SVG user space, applying
 //! the SVG 1.1 geometry rules ([SVG11] §9.2). The behavioural reference is
 //! the SVG WPT suite (`svg/shapes/rect-0*.svg`).
 //!
-//! Length parsing and `fill` resolution are shared with the other basic
+//! Length parsing and paint resolution are shared with the other basic
 //! shapes — see [`crate::shapes`]. `transform` and grouping are not handled
 //! yet — see the crate roadmap.
 
+use lyon_tessellation::geometry_builder::{BuffersBuilder, VertexBuffers};
+use lyon_tessellation::path::builder::SvgPathBuilder;
+use lyon_tessellation::path::math::{point, vector, Angle};
+use lyon_tessellation::path::{ArcFlags, Path};
+use lyon_tessellation::{LineCap, LineJoin, StrokeOptions, StrokeTessellator, StrokeVertex};
 use svg3_dom::Element;
 
 use super::{resolve_length, sdf_quad, vertex, Length, Viewport, KIND_ROUND_BOX, SDF_PAD};
-use crate::Mesh;
+use crate::{Mesh, Vertex};
+
+const STROKE_FLATTENING_TOLERANCE: f32 = 0.1;
 
 /// A `<rect>`'s geometry after SVG 1.1 defaulting and corner-radius
 /// clamping. All values are in SVG user units.
@@ -102,6 +109,47 @@ pub(crate) fn tessellate_rect(geo: &RectGeometry, color: [f32; 4]) -> Mesh {
     }
 }
 
+/// Tessellate a resolved rectangle's stroke into triangle geometry.
+///
+/// The stroke follows the SVG rectangle outline, including rounded corners.
+/// Stroke line joins use SVG's initial miter join; line caps are irrelevant
+/// because the path is closed.
+pub(crate) fn tessellate_rect_stroke(
+    geo: &RectGeometry,
+    stroke_width: f32,
+    color: [f32; 4],
+) -> Mesh {
+    if stroke_width <= 0.0 {
+        return Mesh::default();
+    }
+
+    let path = outline_path(geo);
+    let mut buffers: VertexBuffers<Vertex, u32> = VertexBuffers::new();
+    let options = StrokeOptions::default()
+        .with_line_width(stroke_width)
+        .with_line_cap(LineCap::Butt)
+        .with_line_join(LineJoin::Miter)
+        .with_miter_limit(4.0)
+        .with_tolerance(STROKE_FLATTENING_TOLERANCE);
+    let mut tessellator = StrokeTessellator::new();
+    let mut builder = BuffersBuilder::new(&mut buffers, move |v: StrokeVertex<'_, '_>| {
+        let p = v.position();
+        vertex(p.x, p.y, color)
+    });
+
+    if tessellator
+        .tessellate_path(&path, &options, &mut builder)
+        .is_err()
+    {
+        return Mesh::default();
+    }
+
+    Mesh {
+        vertices: buffers.vertices,
+        indices: buffers.indices,
+    }
+}
+
 fn sharp_mesh(geo: &RectGeometry, color: [f32; 4]) -> Mesh {
     Mesh {
         vertices: vec![
@@ -141,6 +189,41 @@ fn rounded_mesh(geo: &RectGeometry, color: [f32; 4]) -> Mesh {
         KIND_ROUND_BOX,
         color,
     )
+}
+
+fn outline_path(geo: &RectGeometry) -> Path {
+    let x0 = geo.x;
+    let y0 = geo.y;
+    let x1 = geo.x + geo.width;
+    let y1 = geo.y + geo.height;
+    let mut builder = Path::builder().with_svg();
+
+    if geo.rx == 0.0 || geo.ry == 0.0 {
+        builder.move_to(point(x0, y0));
+        builder.line_to(point(x1, y0));
+        builder.line_to(point(x1, y1));
+        builder.line_to(point(x0, y1));
+    } else {
+        let radii = vector(geo.rx, geo.ry);
+        let rotation = Angle::degrees(0.0);
+        let arc_flags = || ArcFlags {
+            large_arc: false,
+            sweep: true,
+        };
+
+        builder.move_to(point(x0 + geo.rx, y0));
+        builder.line_to(point(x1 - geo.rx, y0));
+        builder.arc_to(radii, rotation, arc_flags(), point(x1, y0 + geo.ry));
+        builder.line_to(point(x1, y1 - geo.ry));
+        builder.arc_to(radii, rotation, arc_flags(), point(x1 - geo.rx, y1));
+        builder.line_to(point(x0 + geo.rx, y1));
+        builder.arc_to(radii, rotation, arc_flags(), point(x0, y1 - geo.ry));
+        builder.line_to(point(x0, y0 + geo.ry));
+        builder.arc_to(radii, rotation, arc_flags(), point(x0 + geo.rx, y0));
+    }
+
+    builder.close();
+    builder.build()
 }
 
 #[cfg(test)]
@@ -351,5 +434,46 @@ mod tests {
             // Each corner's `local` is its offset from the rect centroid.
             assert_eq!(v.local, [v.position[0] - 35.0, v.position[1] - 35.0]);
         }
+    }
+
+    #[test]
+    fn tessellate_rect_stroke_draws_sharp_outline() {
+        let geo = resolve_rect(
+            &rect(&[("x", "10"), ("y", "10"), ("width", "50"), ("height", "50")]),
+            vp(),
+        )
+        .unwrap();
+        let mesh = tessellate_rect_stroke(&geo, 4.0, [0.0, 0.0, 1.0, 1.0]);
+        assert!(!mesh.is_empty());
+        assert!(mesh
+            .vertices
+            .iter()
+            .all(|vertex| vertex.color == [0.0, 0.0, 1.0, 1.0]));
+        assert!(mesh.indices.len().is_multiple_of(3));
+    }
+
+    #[test]
+    fn tessellate_rect_stroke_draws_rounded_outline() {
+        let geo = resolve_rect(
+            &rect(&[
+                ("x", "10"),
+                ("y", "10"),
+                ("width", "50"),
+                ("height", "50"),
+                ("rx", "8"),
+                ("ry", "8"),
+            ]),
+            vp(),
+        )
+        .unwrap();
+        let mesh = tessellate_rect_stroke(&geo, 4.0, [0.0, 0.0, 1.0, 1.0]);
+        assert!(!mesh.is_empty());
+        assert!(mesh.vertices.len() > 4);
+    }
+
+    #[test]
+    fn tessellate_rect_stroke_skips_non_positive_width() {
+        let geo = resolve_rect(&rect(&[("width", "50"), ("height", "50")]), vp()).unwrap();
+        assert!(tessellate_rect_stroke(&geo, 0.0, [1.0; 4]).is_empty());
     }
 }
