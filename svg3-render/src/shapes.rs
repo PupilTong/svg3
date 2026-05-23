@@ -42,6 +42,7 @@ const DEFAULT_FILL: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 pub(crate) const KIND_SOLID: u32 = 0;
 pub(crate) const KIND_ELLIPSE: u32 = 1;
 pub(crate) const KIND_ROUND_BOX: u32 = 2;
+pub(crate) const KIND_SEGMENT: u32 = 3;
 
 /// Per-side margin, in user units, by which an SDF shape's bounding quad is
 /// inflated past the shape, giving the anti-aliasing band room beyond the

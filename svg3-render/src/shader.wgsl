@@ -11,6 +11,7 @@
 const KIND_SOLID: u32 = 0u;
 const KIND_ELLIPSE: u32 = 1u;
 const KIND_ROUND_BOX: u32 = 2u;
+const KIND_SEGMENT: u32 = 3u;
 
 // Per-side bounding-quad inflation, in shape-local (user) units. Must match
 // `SDF_PAD` in shape.rs. The coverage ramp below is clamped to this width so

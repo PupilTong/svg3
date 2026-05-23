@@ -45,8 +45,14 @@ impl StrokeStyle {
         self.width > 0.0
     }
 
-    fn dash_pattern(&self, actual_length: f32) -> Option<DashPattern> {
+    /// Whether a single `<line>` can use the analytic SDF segment fast path.
+    pub(crate) fn uses_segment_fast_path(&self) -> bool {
+        self.linecap == LineCap::Butt && self.dasharray.is_none()
+    }
+
+    fn dash_pattern_for_path(&self, path: &Path) -> Option<DashPattern> {
         let dasharray = self.dasharray.as_ref()?;
+        let actual_length = path_length(path);
         let scale = self.path_length_scale(actual_length);
         let pattern: Vec<f32> = dasharray.iter().map(|value| value * scale).collect();
         let offset = self.dashoffset * scale;
@@ -86,13 +92,12 @@ pub(crate) fn tessellate_stroke_path(path: &Path, style: &StrokeStyle, color: [f
         return Mesh::default();
     }
 
-    let stroke_path = if let Some(pattern) = style.dash_pattern(path_length(path)) {
-        dashed_path(path, &pattern)
+    if let Some(pattern) = style.dash_pattern_for_path(path) {
+        let stroke_path = dashed_path(path, &pattern);
+        tessellate_plain_stroke(&stroke_path, style, color)
     } else {
-        path.clone()
-    };
-
-    tessellate_plain_stroke(&stroke_path, style, color)
+        tessellate_plain_stroke(path, style, color)
+    }
 }
 
 /// Return the flattened length of a path in user units, including explicit
@@ -689,7 +694,7 @@ mod tests {
             ]),
             vp(),
         );
-        let pattern = style.dash_pattern(path_length(&path)).unwrap();
+        let pattern = style.dash_pattern_for_path(&path).unwrap();
 
         assert_eq!(pattern.values, vec![20.0, 20.0]);
         assert_eq!(pattern.offset, 10.0);

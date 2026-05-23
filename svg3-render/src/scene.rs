@@ -6,6 +6,7 @@
 //! that percentage lengths resolve against.
 
 use std::collections::BTreeMap;
+use std::sync::OnceLock;
 
 use svg3_dom::{Document, Element, ElementKind, NodeId};
 
@@ -41,7 +42,7 @@ pub(crate) enum RenderOp {
 /// `transform` and grouping are not applied yet, so a shape is placed at its
 /// own coordinates regardless of any ancestor `<g>`.
 pub fn build_scene(document: &Document, viewport: Viewport) -> Mesh {
-    let markers = MarkerDefinitions::collect(document);
+    let markers = MarkerDefinitions::default();
     let mut mesh = Mesh::default();
     for child in document.node(document.root()).children.iter().copied() {
         append_subtree_mesh(document, child, viewport, &markers, true, &mut mesh);
@@ -53,7 +54,7 @@ pub fn build_scene(document: &Document, viewport: Viewport) -> Mesh {
 /// isolating filtered subtrees into their own GPU post-process pass.
 pub(crate) fn build_render_plan(document: &Document, viewport: Viewport) -> Vec<RenderOp> {
     let filters = FilterDefinitions::collect(document);
-    let markers = MarkerDefinitions::collect(document);
+    let markers = MarkerDefinitions::default();
     let mut plan = Vec::new();
     let mut pending_mesh = Mesh::default();
     for child in document.node(document.root()).children.iter().copied() {
@@ -174,8 +175,8 @@ fn append_element_mesh(
                 if let Some(color) = shapes::resolve_fill(element) {
                     mesh.append(shapes::rect::tessellate_rect(&geo, color));
                 }
-                let stroke_style = shapes::stroke::resolve_stroke_style(element, viewport);
                 if let Some(color) = shapes::resolve_stroke(element) {
+                    let stroke_style = shapes::stroke::resolve_stroke_style(element, viewport);
                     mesh.append(shapes::rect::tessellate_rect_stroke(
                         &geo,
                         &stroke_style,
@@ -189,8 +190,8 @@ fn append_element_mesh(
                 if let Some(color) = shapes::resolve_fill(element) {
                     mesh.append(shapes::circle::tessellate_circle(&geo, color));
                 }
-                let stroke_style = shapes::stroke::resolve_stroke_style(element, viewport);
                 if let Some(color) = shapes::resolve_stroke(element) {
+                    let stroke_style = shapes::stroke::resolve_stroke_style(element, viewport);
                     mesh.append(shapes::circle::tessellate_circle_stroke(
                         &geo,
                         &stroke_style,
@@ -204,8 +205,8 @@ fn append_element_mesh(
                 if let Some(color) = shapes::resolve_fill(element) {
                     mesh.append(shapes::ellipse::tessellate_ellipse(&geo, color));
                 }
-                let stroke_style = shapes::stroke::resolve_stroke_style(element, viewport);
                 if let Some(color) = shapes::resolve_stroke(element) {
+                    let stroke_style = shapes::stroke::resolve_stroke_style(element, viewport);
                     mesh.append(shapes::ellipse::tessellate_ellipse_stroke(
                         &geo,
                         &stroke_style,
@@ -219,21 +220,31 @@ fn append_element_mesh(
                 if let Some(color) = shapes::resolve_fill(element) {
                     mesh.append(shapes::polygon::tessellate_polygon(&geo, color));
                 }
-                let stroke_style = shapes::stroke::resolve_stroke_style(element, viewport);
-                if let Some(color) = shapes::resolve_stroke(element) {
+                let features = element_features(element, include_markers);
+                let has_markers = features.has_markers;
+                let stroke = shapes::resolve_stroke(element);
+                let stroke_style = (stroke.is_some() || has_markers)
+                    .then(|| shapes::stroke::resolve_stroke_style(element, viewport));
+                if let Some(color) = stroke {
+                    let stroke_style = stroke_style
+                        .as_ref()
+                        .expect("stroke style should exist when stroke paint exists");
                     mesh.append(shapes::polygon::tessellate_polygon_stroke(
                         &geo,
-                        &stroke_style,
+                        stroke_style,
                         color,
                     ));
                 }
-                if include_markers {
+                if has_markers {
                     append_marker_instances(
                         document,
                         markers,
                         element,
                         &shapes::polygon::to_path(&geo),
-                        stroke_style.width,
+                        stroke_style
+                            .as_ref()
+                            .expect("stroke style should exist when markers exist")
+                            .width,
                         mesh,
                     );
                 }
@@ -244,21 +255,31 @@ fn append_element_mesh(
                 if let Some(color) = shapes::resolve_fill(element) {
                     mesh.append(shapes::polyline::tessellate_polyline(&geo, color));
                 }
-                let stroke_style = shapes::stroke::resolve_stroke_style(element, viewport);
-                if let Some(color) = shapes::resolve_stroke(element) {
+                let features = element_features(element, include_markers);
+                let has_markers = features.has_markers;
+                let stroke = shapes::resolve_stroke(element);
+                let stroke_style = (stroke.is_some() || has_markers)
+                    .then(|| shapes::stroke::resolve_stroke_style(element, viewport));
+                if let Some(color) = stroke {
+                    let stroke_style = stroke_style
+                        .as_ref()
+                        .expect("stroke style should exist when stroke paint exists");
                     mesh.append(shapes::polyline::tessellate_polyline_stroke(
                         &geo,
-                        &stroke_style,
+                        stroke_style,
                         color,
                     ));
                 }
-                if include_markers {
+                if has_markers {
                     append_marker_instances(
                         document,
                         markers,
                         element,
                         &shapes::polyline::to_path(&geo),
-                        stroke_style.width,
+                        stroke_style
+                            .as_ref()
+                            .expect("stroke style should exist when markers exist")
+                            .width,
                         mesh,
                     );
                 }
@@ -266,17 +287,34 @@ fn append_element_mesh(
         }
         ElementKind::Line => {
             if let Some(geo) = shapes::line::resolve_line(element, viewport) {
-                let stroke_style = shapes::stroke::resolve_stroke_style(element, viewport);
-                if let Some(color) = shapes::resolve_stroke(element) {
-                    mesh.append(shapes::line::tessellate_line(&geo, &stroke_style, color));
+                let features = element_features(element, include_markers);
+                let has_markers = features.has_markers;
+                let stroke = shapes::resolve_stroke(element);
+                let needs_general_stroke = features.line_needs_general_stroke;
+                let stroke_width = (!needs_general_stroke && (stroke.is_some() || has_markers))
+                    .then(|| shapes::resolve_stroke_width(element, viewport));
+                let stroke_style = (needs_general_stroke && (stroke.is_some() || has_markers))
+                    .then(|| shapes::stroke::resolve_stroke_style(element, viewport));
+                if let Some(color) = stroke {
+                    if let Some(stroke_width) = stroke_width {
+                        mesh.append(shapes::line::tessellate_segment(&geo, stroke_width, color));
+                    } else {
+                        let stroke_style = stroke_style
+                            .as_ref()
+                            .expect("stroke style should exist when stroke paint exists");
+                        mesh.append(shapes::line::tessellate_line(&geo, stroke_style, color));
+                    }
                 }
-                if include_markers {
+                if has_markers {
+                    let marker_stroke_width = stroke_width
+                        .or_else(|| stroke_style.as_ref().map(|style| style.width))
+                        .expect("stroke width should exist when markers exist");
                     append_marker_instances(
                         document,
                         markers,
                         element,
                         &shapes::line::to_path(&geo),
-                        stroke_style.width,
+                        marker_stroke_width,
                         mesh,
                     );
                 }
@@ -290,7 +328,7 @@ fn append_element_mesh(
                 if let Some(color) = shapes::resolve_stroke(element) {
                     mesh.append(shapes::path::tessellate_path_stroke(&geo, color));
                 }
-                if include_markers {
+                if element_features(element, include_markers).has_markers {
                     let stroke_style = shapes::stroke::resolve_stroke_style(element, viewport);
                     append_marker_instances(
                         document,
@@ -309,57 +347,61 @@ fn append_element_mesh(
 
 #[derive(Debug, Default)]
 struct MarkerDefinitions {
-    markers: BTreeMap<String, MarkerDefinition>,
+    markers: OnceLock<BTreeMap<String, MarkerDefinition>>,
 }
 
 impl MarkerDefinitions {
-    fn collect(document: &Document) -> Self {
-        let mut definitions = Self::default();
-        let mut stack = vec![document.root()];
-        while let Some(id) = stack.pop() {
-            let node = document.node(id);
-            if node.element.kind == ElementKind::Marker {
-                if let Some(marker_id) = node.element.attributes.get("id") {
-                    definitions
-                        .markers
-                        .entry(marker_id.to_owned())
-                        .or_insert_with(|| MarkerDefinition::resolve(id, &node.element));
-                }
-                continue;
-            }
-            stack.extend(node.children.iter().rev().copied());
-        }
-        definitions
-    }
-
-    fn marker_refs(&self, element: &Element) -> MarkerRefs {
+    fn marker_refs(&self, document: &Document, element: &Element) -> MarkerRefs {
         let all = element
             .attributes
             .get("marker")
-            .and_then(|value| self.resolve_reference(value));
+            .and_then(|value| self.resolve_reference(document, value));
         MarkerRefs {
             start: element
                 .attributes
                 .get("marker-start")
-                .map(|value| self.resolve_reference(value))
+                .map(|value| self.resolve_reference(document, value))
                 .unwrap_or(all),
             mid: element
                 .attributes
                 .get("marker-mid")
-                .map(|value| self.resolve_reference(value))
+                .map(|value| self.resolve_reference(document, value))
                 .unwrap_or(all),
             end: element
                 .attributes
                 .get("marker-end")
-                .map(|value| self.resolve_reference(value))
+                .map(|value| self.resolve_reference(document, value))
                 .unwrap_or(all),
         }
     }
 
-    fn resolve_reference(&self, value: &str) -> Option<MarkerDefinition> {
+    fn resolve_reference(&self, document: &Document, value: &str) -> Option<MarkerDefinition> {
         let id = url_reference_id(value)?;
-        self.markers.get(id).copied()
+        self.markers(document).get(id).copied()
     }
+
+    fn markers(&self, document: &Document) -> &BTreeMap<String, MarkerDefinition> {
+        self.markers
+            .get_or_init(|| collect_marker_definitions(document))
+    }
+}
+
+fn collect_marker_definitions(document: &Document) -> BTreeMap<String, MarkerDefinition> {
+    let mut definitions = BTreeMap::new();
+    let mut stack = vec![document.root()];
+    while let Some(id) = stack.pop() {
+        let node = document.node(id);
+        if node.element.kind == ElementKind::Marker {
+            if let Some(marker_id) = node.element.attributes.get("id") {
+                definitions
+                    .entry(marker_id.to_owned())
+                    .or_insert_with(|| MarkerDefinition::resolve(id, &node.element));
+            }
+            continue;
+        }
+        stack.extend(node.children.iter().rev().copied());
+    }
+    definitions
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -514,7 +556,7 @@ fn append_marker_instances(
     stroke_width: f32,
     mesh: &mut Mesh,
 ) {
-    let refs = markers.marker_refs(element);
+    let refs = markers.marker_refs(document, element);
     if refs.is_empty() {
         return;
     }
@@ -544,6 +586,34 @@ fn append_marker_instances(
         transform_marker_mesh(&mut marker_mesh, marker, placement, stroke_width);
         mesh.append(marker_mesh);
     }
+}
+
+#[derive(Debug, Default)]
+struct ElementFeatures {
+    has_markers: bool,
+    line_needs_general_stroke: bool,
+}
+
+fn element_features(element: &Element, include_markers: bool) -> ElementFeatures {
+    let mut features = ElementFeatures::default();
+    for (name, value) in &element.attributes {
+        match name.as_str() {
+            "marker" | "marker-start" | "marker-mid" | "marker-end" if include_markers => {
+                features.has_markers |= !value.trim().eq_ignore_ascii_case("none");
+            }
+            "stroke-linecap" => {
+                features.line_needs_general_stroke |= !value.trim().eq_ignore_ascii_case("butt");
+            }
+            "stroke-dasharray" => {
+                features.line_needs_general_stroke |= !value.trim().eq_ignore_ascii_case("none");
+            }
+            _ => {}
+        }
+        if features.has_markers && features.line_needs_general_stroke {
+            break;
+        }
+    }
+    features
 }
 
 fn transform_marker_mesh(

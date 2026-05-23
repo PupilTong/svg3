@@ -13,7 +13,7 @@ use lyon_tessellation::path::Path;
 use svg3_dom::Element;
 
 use super::stroke::{self, StrokeStyle};
-use super::{resolve_length, Viewport};
+use super::{resolve_length, sdf_quad, Viewport, KIND_SEGMENT, SDF_PAD};
 use crate::Mesh;
 
 /// A `<line>`'s geometry after SVG 1.1 defaulting. All values are in SVG
@@ -53,7 +53,49 @@ pub(crate) fn resolve_line(element: &Element, viewport: Viewport) -> Option<Line
 
 /// Tessellate a resolved line's stroke into triangle geometry.
 pub(crate) fn tessellate_line(geo: &LineGeometry, style: &StrokeStyle, color: [f32; 4]) -> Mesh {
+    if style.uses_segment_fast_path() {
+        return tessellate_segment(geo, style.width, color);
+    }
     stroke::tessellate_stroke_path(&to_path(geo), style, color)
+}
+
+pub(crate) fn tessellate_segment(geo: &LineGeometry, stroke_width: f32, color: [f32; 4]) -> Mesh {
+    if stroke_width <= 0.0 {
+        return Mesh::default();
+    }
+
+    let dx = geo.x2 - geo.x1;
+    let dy = geo.y2 - geo.y1;
+    let length = dx.hypot(dy);
+    let (ux, uy) = (dx / length, dy / length);
+    let (px, py) = (-uy, ux);
+    let mid_x = (geo.x1 + geo.x2) / 2.0;
+    let mid_y = (geo.y1 + geo.y2) / 2.0;
+    let half_len = length / 2.0;
+    let half_width = stroke_width / 2.0;
+    let ext_l = half_len + SDF_PAD;
+    let ext_w = half_width + SDF_PAD;
+    let corner = |along: f32, perp: f32| -> ([f32; 2], [f32; 2]) {
+        (
+            [
+                mid_x + along * ux + perp * px,
+                mid_y + along * uy + perp * py,
+            ],
+            [along, perp],
+        )
+    };
+
+    sdf_quad(
+        [
+            corner(-ext_l, -ext_w),
+            corner(ext_l, -ext_w),
+            corner(ext_l, ext_w),
+            corner(-ext_l, ext_w),
+        ],
+        [half_len, half_width, 0.0, 0.0],
+        KIND_SEGMENT,
+        color,
+    )
 }
 
 /// Convert the line segment to an open Lyon path for stroke and marker logic.
@@ -157,6 +199,11 @@ mod tests {
         let mesh = tessellate_line(&geo, &style, [0.0, 0.0, 1.0, 1.0]);
 
         assert!(!mesh.is_empty());
+        assert_eq!(mesh.vertices.len(), 4);
+        assert!(mesh
+            .vertices
+            .iter()
+            .all(|vertex| vertex.kind == KIND_SEGMENT));
         assert_eq!(mesh.indices.len() % 3, 0);
         for v in &mesh.vertices {
             assert_eq!(v.color, [0.0, 0.0, 1.0, 1.0]);
