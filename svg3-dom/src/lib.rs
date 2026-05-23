@@ -14,9 +14,10 @@
 //! elements (their inline CSS); other element text is ignored. Namespaces
 //! are not handled.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
-use quick_xml::events::{BytesStart, Event};
+use quick_xml::events::{BytesRef, BytesStart, Event};
 use quick_xml::{Reader, XmlVersion};
 use thiserror::Error;
 
@@ -258,6 +259,15 @@ pub enum ParseError {
     /// Tag name or attribute key was not valid UTF-8.
     #[error("invalid UTF-8 in document: {0}")]
     Utf8(#[from] std::str::Utf8Error),
+    /// An XML general entity reference uses a name svg3 does not recognise.
+    /// Only the five XML 1.0 predefined entities (`amp`, `lt`, `gt`, `quot`,
+    /// `apos`) and numeric character references are resolved; DTD-defined
+    /// custom entities are not supported.
+    #[error("unknown XML entity reference: &{name};")]
+    UnknownEntity {
+        /// The undefined entity name.
+        name: String,
+    },
 }
 
 /// Parse an svg3 document from XML text.
@@ -291,8 +301,28 @@ pub fn parse(input: &str) -> Result<Document, ParseError> {
             Event::End(_) => {
                 parents.pop().ok_or(ParseError::EmptyDocument)?;
             }
-            Event::Text(e) => capture_style_text(&mut arena, &parents, &e.into_inner())?,
-            Event::CData(e) => capture_style_text(&mut arena, &parents, &e.into_inner())?,
+            Event::Text(e) => {
+                // quick-xml emits XML entity references as their own
+                // `GeneralRef` events, so this `Text` carries no entities to
+                // resolve — just decode the bytes as UTF-8.
+                let bytes = e.into_inner();
+                capture_style_text(&mut arena, &parents, std::str::from_utf8(&bytes)?);
+            }
+            Event::CData(e) => {
+                // CDATA content is literal per the XML spec — no entity
+                // expansion. Pass the bytes through as-is.
+                let bytes = e.into_inner();
+                capture_style_text(&mut arena, &parents, std::str::from_utf8(&bytes)?);
+            }
+            Event::GeneralRef(e) => {
+                // An entity reference embedded in element text — resolve and
+                // append the character(s) it stands for so the captured CSS
+                // matches the author's intent. CSS does not interpret XML
+                // entities, so leaving `&amp;` etc. unresolved would corrupt
+                // the stylesheet text.
+                let resolved = resolve_general_entity(&e)?;
+                capture_style_text(&mut arena, &parents, &resolved);
+            }
             Event::Eof => break,
             // Comments, processing instructions, XML declarations and
             // DOCTYPEs are ignored; element text is captured only inside
@@ -356,20 +386,39 @@ fn attach(arena: &mut [Node], parents: &[NodeId], root: &mut Option<NodeId>, id:
 
 /// Append parsed text to the innermost open element's content, but only when
 /// that element is a `<style>` — its CSS is the one kind of text content the
-/// model keeps. Text anywhere else is dropped. XML entity references in the
-/// text are not resolved yet.
-fn capture_style_text(
-    arena: &mut [Node],
-    parents: &[NodeId],
-    text: &[u8],
-) -> Result<(), ParseError> {
+/// model keeps. Text anywhere else is dropped. Callers pass already-decoded
+/// text: `Event::Text` / `Event::CData` bytes as UTF-8, entity references
+/// resolved through [`resolve_general_entity`].
+fn capture_style_text(arena: &mut [Node], parents: &[NodeId], text: &str) {
     if let Some(&parent) = parents.last() {
         let element = &mut arena[parent.0 as usize].element;
         if element.kind == ElementKind::Style {
-            element.text.push_str(std::str::from_utf8(text)?);
+            element.text.push_str(text);
         }
     }
-    Ok(())
+}
+
+/// Resolve one XML general entity reference into the text it stands for.
+///
+/// Handles the two forms that need no DTD: numeric character references
+/// (`&#48;`, `&#x30;`) via quick-xml's resolver, and the five XML 1.0
+/// predefined named entities (`amp`, `lt`, `gt`, `quot`, `apos`). svg3 does
+/// not parse DOCTYPEs, so any other name is a [`ParseError::UnknownEntity`].
+fn resolve_general_entity(reference: &BytesRef<'_>) -> Result<Cow<'static, str>, ParseError> {
+    if let Some(ch) = reference.resolve_char_ref()? {
+        return Ok(Cow::Owned(ch.to_string()));
+    }
+    let name = std::str::from_utf8(reference)?;
+    match name {
+        "amp" => Ok(Cow::Borrowed("&")),
+        "lt" => Ok(Cow::Borrowed("<")),
+        "gt" => Ok(Cow::Borrowed(">")),
+        "quot" => Ok(Cow::Borrowed("\"")),
+        "apos" => Ok(Cow::Borrowed("'")),
+        _ => Err(ParseError::UnknownEntity {
+            name: name.to_owned(),
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -628,10 +677,53 @@ mod tests {
     }
 
     #[test]
+    fn parse_unescapes_xml_entities_in_style_text() {
+        // `Event::Text` content is XML-escaped at the markup level; the parser
+        // resolves entity references so the captured CSS matches the author's
+        // intent — CSS does not interpret XML entities.
+        let doc = parse(r#"<svg><style>g[name="a &amp; b"] { fill: red; }</style></svg>"#).unwrap();
+        let style_id = doc.node(doc.root()).children[0];
+        assert_eq!(
+            doc.element(style_id).text,
+            r#"g[name="a & b"] { fill: red; }"#
+        );
+    }
+
+    #[test]
     fn parse_captures_cdata_wrapped_style_css() {
         let doc = parse(r#"<svg><style><![CDATA[circle{stroke:blue}]]></style></svg>"#).unwrap();
         let style_id = doc.node(doc.root()).children[0];
         assert_eq!(doc.element(style_id).text, "circle{stroke:blue}");
+    }
+
+    #[test]
+    fn parse_resolves_numeric_character_references_in_style_text() {
+        // `&#x26;` is the hex character reference for `&` — same outcome as
+        // `&amp;`. Numeric references are resolved alongside named ones.
+        let doc = parse(r#"<svg><style>a &#x26; b</style></svg>"#).unwrap();
+        let style_id = doc.node(doc.root()).children[0];
+        assert_eq!(doc.element(style_id).text, "a & b");
+    }
+
+    #[test]
+    fn parse_unknown_entity_in_style_text_errors() {
+        // An entity svg3 does not recognise (no DTD parsing) surfaces as
+        // ParseError::UnknownEntity rather than silently dropping the entity.
+        let err = parse(r#"<svg><style>a &nbsp; b</style></svg>"#).unwrap_err();
+        match err {
+            ParseError::UnknownEntity { name } => assert_eq!(name, "nbsp"),
+            other => panic!("expected UnknownEntity, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_keeps_cdata_style_text_literal() {
+        // CDATA content is literal per the XML spec — entity-like sequences
+        // are not expanded, so the captured CSS keeps `&amp;` verbatim.
+        let doc =
+            parse(r#"<svg><style><![CDATA[g[x="&amp;"] { fill: red; }]]></style></svg>"#).unwrap();
+        let style_id = doc.node(doc.root()).children[0];
+        assert_eq!(doc.element(style_id).text, r#"g[x="&amp;"] { fill: red; }"#);
     }
 
     #[test]
