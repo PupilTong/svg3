@@ -2,8 +2,8 @@
 //!
 //! Each case parses an svg3 document — the SVG WPT `shapes/rect-*`,
 //! `shapes/circle-*`, `shapes/ellipse-*`, and `shapes/polygon-*` reference
-//! tests, plus polyline fill, line, path, Gaussian blur filters, mixed-shape,
-//! and canonical SVG samples — renders it headlessly with
+//! tests, plus polyline fill, line, path, Gaussian blur and image filters,
+//! mixed-shape, and canonical SVG samples — renders it headlessly with
 //! [`Renderer::render_to_image`], and compares the result against a committed
 //! golden PNG in `tests/snapshots/`. Those
 //! PNGs are the reviewable snapshots — open them in a pull request to see
@@ -19,8 +19,11 @@
 //! Rendering needs a GPU adapter, so the suite self-skips where none is
 //! available (it runs on macOS/Metal; it is skipped on a GPU-less host).
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
+use base64::engine::general_purpose;
+use base64::Engine as _;
 use svg3_dom::parse;
 use svg3_render::{Camera, Image, RenderConfig, RenderError, Renderer};
 
@@ -37,7 +40,7 @@ struct Case {
     /// Golden file stem — `tests/snapshots/<name>.png`.
     name: &'static str,
     /// The svg3 document to render.
-    svg: &'static str,
+    svg: Cow<'static, str>,
     /// Render-target width, in pixels.
     width: u32,
     /// Render-target height, in pixels.
@@ -48,10 +51,10 @@ struct Case {
 
 impl Case {
     /// A case rendered into a square `CANVAS`×`CANVAS` target.
-    const fn square(name: &'static str, svg: &'static str) -> Self {
+    fn square(name: &'static str, svg: impl Into<Cow<'static, str>>) -> Self {
         Self {
             name,
-            svg,
+            svg: svg.into(),
             width: CANVAS,
             height: CANVAS,
             camera: None,
@@ -59,10 +62,15 @@ impl Case {
     }
 
     /// A case rendered into a `width`×`height` target.
-    const fn sized(name: &'static str, svg: &'static str, width: u32, height: u32) -> Self {
+    fn sized(
+        name: &'static str,
+        svg: impl Into<Cow<'static, str>>,
+        width: u32,
+        height: u32,
+    ) -> Self {
         Self {
             name,
-            svg,
+            svg: svg.into(),
             width,
             height,
             camera: None,
@@ -74,6 +82,59 @@ impl Case {
         self.camera = Some(camera);
         self
     }
+}
+
+fn png_data_uri(width: u32, height: u32, rgba: &[u8]) -> String {
+    let mut bytes = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut bytes, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().expect("PNG header should encode");
+        writer
+            .write_image_data(rgba)
+            .expect("PNG pixels should encode");
+    }
+    format!(
+        "data:image/png;base64,{}",
+        general_purpose::STANDARD.encode(bytes)
+    )
+}
+
+fn solid_png_data_uri(width: u32, height: u32, color: [u8; 4]) -> String {
+    let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
+    for _ in 0..width * height {
+        rgba.extend_from_slice(&color);
+    }
+    png_data_uri(width, height, &rgba)
+}
+
+fn quadrant_png_data_uri() -> String {
+    let mut rgba = Vec::with_capacity(4 * 4 * 4);
+    for y in 0..4 {
+        for x in 0..4 {
+            let color = match (x >= 2, y >= 2) {
+                (false, false) => [242, 193, 78, 255],
+                (true, false) => [37, 99, 235, 255],
+                (false, true) => [17, 170, 85, 255],
+                (true, true) => [193, 75, 43, 255],
+            };
+            rgba.extend_from_slice(&color);
+        }
+    }
+    png_data_uri(4, 4, &rgba)
+}
+
+fn alpha_cross_png_data_uri() -> String {
+    let mut rgba = Vec::with_capacity(16 * 16 * 4);
+    for y in 0..16 {
+        for x in 0..16 {
+            let on_cross = (6..10).contains(&x) || (6..10).contains(&y);
+            let alpha = if on_cross { 255 } else { 96 };
+            rgba.extend_from_slice(&[255, 255, 255, alpha]);
+        }
+    }
+    png_data_uri(16, 16, &rgba)
 }
 
 /// All snapshot cases: the 2D shape references, then the 3D camera views.
@@ -97,6 +158,14 @@ fn cases() -> Vec<Case> {
     // Dolly: push the eye toward the scene along -Z — a perspective zoom-in.
     let mut dolly = Camera::facing(100, 100);
     dolly.eye.z *= 0.6;
+
+    let quadrants = quadrant_png_data_uri();
+    let alpha_cross = alpha_cross_png_data_uri();
+    let red = solid_png_data_uri(1, 1, [193, 75, 43, 255]);
+    let green = solid_png_data_uri(1, 1, [17, 170, 85, 255]);
+    let blue = solid_png_data_uri(1, 1, [37, 99, 235, 255]);
+    let yellow = solid_png_data_uri(20, 14, [242, 193, 78, 255]);
+    let orange = solid_png_data_uri(1, 1, [255, 165, 0, 255]);
 
     vec![
         // WPT `shapes/rect-01`: a basic filled rectangle.
@@ -495,6 +564,71 @@ fn cases() -> Vec<Case> {
             "filter-spot-lighting",
             r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="spot"><feDiffuseLighting surfaceScale="5" diffuseConstant="1" lighting-color="#ffffff"><feSpotLight x="50" y="50" z="40" pointsAtX="50" pointsAtY="50" pointsAtZ="0" specularExponent="4" limitingConeAngle="35"/></feDiffuseLighting></filter><circle cx="50" cy="50" r="28" fill="#888888" filter="url(#spot)"/></svg>"##,
         ),
+        // SVG image filters: referenced `<feImage>` data URLs become
+        // lazily-uploaded GPU textures, then composite in painter order just
+        // like geometry-sourced filters.
+        Case::square(
+            "filter-image-explicit-size",
+            format!(
+                r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="tex"><feImage href="{quadrants}" x="18" y="16" width="64" height="48"/></filter><rect x="2" y="2" width="12" height="12" fill="white" filter="url(#tex)"/></svg>"##
+            ),
+        ),
+        Case::square(
+            "filter-image-intrinsic-size",
+            format!(
+                r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="tex"><feImage href="{yellow}" x="40" y="43"/></filter><rect width="1" height="1" filter="url(#tex)"/></svg>"##
+            ),
+        ),
+        Case::sized(
+            "filter-image-percent-geometry",
+            format!(
+                r##"<svg width="200" height="100"><rect width="100%" height="100%" fill="#13294b"/><filter id="tex"><feImage href="{green}" x="20%" y="25%" width="30%" height="40%"/></filter><rect width="1" height="1" filter="url(#tex)"/></svg>"##
+            ),
+            200,
+            100,
+        ),
+        Case::square(
+            "filter-image-xlink-href",
+            format!(
+                r##"<svg xmlns:xlink="http://www.w3.org/1999/xlink"><rect width="100%" height="100%" fill="#13294b"/><filter id="tex"><feImage xlink:href="{orange}" x="30" y="28" width="40" height="44"/></filter><rect width="1" height="1" filter="url(#tex)"/></svg>"##
+            ),
+        ),
+        Case::square(
+            "filter-image-alpha",
+            format!(
+                r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="tex"><feImage href="{alpha_cross}" x="26" y="22" width="48" height="56"/></filter><rect width="1" height="1" filter="url(#tex)"/></svg>"##
+            ),
+        ),
+        Case::square(
+            "filter-image-blur",
+            format!(
+                r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="tex"><feImage href="{blue}" x="36" y="34" width="28" height="24"/><feGaussianBlur stdDeviation="5"/></filter><rect width="1" height="1" filter="url(#tex)"/></svg>"##
+            ),
+        ),
+        Case::square(
+            "filter-image-painter-order",
+            format!(
+                r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="tex"><feImage href="{red}" x="22" y="26" width="56" height="44"/></filter><rect width="1" height="1" filter="url(#tex)"/><circle cx="64" cy="50" r="22" fill="#11aa55"/></svg>"##
+            ),
+        ),
+        Case::square(
+            "filter-image-zero-size-skipped",
+            format!(
+                r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="tex"><feImage href="{red}" x="20" y="20" width="0" height="40"/></filter><rect width="100%" height="100%" filter="url(#tex)"/></svg>"##
+            ),
+        ),
+        Case::square(
+            "filter-image-unsupported-skipped",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="tex"><feImage href="data:text/plain;base64,Zm9v" x="20" y="20" width="60" height="60"/></filter><rect width="100%" height="100%" filter="url(#tex)"/></svg>"##,
+        ),
+        Case::square(
+            "filter-image-invalid-data-skipped",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="plain"><feImage href="data:image/png,abc" x="12" y="24" width="18" height="52"/></filter><filter id="bad64"><feImage href="data:image/png;base64,@@@" x="41" y="24" width="18" height="52"/></filter><filter id="badpng"><feImage href="data:image/png;base64,bm90IGEgcG5n" x="70" y="24" width="18" height="52"/></filter><rect width="100%" height="100%" fill="red" filter="url(#plain)"/><rect width="100%" height="100%" fill="red" filter="url(#bad64)"/><rect width="100%" height="100%" fill="red" filter="url(#badpng)"/></svg>"##,
+        ),
+        Case::square(
+            "filter-image-missing-href-fallback",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="empty"><feImage x="20" y="20" width="60" height="60"/></filter><rect x="24" y="28" width="52" height="44" fill="#c14b2b" filter="url(#empty)"/></svg>"##,
+        ),
         // The canonical SVG sample, rendered at its declared 300×200 size. The
         // `<rect width="100%">` exercises percentage lengths; the `<text>` is
         // parsed but not yet rendered (text rendering is a separate milestone),
@@ -535,7 +669,7 @@ fn shape_snapshots_match_references() {
     let mut failures: Vec<String> = Vec::new();
 
     for case in cases() {
-        let document = parse(case.svg).expect("snapshot fixture should parse");
+        let document = parse(&case.svg).expect("snapshot fixture should parse");
         let config = RenderConfig {
             width: case.width,
             height: case.height,

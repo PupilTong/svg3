@@ -39,7 +39,7 @@ svg3 XML   ──►  svg3-dom    ──►  svg3-style   ──►  svg3-render
 > `svg3-dom` parses svg3 XML into an element tree with raw attributes
 > (roadmap item 2) — currently the `<svg>` root, `<g>`, `<rect>`,
 > `<circle>`, `<ellipse>`, `<polygon>`, `<polyline>`, `<line>`, `<path>`,
-> `<filter>`, every supported `<fe…>` primitive (`feGaussianBlur`,
+> `<filter>`, every supported `<fe…>` primitive (`feGaussianBlur`, `feImage`,
 > `feColorMatrix`, `feTurbulence`, `feSpecularLighting`, `feDiffuseLighting`,
 > `feMorphology`, `feFlood`, `feDropShadow`, `feDisplacementMap`,
 > `feConvolveMatrix`, `feComponentTransfer`) and their child elements
@@ -52,7 +52,8 @@ svg3 XML   ──►  svg3-dom    ──►  svg3-style   ──►  svg3-render
 > as the percentage viewport. Headless rendering also applies referenced
 > `<filter>` elements composed of an ordered chain of `<fe…>` primitives,
 > with each primitive implemented as a dedicated GPU fragment-shader pass
-> over offscreen ping/pong textures (no CPU filter fallback).
+> over offscreen ping/pong textures. PNG data-URL `<feImage>` primitives are
+> decoded and uploaded lazily when a referenced filter paints.
 > The Stylo
 > cascade is still a skeleton — see the roadmap below.
 
@@ -79,7 +80,7 @@ cargo bench --workspace                      # criterion benches (codspeed-instr
 
 1. **(done)** winit event loop + wgpu surface — the `app-macos` crate opens a native window, accepts SVG text, and renders supported 2D shapes.
 2. **(done)** svg3 XML parsing → element tree (`<svg>` root with `<g>`, `<cube>`, `<ellipsoid>`; per [SPEC.md](SPEC.md)).
-3. **(done)** 2D basic shapes — tessellate filled/stroked `<rect>`, filled `<circle>` and `<ellipse>` (with percentage lengths), plus `<polygon>`, filled `<polyline>` point lists, stroked `<line>`, and filled/stroked `<path>`, apply referenced `<filter>` chains composed from any of `feGaussianBlur`, `feColorMatrix`, `feTurbulence`, `feSpecularLighting`, `feDiffuseLighting`, `feMorphology`, `feFlood`, `feDropShadow`, `feDisplacementMap`, `feConvolveMatrix`, and `feComponentTransfer` (GPU-only — every primitive ships as a `filter.wgsl` fragment-shader pass), and render the result headlessly to an image (`svg3-render`).
+3. **(done)** 2D basic shapes — tessellate filled/stroked `<rect>`, filled `<circle>` and `<ellipse>` (with percentage lengths), plus `<polygon>`, filled `<polyline>` point lists, stroked `<line>`, and filled/stroked `<path>`, apply referenced `<filter>` chains composed from any of `feGaussianBlur`, `feImage`, `feColorMatrix`, `feTurbulence`, `feSpecularLighting`, `feDiffuseLighting`, `feMorphology`, `feFlood`, `feDropShadow`, `feDisplacementMap`, `feConvolveMatrix`, and `feComponentTransfer` (GPU-only for rendering; PNG data-URL `feImage` sources decode/upload lazily when used), and render the result headlessly to an image (`svg3-render`).
 4. 3D primitive mesh generation; render a single `<cube>`.
 5. Real Stylo integration (computed styles drive material/transform).
 6. Multi-platform native demos (Windows, Linux) + Linux/Windows CI.

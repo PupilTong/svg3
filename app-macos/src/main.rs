@@ -2,10 +2,11 @@
 //!
 //! Opens a Cocoa NSWindow via winit, accepts an SVG string through a macOS
 //! dialog, and draws the currently implemented 2D shape geometry — including
-//! referenced `<feGaussianBlur>` filters — into a Metal-backed wgpu surface
-//! through [`Renderer::encode_document`], the same GPU path the headless
-//! renderer uses. The document is viewed through an orbit camera the user
-//! can move: drag or the arrow keys to orbit, scroll to zoom, `R` to reset.
+//! referenced `<feGaussianBlur>` and PNG data-URL `<feImage>` filters — into
+//! a Metal-backed wgpu surface through [`Renderer::encode_document`], the
+//! same GPU path the headless renderer uses. The document is viewed through
+//! an orbit camera the user can move: drag or the arrow keys to orbit, scroll
+//! to zoom, `R` to reset.
 
 mod camera;
 
@@ -467,7 +468,7 @@ fn prompt_for_svg(default_source: &str) -> Result<Option<String>> {
         .arg(format!(
             "set promptText to {}",
             apple_script_string(
-                "Paste an SVG string. This demo currently renders <rect>, <circle>, <ellipse>, <polygon>, filled <polyline>, <line>, and <path> elements, including referenced <filter><feGaussianBlur/></filter> definitions."
+                "Paste an SVG string. This demo currently renders <rect>, <circle>, <ellipse>, <polygon>, filled <polyline>, <line>, and <path> elements, including referenced <filter> definitions with <feGaussianBlur/> and PNG data-URL <feImage/>."
             )
         ))
         .arg("-e")

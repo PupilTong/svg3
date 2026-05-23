@@ -3,8 +3,9 @@
 //! The [`Renderer`] owns and caches the wgpu device, queue, render pipelines
 //! and bind-group layouts. It exposes one unified document encoder,
 //! [`Renderer::encode_document`], which walks a parsed document, tessellates
-//! every supported 2D shape, applies referenced `<feGaussianBlur>` filters via
-//! offscreen GPU passes, and composites them into a caller-owned target view
+//! every supported 2D shape, applies referenced `<feImage>` and
+//! `<feGaussianBlur>` filters via offscreen GPU passes, and composites them
+//! into a caller-owned target view
 //! through a caller-owned command encoder. The two render entry points are
 //! built on top of it:
 //!
@@ -21,16 +22,20 @@
 //! the high-level paths go through [`Renderer::encode_document`].
 
 use std::collections::BTreeMap;
+use std::io::Cursor;
+use std::sync::{Arc, Mutex};
 
+use base64::engine::general_purpose;
+use base64::Engine as _;
 use glam::Mat4;
 use svg3_dom::Document;
 use thiserror::Error;
 use wgpu::util::DeviceExt;
 
 use crate::filters::{
-    ColorMatrix, ComponentTransfer, ConvolveMatrix, DisplacementMap, DropShadow, FilterInput,
-    FilterPrimitive, FilterPrimitiveKind, Flood, GaussianBlur, LightSource, Lighting, Morphology,
-    Turbulence,
+    ColorMatrix, ComponentTransfer, ConvolveMatrix, DisplacementMap, DropShadow, FilterImage,
+    FilterInput, FilterPrimitive, FilterPrimitiveKind, Flood, GaussianBlur, ImageRect, LightSource,
+    Lighting, Morphology, Turbulence,
 };
 use crate::mesh::VERTEX_ATTRIBUTES;
 use crate::scene::{build_render_plan, RenderOp};
@@ -85,6 +90,16 @@ struct FilterUniform {
     radius: u32,
     mode: u32,
     flags: u32,
+}
+
+/// Uniform data consumed by `image.wgsl`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct ImageUniform {
+    /// Column-major view-projection matrix, matching WGSL matrix layout.
+    view_projection: [[f32; 4]; 4],
+    /// Image draw rectangle: x, y, width, height in SVG user space.
+    rect: [f32; 4],
 }
 
 impl FilterUniform {
@@ -313,6 +328,15 @@ impl TransformUniform {
     }
 }
 
+impl ImageUniform {
+    fn new(view_projection: Mat4, rect: ImageRect) -> Self {
+        Self {
+            view_projection: view_projection.to_cols_array_2d(),
+            rect: [rect.x, rect.y, rect.width, rect.height],
+        }
+    }
+}
+
 /// An RGBA8 image produced by a headless render.
 #[derive(Debug, Clone)]
 pub struct Image {
@@ -363,6 +387,23 @@ struct FilterTexture {
     view: wgpu::TextureView,
 }
 
+/// A decoded `<feImage>` uploaded to GPU memory.
+#[derive(Debug)]
+struct GpuImage {
+    _texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    width: u32,
+    height: u32,
+}
+
+/// A decoded CPU-side image ready for upload.
+#[derive(Debug)]
+struct DecodedImage {
+    width: u32,
+    height: u32,
+    rgba: Vec<u8>,
+}
+
 /// Renders SVG3 documents to GPU images and into caller-owned render passes.
 ///
 /// Owns and caches the wgpu device, queue, render pipeline and bind-group
@@ -375,8 +416,10 @@ pub struct Renderer {
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     filter_bind_group_layout: wgpu::BindGroupLayout,
+    image_bind_group_layout: wgpu::BindGroupLayout,
     blur_pipeline: wgpu::RenderPipeline,
     composite_pipeline: wgpu::RenderPipeline,
+    image_pipeline: wgpu::RenderPipeline,
     color_matrix_pipeline: wgpu::RenderPipeline,
     turbulence_pipeline: wgpu::RenderPipeline,
     lighting_pipeline: wgpu::RenderPipeline,
@@ -388,6 +431,8 @@ pub struct Renderer {
     convolve_pipeline: wgpu::RenderPipeline,
     component_transfer_pipeline: wgpu::RenderPipeline,
     filter_sampler: wgpu::Sampler,
+    image_sampler: wgpu::Sampler,
+    image_cache: Mutex<BTreeMap<String, Arc<GpuImage>>>,
     format: wgpu::TextureFormat,
 }
 
@@ -420,6 +465,7 @@ impl Renderer {
         let pipeline = build_pipeline(&device, format);
         let bind_group_layout = pipeline.get_bind_group_layout(0);
         let filter_bind_group_layout = build_filter_bind_group_layout(&device);
+        let image_bind_group_layout = build_image_bind_group_layout(&device);
         let blur_pipeline = build_filter_pipeline(
             &device,
             format,
@@ -436,6 +482,7 @@ impl Renderer {
             "fs_composite",
             Some(premultiplied_alpha_blend()),
         );
+        let image_pipeline = build_image_pipeline(&device, format, &image_bind_group_layout);
         let color_matrix_pipeline = build_filter_pipeline(
             &device,
             format,
@@ -530,14 +577,26 @@ impl Renderer {
             mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
+        let image_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("svg3 image sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
         Self {
             device,
             queue,
             pipeline,
             bind_group_layout,
             filter_bind_group_layout,
+            image_bind_group_layout,
             blur_pipeline,
             composite_pipeline,
+            image_pipeline,
             color_matrix_pipeline,
             turbulence_pipeline,
             lighting_pipeline,
@@ -549,6 +608,8 @@ impl Renderer {
             convolve_pipeline,
             component_transfer_pipeline,
             filter_sampler,
+            image_sampler,
+            image_cache: Mutex::new(BTreeMap::new()),
             format,
         }
     }
@@ -749,11 +810,11 @@ impl Renderer {
     /// into `target`.
     ///
     /// Walks `document` once, tessellates every supported 2D shape, applies
-    /// any referenced `<feGaussianBlur>` filter through offscreen GPU passes
-    /// (allocated lazily against `target_extent`), and composites the result
-    /// onto `target` in painter's order. This is the single GPU path shared
-    /// by the headless [`Renderer::render_to_image`] and any windowed caller
-    /// driving its own surface.
+    /// any referenced `<feImage>` / `<feGaussianBlur>` filter through
+    /// offscreen GPU passes (allocated lazily against `target_extent`), and
+    /// composites the result onto `target` in painter's order. This is the
+    /// single GPU path shared by the headless [`Renderer::render_to_image`]
+    /// and any windowed caller driving its own surface.
     ///
     /// `target` is **loaded, not cleared** — callers are responsible for
     /// clearing it to their desired background colour before this call.
@@ -790,6 +851,7 @@ impl Renderer {
                         target,
                         mesh,
                         primitives,
+                        viewport,
                         view_projection,
                         target_extent,
                     );
@@ -821,12 +883,14 @@ impl Renderer {
         self.draw(&mut pass, scene);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn encode_filter_chain(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         target: &wgpu::TextureView,
         mesh: &Mesh,
         primitives: &[FilterPrimitive],
+        viewport: Viewport,
         view_projection: Mat4,
         extent: wgpu::Extent3d,
     ) {
@@ -918,6 +982,8 @@ impl Renderer {
                 in2_view,
                 output_view,
                 &scratch.view,
+                viewport,
+                view_projection,
                 extent,
             );
             if let Some(name) = primitive.result.as_deref() {
@@ -949,11 +1015,16 @@ impl Renderer {
         in2: &wgpu::TextureView,
         output: &wgpu::TextureView,
         scratch: &wgpu::TextureView,
+        viewport: Viewport,
+        view_projection: Mat4,
         extent: wgpu::Extent3d,
     ) {
         match &primitive.kind {
             FilterPrimitiveKind::GaussianBlur(blur) => {
                 self.encode_gaussian_blur_chain(encoder, in1, output, scratch, *blur, extent);
+            }
+            FilterPrimitiveKind::Image(image) => {
+                self.encode_filter_image(encoder, output, image, viewport, view_projection);
             }
             FilterPrimitiveKind::ColorMatrix(cm) => {
                 let uniform = color_matrix_uniform(extent, cm);
@@ -1154,6 +1225,43 @@ impl Renderer {
         );
     }
 
+    fn encode_filter_image(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        destination: &wgpu::TextureView,
+        image: &FilterImage,
+        viewport: Viewport,
+        view_projection: Mat4,
+    ) {
+        let Some(gpu_image) = self.gpu_image(&image.href) else {
+            clear_target(
+                encoder,
+                destination,
+                wgpu::Color::TRANSPARENT,
+                "svg3 skipped feImage clear",
+            );
+            return;
+        };
+        let Some(rect) = image.resolve_rect(viewport, gpu_image.width, gpu_image.height) else {
+            clear_target(
+                encoder,
+                destination,
+                wgpu::Color::TRANSPARENT,
+                "svg3 skipped feImage rect clear",
+            );
+            return;
+        };
+
+        self.encode_image_draw(
+            encoder,
+            destination,
+            &gpu_image,
+            rect,
+            view_projection,
+            wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+        );
+    }
+
     /// `feDropShadow` is a five-step pipeline; the helper ping-pongs through
     /// `output` and `scratch` so the primitive's own input texture stays
     /// untouched (it must remain readable, e.g. for an upstream `result`).
@@ -1290,6 +1398,107 @@ impl Renderer {
         pass.draw(0..3, 0..1);
     }
 
+    fn encode_image_draw(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        destination: &wgpu::TextureView,
+        image: &GpuImage,
+        rect: ImageRect,
+        view_projection: Mat4,
+        load: wgpu::LoadOp<wgpu::Color>,
+    ) {
+        let uniform = ImageUniform::new(view_projection, rect);
+        let bind_group =
+            self.create_image_bind_group(&image.view, &uniform, "svg3 image bind group");
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("svg3 filtered image pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: destination,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            ..Default::default()
+        });
+        pass.set_pipeline(&self.image_pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.draw(0..6, 0..1);
+    }
+
+    fn gpu_image(&self, href: &str) -> Option<Arc<GpuImage>> {
+        {
+            let cache = self
+                .image_cache
+                .lock()
+                .expect("svg3 image cache lock should not be poisoned");
+            if let Some(image) = cache.get(href) {
+                return Some(Arc::clone(image));
+            }
+        }
+
+        let decoded = match decode_image_href(href) {
+            Ok(decoded) => decoded,
+            Err(error) => {
+                log::debug!("svg3-render: skipping <feImage>: {error}");
+                return None;
+            }
+        };
+        let uploaded = Arc::new(self.upload_image(decoded));
+
+        let mut cache = self
+            .image_cache
+            .lock()
+            .expect("svg3 image cache lock should not be poisoned");
+        Some(Arc::clone(
+            cache
+                .entry(href.to_owned())
+                .or_insert_with(|| Arc::clone(&uploaded)),
+        ))
+    }
+
+    fn upload_image(&self, image: DecodedImage) -> GpuImage {
+        let extent = wgpu::Extent3d {
+            width: image.width,
+            height: image.height,
+            depth_or_array_layers: 1,
+        };
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("svg3 feImage texture"),
+            size: extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &image.rgba,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(image.width * 4),
+                rows_per_image: Some(image.height),
+            },
+            extent,
+        );
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        GpuImage {
+            _texture: texture,
+            view,
+            width: image.width,
+            height: image.height,
+        }
+    }
+
     fn create_filter_bind_group(
         &self,
         source: &wgpu::TextureView,
@@ -1323,6 +1532,39 @@ impl Renderer {
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: uniform_buffer.as_entire_binding(),
+                },
+            ],
+        })
+    }
+
+    fn create_image_bind_group(
+        &self,
+        image: &wgpu::TextureView,
+        uniform: &ImageUniform,
+        label: &str,
+    ) -> wgpu::BindGroup {
+        let uniform_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("svg3 image uniform"),
+                contents: bytemuck::bytes_of(uniform),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some(label),
+            layout: &self.image_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(image),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&self.image_sampler),
                 },
             ],
         })
@@ -1477,6 +1719,40 @@ fn build_filter_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayou
     })
 }
 
+fn build_image_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("svg3 image bind group layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    })
+}
+
 fn build_filter_pipeline(
     device: &wgpu::Device,
     format: wgpu::TextureFormat,
@@ -1518,6 +1794,44 @@ fn build_filter_pipeline(
     })
 }
 
+fn build_image_pipeline(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    bind_group_layout: &wgpu::BindGroupLayout,
+) -> wgpu::RenderPipeline {
+    let shader = device.create_shader_module(wgpu::include_wgsl!("image.wgsl"));
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("svg3 image pipeline layout"),
+        bind_group_layouts: &[Some(bind_group_layout)],
+        immediate_size: 0,
+    });
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("svg3 image pipeline"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_image"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &[],
+        },
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_image"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
 fn premultiplied_alpha_blend() -> wgpu::BlendState {
     wgpu::BlendState {
         color: wgpu::BlendComponent {
@@ -1530,6 +1844,124 @@ fn premultiplied_alpha_blend() -> wgpu::BlendState {
             dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
             operation: wgpu::BlendOperation::Add,
         },
+    }
+}
+
+fn decode_image_href(href: &str) -> Result<DecodedImage, ImageDecodeError> {
+    let png_bytes = decode_png_data_url(href)?;
+    decode_png(&png_bytes)
+}
+
+fn decode_png_data_url(href: &str) -> Result<Vec<u8>, ImageDecodeError> {
+    let href = href.trim();
+    let data_url = href
+        .strip_prefix("data:")
+        .ok_or(ImageDecodeError::UnsupportedHref)?;
+    let (metadata, data) = data_url
+        .split_once(',')
+        .ok_or(ImageDecodeError::UnsupportedHref)?;
+    let mut parts = metadata.split(';');
+    let media_type = parts.next().unwrap_or_default();
+    if !media_type.is_empty() && !media_type.eq_ignore_ascii_case("image/png") {
+        return Err(ImageDecodeError::UnsupportedMediaType(
+            media_type.to_owned(),
+        ));
+    }
+    if !parts.any(|part| part.eq_ignore_ascii_case("base64")) {
+        return Err(ImageDecodeError::DataUrlNotBase64);
+    }
+    Ok(general_purpose::STANDARD.decode(data.trim())?)
+}
+
+fn decode_png(bytes: &[u8]) -> Result<DecodedImage, ImageDecodeError> {
+    let mut decoder = png::Decoder::new(Cursor::new(bytes));
+    decoder.set_transformations(png::Transformations::ALPHA | png::Transformations::STRIP_16);
+    let mut reader = decoder.read_info()?;
+    let output_size = reader
+        .output_buffer_size()
+        .ok_or(ImageDecodeError::ImageTooLarge)?;
+    let mut buffer = vec![0; output_size];
+    let info = reader.next_frame(&mut buffer)?;
+    if info.width == 0 || info.height == 0 {
+        return Err(ImageDecodeError::EmptyImage);
+    }
+    let (color_type, bit_depth) = reader.output_color_type();
+    let rgba = png_output_to_rgba(
+        &buffer[..info.buffer_size()],
+        info.width,
+        info.height,
+        color_type,
+        bit_depth,
+    )?;
+    Ok(DecodedImage {
+        width: info.width,
+        height: info.height,
+        rgba,
+    })
+}
+
+fn png_output_to_rgba(
+    bytes: &[u8],
+    width: u32,
+    height: u32,
+    color_type: png::ColorType,
+    bit_depth: png::BitDepth,
+) -> Result<Vec<u8>, ImageDecodeError> {
+    if bit_depth != png::BitDepth::Eight {
+        return Err(ImageDecodeError::UnsupportedPngColor {
+            color_type,
+            bit_depth,
+        });
+    }
+    let pixel_count = (width as usize)
+        .checked_mul(height as usize)
+        .ok_or(ImageDecodeError::ImageTooLarge)?;
+    match color_type {
+        png::ColorType::Rgba => {
+            if bytes.len() != pixel_count * 4 {
+                return Err(ImageDecodeError::ImageTooLarge);
+            }
+            Ok(bytes.to_vec())
+        }
+        png::ColorType::Rgb => {
+            if bytes.len() != pixel_count * 3 {
+                return Err(ImageDecodeError::ImageTooLarge);
+            }
+            let mut rgba = Vec::with_capacity(pixel_count * 4);
+            for rgb in bytes.chunks_exact(3) {
+                rgba.extend_from_slice(&[rgb[0], rgb[1], rgb[2], 255]);
+            }
+            Ok(rgba)
+        }
+        png::ColorType::GrayscaleAlpha => {
+            if bytes.len() != pixel_count * 2 {
+                return Err(ImageDecodeError::ImageTooLarge);
+            }
+            let mut rgba = Vec::with_capacity(pixel_count * 4);
+            for gray_alpha in bytes.chunks_exact(2) {
+                rgba.extend_from_slice(&[
+                    gray_alpha[0],
+                    gray_alpha[0],
+                    gray_alpha[0],
+                    gray_alpha[1],
+                ]);
+            }
+            Ok(rgba)
+        }
+        png::ColorType::Grayscale => {
+            if bytes.len() != pixel_count {
+                return Err(ImageDecodeError::ImageTooLarge);
+            }
+            let mut rgba = Vec::with_capacity(pixel_count * 4);
+            for gray in bytes {
+                rgba.extend_from_slice(&[*gray, *gray, *gray, 255]);
+            }
+            Ok(rgba)
+        }
+        png::ColorType::Indexed => Err(ImageDecodeError::UnsupportedPngColor {
+            color_type,
+            bit_depth,
+        }),
     }
 }
 
@@ -1589,6 +2021,40 @@ pub enum RenderError {
     Readback(String),
 }
 
+/// Errors that can occur while decoding an embedded `<feImage>`.
+#[derive(Debug, Error)]
+enum ImageDecodeError {
+    /// The renderer currently supports embedded PNG data URLs only.
+    #[error("unsupported href; only PNG data URLs are supported")]
+    UnsupportedHref,
+    /// The data URL's media type is not `image/png`.
+    #[error("unsupported data URL media type `{0}`; only image/png is supported")]
+    UnsupportedMediaType(String),
+    /// The data URL is not base64-encoded.
+    #[error("PNG data URL must be base64 encoded")]
+    DataUrlNotBase64,
+    /// Base64 payload decoding failed.
+    #[error("base64 decoding failed: {0}")]
+    Base64(#[from] base64::DecodeError),
+    /// PNG decoding failed.
+    #[error("PNG decoding failed: {0}")]
+    Png(#[from] png::DecodingError),
+    /// The decoded image dimensions or buffer length are too large.
+    #[error("decoded PNG image is too large")]
+    ImageTooLarge,
+    /// The decoded image has no pixels.
+    #[error("decoded PNG image is empty")]
+    EmptyImage,
+    /// The PNG output format is not one this renderer can upload as RGBA8.
+    #[error("unsupported PNG output color type {color_type:?} at {bit_depth:?}")]
+    UnsupportedPngColor {
+        /// Output colour type after png decoder transformations.
+        color_type: png::ColorType,
+        /// Output bit depth after png decoder transformations.
+        bit_depth: png::BitDepth,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1628,6 +2094,14 @@ mod tests {
         // Total = 88 * 4 = 352 bytes; a multiple of 16, satisfying
         // WGSL std140-style alignment.
         assert_eq!(std::mem::size_of::<FilterUniform>(), 352);
+    }
+
+    #[test]
+    fn image_uniform_matches_wgsl_layout() {
+        assert_eq!(
+            std::mem::size_of::<ImageUniform>(),
+            20 * std::mem::size_of::<f32>()
+        );
     }
 
     #[test]

@@ -10,7 +10,9 @@
 //!
 //! Only the structural shape — primitive selection, attribute parsing, chain
 //! order — lives here. The actual GPU passes that execute each variant live
-//! in [`crate::renderer`] and `filter.wgsl`.
+//! in [`crate::renderer`], `filter.wgsl`, and `image.wgsl`. PNG data-URL
+//! `<feImage>` sources are represented structurally here; decoding/uploading
+//! stays lazy in the renderer.
 
 use std::collections::BTreeMap;
 
@@ -37,6 +39,8 @@ pub(crate) struct FilterPrimitive {
 pub(crate) enum FilterPrimitiveKind {
     /// Gaussian blur — two separable passes.
     GaussianBlur(GaussianBlur),
+    /// Embedded image source.
+    Image(FilterImage),
     /// 4×5 colour matrix or one of the named shortcuts.
     ColorMatrix(ColorMatrix),
     /// Procedural Perlin / fractal noise generator (no input).
@@ -64,6 +68,7 @@ impl FilterPrimitive {
     pub(crate) fn is_visible(&self) -> bool {
         match &self.kind {
             FilterPrimitiveKind::GaussianBlur(blur) => blur.is_visible(),
+            FilterPrimitiveKind::Image(image) => !image.href.trim().is_empty(),
             FilterPrimitiveKind::ColorMatrix(_) => true,
             FilterPrimitiveKind::Turbulence(_) => true,
             FilterPrimitiveKind::SpecularLighting(_) => true,
@@ -119,6 +124,9 @@ impl FilterInput {
     }
 }
 
+use crate::shapes::Length;
+use crate::Viewport;
+
 /// A resolved `<feGaussianBlur>` primitive.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct GaussianBlur {
@@ -133,6 +141,70 @@ impl GaussianBlur {
     pub(crate) fn is_visible(self) -> bool {
         self.std_deviation_x > 0.0 || self.std_deviation_y > 0.0
     }
+}
+
+/// A resolved `<feImage>` primitive.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct FilterImage {
+    /// Embedded image reference. The renderer currently supports PNG data
+    /// URLs, decoded and uploaded lazily when the referenced filter paints.
+    pub(crate) href: String,
+    /// Optional top-left x position in SVG user space.
+    x: Option<Length>,
+    /// Optional top-left y position in SVG user space.
+    y: Option<Length>,
+    /// Optional rendered width in SVG user space.
+    width: Option<Length>,
+    /// Optional rendered height in SVG user space.
+    height: Option<Length>,
+}
+
+impl FilterImage {
+    /// Resolve the image rectangle once the decoded image's intrinsic pixel
+    /// size is known. Percentages use the same root viewport basis as the
+    /// rest of the renderer's length handling.
+    pub(crate) fn resolve_rect(
+        &self,
+        viewport: Viewport,
+        intrinsic_width: u32,
+        intrinsic_height: u32,
+    ) -> Option<ImageRect> {
+        let width = self
+            .width
+            .map(|length| length.resolve(viewport.width))
+            .unwrap_or(intrinsic_width as f32);
+        let height = self
+            .height
+            .map(|length| length.resolve(viewport.height))
+            .unwrap_or(intrinsic_height as f32);
+        if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
+            return None;
+        }
+
+        let x = self
+            .x
+            .map(|length| length.resolve(viewport.width))
+            .unwrap_or(0.0);
+        let y = self
+            .y
+            .map(|length| length.resolve(viewport.height))
+            .unwrap_or(0.0);
+        (x.is_finite() && y.is_finite()).then_some(ImageRect {
+            x,
+            y,
+            width,
+            height,
+        })
+    }
+}
+
+/// A resolved `<feImage>` draw rectangle.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct ImageRect {
+    pub(crate) x: f32,
+    pub(crate) y: f32,
+    pub(crate) width: f32,
+    pub(crate) height: f32,
 }
 
 /// Resolved `<feColorMatrix>` data.
@@ -378,6 +450,7 @@ fn resolve_primitive(document: &Document, node: &svg3_dom::Node) -> Option<Filte
                 std_deviation_y: 0.0,
             }),
         ),
+        ElementKind::FeImage => FilterPrimitiveKind::Image(resolve_fe_image(&node.element)?),
         ElementKind::FeColorMatrix => {
             FilterPrimitiveKind::ColorMatrix(parse_color_matrix(&node.element))
         }
@@ -419,6 +492,28 @@ fn resolve_primitive(document: &Document, node: &svg3_dom::Node) -> Option<Filte
             .filter(|s| !s.is_empty()),
         kind,
     })
+}
+
+fn resolve_fe_image(element: &Element) -> Option<FilterImage> {
+    let href = element
+        .attributes
+        .get("href")
+        .or_else(|| element.attributes.get("xlink:href"))?
+        .to_owned();
+    Some(FilterImage {
+        href,
+        x: parse_length_attr(element, "x"),
+        y: parse_length_attr(element, "y"),
+        width: parse_length_attr(element, "width"),
+        height: parse_length_attr(element, "height"),
+    })
+}
+
+fn parse_length_attr(element: &Element, name: &str) -> Option<Length> {
+    element
+        .attributes
+        .get(name)
+        .and_then(|value| Length::parse(value))
 }
 
 fn filter_reference_id(value: &str) -> Option<&str> {
@@ -1050,6 +1145,71 @@ mod tests {
     }
 
     #[test]
+    fn collect_resolves_url_referenced_fe_image() {
+        let document = svg3_dom::parse(
+            r##"<svg><filter id="tex"><feImage href="data:image/png;base64,abc" x="10%" y="2" width="20" height="50%"/></filter><rect filter="url(#tex)"/></svg>"##,
+        )
+        .unwrap();
+        let definitions = FilterDefinitions::collect(&document);
+        let rect_id = document.node(document.root()).children[1];
+
+        let chain = definitions.resolve(document.element(rect_id)).unwrap();
+        assert_eq!(chain.len(), 1);
+        assert_eq!(
+            chain[0].kind,
+            FilterPrimitiveKind::Image(FilterImage {
+                href: "data:image/png;base64,abc".to_owned(),
+                x: Some(Length::Percent(10.0)),
+                y: Some(Length::Px(2.0)),
+                width: Some(Length::Px(20.0)),
+                height: Some(Length::Percent(50.0)),
+            })
+        );
+    }
+
+    #[test]
+    fn fe_image_accepts_legacy_xlink_href() {
+        let document = svg3_dom::parse(
+            r##"<svg><filter id="tex"><feImage xlink:href="data:image/png;base64,abc"/></filter><rect filter="url(#tex)"/></svg>"##,
+        )
+        .unwrap();
+        let definitions = FilterDefinitions::collect(&document);
+        let rect_id = document.node(document.root()).children[1];
+
+        assert!(matches!(
+            definitions.resolve(document.element(rect_id)),
+            Some([FilterPrimitive {
+                kind: FilterPrimitiveKind::Image(FilterImage { href, .. }),
+                ..
+            }]) if href == "data:image/png;base64,abc"
+        ));
+    }
+
+    #[test]
+    fn gaussian_blur_after_fe_image_blurs_image_source() {
+        let document = svg3_dom::parse(
+            r##"<svg><filter id="tex"><feImage href="data:image/png;base64,abc"/><feGaussianBlur stdDeviation="3"/></filter><rect filter="url(#tex)"/></svg>"##,
+        )
+        .unwrap();
+        let definitions = FilterDefinitions::collect(&document);
+        let rect_id = document.node(document.root()).children[1];
+
+        let chain = definitions.resolve(document.element(rect_id)).unwrap();
+        assert_eq!(chain.len(), 2);
+        assert!(matches!(
+            chain[0].kind,
+            FilterPrimitiveKind::Image(FilterImage { .. })
+        ));
+        assert!(matches!(
+            chain[1].kind,
+            FilterPrimitiveKind::GaussianBlur(GaussianBlur {
+                std_deviation_x: 3.0,
+                std_deviation_y: 3.0,
+            })
+        ));
+    }
+
+    #[test]
     fn std_deviation_uses_single_value_for_both_axes() {
         assert_eq!(
             parse_std_deviation(Some("3")),
@@ -1307,6 +1467,34 @@ mod tests {
         assert_eq!(
             FilterInput::parse(Some("blurred")),
             FilterInput::Named("blurred".to_owned())
+        );
+    }
+
+    #[test]
+    fn fe_image_rect_defaults_to_intrinsic_size() {
+        let image = FilterImage {
+            href: "data:image/png;base64,abc".to_owned(),
+            x: None,
+            y: None,
+            width: None,
+            height: None,
+        };
+
+        assert_eq!(
+            image.resolve_rect(
+                Viewport {
+                    width: 100.0,
+                    height: 80.0,
+                },
+                12,
+                9,
+            ),
+            Some(ImageRect {
+                x: 0.0,
+                y: 0.0,
+                width: 12.0,
+                height: 9.0,
+            })
         );
     }
 }
