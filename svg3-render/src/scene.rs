@@ -255,7 +255,7 @@ fn append_element_mesh(
                     mesh.append(shapes::polygon::tessellate_polygon(&geo, color));
                 }
                 let element_features =
-                    element_features(element, include_markers && features.has_marker_refs, false);
+                    element_features(element, include_markers && features.has_marker_refs);
                 let has_markers = element_features.has_markers;
                 let stroke = features
                     .has_strokes
@@ -299,7 +299,7 @@ fn append_element_mesh(
                     mesh.append(shapes::polyline::tessellate_polyline(&geo, color));
                 }
                 let element_features =
-                    element_features(element, include_markers && features.has_marker_refs, false);
+                    element_features(element, include_markers && features.has_marker_refs);
                 let has_markers = element_features.has_markers;
                 let stroke = features
                     .has_strokes
@@ -337,22 +337,30 @@ fn append_element_mesh(
         }
         ElementKind::Line => {
             if let Some(geo) = shapes::line::resolve_line(element, viewport) {
-                let element_features = element_features(
-                    element,
-                    include_markers && features.has_marker_refs,
-                    features.has_strokes,
-                );
+                if !features.has_marker_refs
+                    && !features.has_general_line_strokes
+                    && !features.has_opacity_attrs
+                {
+                    if let Some(color) = shapes::resolve_stroke_with_opacity(element, false) {
+                        mesh.append(shapes::line::tessellate_segment(
+                            &geo,
+                            geo.stroke_width,
+                            color,
+                        ));
+                    }
+                    return;
+                }
+
+                let element_features =
+                    element_features(element, include_markers && features.has_marker_refs);
                 let has_markers = element_features.has_markers;
-                let stroke = features
-                    .has_strokes
-                    .then(|| {
-                        shapes::resolve_stroke_with_opacity(element, features.has_opacity_attrs)
-                    })
-                    .flatten();
-                let needs_general_stroke =
-                    stroke.is_some() && element_features.line_needs_general_stroke;
+                let stroke =
+                    shapes::resolve_stroke_with_opacity(element, features.has_opacity_attrs);
+                let needs_general_stroke = stroke.is_some()
+                    && features.has_general_line_strokes
+                    && line_needs_general_stroke(element);
                 let stroke_width = (!needs_general_stroke && (stroke.is_some() || has_markers))
-                    .then(|| shapes::resolve_stroke_width(element, viewport));
+                    .then_some(geo.stroke_width);
                 let stroke_style = (needs_general_stroke && (stroke.is_some() || has_markers))
                     .then(|| shapes::stroke::resolve_stroke_style(element, viewport));
                 if let Some(color) = stroke {
@@ -397,7 +405,7 @@ fn append_element_mesh(
                 {
                     mesh.append(shapes::path::tessellate_path_stroke(&geo, color));
                 }
-                if element_features(element, include_markers && features.has_marker_refs, false)
+                if element_features(element, include_markers && features.has_marker_refs)
                     .has_markers
                 {
                     let stroke_style = shapes::stroke::resolve_stroke_style(element, viewport);
@@ -422,38 +430,58 @@ struct DocumentFeatures {
     has_strokes: bool,
     has_marker_refs: bool,
     has_opacity_attrs: bool,
+    has_general_line_strokes: bool,
 }
 
 impl DocumentFeatures {
     fn scan(document: &Document) -> Self {
         let mut features = Self::default();
-        let mut stack = vec![document.root()];
-        while let Some(id) = stack.pop() {
-            let node = document.node(id);
-            for (name, value) in &node.element.attributes {
-                match name.as_str() {
-                    "stroke" => {
-                        features.has_strokes |= !value.trim().eq_ignore_ascii_case("none");
-                    }
-                    "marker" | "marker-start" | "marker-mid" | "marker-end" => {
-                        features.has_marker_refs |= !value.trim().eq_ignore_ascii_case("none");
-                    }
-                    "opacity" | "fill-opacity" | "stroke-opacity" => {
-                        features.has_opacity_attrs = true;
-                    }
-                    _ => {}
-                }
-                if features.is_complete() {
-                    return features;
-                }
-            }
-            stack.extend(node.children.iter().rev().copied());
-        }
+        features.scan_node(document, document.root());
         features
     }
 
+    fn scan_node(&mut self, document: &Document, id: NodeId) -> bool {
+        let node = document.node(id);
+        let scan_stroke_paint = node.element.kind != ElementKind::Line;
+        for (name, value) in &node.element.attributes {
+            if name.as_str() >= "stroke-width" {
+                break;
+            }
+            match name.as_str() {
+                "stroke" if scan_stroke_paint => {
+                    self.has_strokes |= !value.trim().eq_ignore_ascii_case("none");
+                }
+                "stroke-linecap" => {
+                    self.has_general_line_strokes |= !value.trim().eq_ignore_ascii_case("butt");
+                }
+                "stroke-dasharray" => {
+                    self.has_general_line_strokes |= !value.trim().eq_ignore_ascii_case("none");
+                }
+                "marker" | "marker-start" | "marker-mid" | "marker-end" => {
+                    self.has_marker_refs |= !value.trim().eq_ignore_ascii_case("none");
+                }
+                "opacity" | "fill-opacity" | "stroke-opacity" => {
+                    self.has_opacity_attrs = true;
+                }
+                _ => {}
+            }
+            if self.is_complete() {
+                return true;
+            }
+        }
+        for child in node.children.iter().copied() {
+            if self.scan_node(document, child) {
+                return true;
+            }
+        }
+        false
+    }
+
     fn is_complete(&self) -> bool {
-        self.has_strokes && self.has_marker_refs && self.has_opacity_attrs
+        self.has_strokes
+            && self.has_marker_refs
+            && self.has_opacity_attrs
+            && self.has_general_line_strokes
     }
 }
 
@@ -702,15 +730,10 @@ fn append_marker_instances(
 #[derive(Debug, Default)]
 struct ElementFeatures {
     has_markers: bool,
-    line_needs_general_stroke: bool,
 }
 
-fn element_features(
-    element: &Element,
-    check_markers: bool,
-    check_line_stroke: bool,
-) -> ElementFeatures {
-    if !check_markers && !check_line_stroke {
+fn element_features(element: &Element, check_markers: bool) -> ElementFeatures {
+    if !check_markers {
         return ElementFeatures::default();
     }
     let mut features = ElementFeatures::default();
@@ -719,21 +742,24 @@ fn element_features(
             "marker" | "marker-start" | "marker-mid" | "marker-end" if check_markers => {
                 features.has_markers |= !value.trim().eq_ignore_ascii_case("none");
             }
-            "stroke-linecap" if check_line_stroke => {
-                features.line_needs_general_stroke |= !value.trim().eq_ignore_ascii_case("butt");
-            }
-            "stroke-dasharray" if check_line_stroke => {
-                features.line_needs_general_stroke |= !value.trim().eq_ignore_ascii_case("none");
-            }
             _ => {}
         }
-        if (!check_markers || features.has_markers)
-            && (!check_line_stroke || features.line_needs_general_stroke)
-        {
+        if features.has_markers {
             break;
         }
     }
     features
+}
+
+fn line_needs_general_stroke(element: &Element) -> bool {
+    element
+        .attributes
+        .get("stroke-linecap")
+        .is_some_and(|value| !value.trim().eq_ignore_ascii_case("butt"))
+        || element
+            .attributes
+            .get("stroke-dasharray")
+            .is_some_and(|value| !value.trim().eq_ignore_ascii_case("none"))
 }
 
 fn transform_marker_mesh(

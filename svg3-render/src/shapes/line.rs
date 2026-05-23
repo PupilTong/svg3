@@ -13,7 +13,7 @@ use lyon_tessellation::path::Path;
 use svg3_dom::Element;
 
 use super::stroke::{self, StrokeStyle};
-use super::{resolve_length, sdf_quad, Viewport, KIND_SEGMENT, SDF_PAD};
+use super::{resolve_length, resolve_stroke_width, sdf_quad, Viewport, KIND_SEGMENT, SDF_PAD};
 use crate::Mesh;
 
 /// A `<line>`'s geometry after SVG 1.1 defaulting. All values are in SVG
@@ -29,13 +29,16 @@ pub(crate) struct LineGeometry {
     pub x2: f32,
     /// End y coordinate.
     pub y2: f32,
+    /// Stroke width in user units.
+    pub stroke_width: f32,
 }
 
 /// Resolve a `<line>`'s raw attributes into a [`LineGeometry`].
 ///
 /// Percentage lengths resolve against `viewport` — `x1`/`x2` against its
-/// width and `y1`/`y2` against its height ([SVG11] §7.10). Coordinate
-/// attributes default to `0`.
+/// width, `y1`/`y2` against its height, and `stroke-width` against its
+/// normalized diagonal ([SVG11] §7.10). Coordinate attributes default to
+/// `0`; `stroke-width` defaults to `1`.
 ///
 /// Returns `None` when the line is not rendered: zero length.
 pub(crate) fn resolve_line(element: &Element, viewport: Viewport) -> Option<LineGeometry> {
@@ -43,12 +46,19 @@ pub(crate) fn resolve_line(element: &Element, viewport: Viewport) -> Option<Line
     let y1 = resolve_length(element, "y1", viewport.height).unwrap_or(0.0);
     let x2 = resolve_length(element, "x2", viewport.width).unwrap_or(0.0);
     let y2 = resolve_length(element, "y2", viewport.height).unwrap_or(0.0);
+    let stroke_width = resolve_stroke_width(element, viewport);
 
     if x1 == x2 && y1 == y2 {
         return None;
     }
 
-    Some(LineGeometry { x1, y1, x2, y2 })
+    Some(LineGeometry {
+        x1,
+        y1,
+        x2,
+        y2,
+        stroke_width,
+    })
 }
 
 /// Tessellate a resolved line's stroke into triangle geometry.
@@ -131,7 +141,8 @@ mod tests {
 
     #[test]
     fn resolve_line_applies_geometry_defaults() {
-        // x1/y1/x2/y2 default to 0 ([SVG11] §9.5).
+        // x1/y1/x2/y2 default to 0 and stroke-width defaults to 1
+        // ([SVG11] §9.5, §11.4).
         let geo = resolve_line(&line(&[("x2", "20"), ("y2", "10")]), vp()).unwrap();
         assert_eq!(
             geo,
@@ -140,32 +151,36 @@ mod tests {
                 y1: 0.0,
                 x2: 20.0,
                 y2: 10.0,
+                stroke_width: 1.0,
             }
         );
     }
 
     #[test]
     fn resolve_line_resolves_percentage_geometry() {
-        // x coordinates resolve against viewport width; y coordinates
-        // against viewport height ([SVG11] §7.10).
+        // x coordinates resolve against viewport width, y coordinates
+        // against viewport height, and stroke width against the normalized
+        // diagonal ([SVG11] §7.10).
         let viewport = Viewport {
             width: 200.0,
             height: 100.0,
         };
         let geo = resolve_line(
-            &line(&[("x1", "10%"), ("y1", "25%"), ("x2", "50%"), ("y2", "75%")]),
+            &line(&[
+                ("x1", "10%"),
+                ("y1", "25%"),
+                ("x2", "50%"),
+                ("y2", "75%"),
+                ("stroke-width", "10%"),
+            ]),
             viewport,
         )
         .unwrap();
-        assert_eq!(
-            geo,
-            LineGeometry {
-                x1: 20.0,
-                y1: 25.0,
-                x2: 100.0,
-                y2: 75.0,
-            }
-        );
+        assert_eq!(geo.x1, 20.0);
+        assert_eq!(geo.y1, 25.0);
+        assert_eq!(geo.x2, 100.0);
+        assert_eq!(geo.y2, 75.0);
+        assert!((geo.stroke_width - 15.811_389).abs() < 1e-5);
     }
 
     #[test]
