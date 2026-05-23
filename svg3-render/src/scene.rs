@@ -30,6 +30,12 @@ pub(crate) enum RenderOp {
     },
 }
 
+struct SceneContext<'a> {
+    viewport: Viewport,
+    markers: &'a MarkerDefinitions,
+    features: &'a DocumentFeatures,
+}
+
 /// Walk `document` and tessellate every supported 2D SVG shape into one
 /// combined [`Mesh`].
 ///
@@ -42,10 +48,16 @@ pub(crate) enum RenderOp {
 /// `transform` and grouping are not applied yet, so a shape is placed at its
 /// own coordinates regardless of any ancestor `<g>`.
 pub fn build_scene(document: &Document, viewport: Viewport) -> Mesh {
+    let features = DocumentFeatures::scan(document);
     let markers = MarkerDefinitions::default();
+    let context = SceneContext {
+        viewport,
+        markers: &markers,
+        features: &features,
+    };
     let mut mesh = Mesh::default();
     for child in document.node(document.root()).children.iter().copied() {
-        append_subtree_mesh(document, child, viewport, &markers, true, &mut mesh);
+        append_subtree_mesh(document, child, &context, true, &mut mesh);
     }
     mesh
 }
@@ -53,17 +65,22 @@ pub fn build_scene(document: &Document, viewport: Viewport) -> Mesh {
 /// Build headless render operations that preserve SVG painter's order while
 /// isolating filtered subtrees into their own GPU post-process pass.
 pub(crate) fn build_render_plan(document: &Document, viewport: Viewport) -> Vec<RenderOp> {
+    let features = DocumentFeatures::scan(document);
     let filters = FilterDefinitions::collect(document);
     let markers = MarkerDefinitions::default();
+    let context = SceneContext {
+        viewport,
+        markers: &markers,
+        features: &features,
+    };
     let mut plan = Vec::new();
     let mut pending_mesh = Mesh::default();
     for child in document.node(document.root()).children.iter().copied() {
         append_render_ops(
             document,
             child,
-            viewport,
             &filters,
-            &markers,
+            &context,
             &mut pending_mesh,
             &mut plan,
         );
@@ -75,9 +92,8 @@ pub(crate) fn build_render_plan(document: &Document, viewport: Viewport) -> Vec<
 fn append_render_ops(
     document: &Document,
     id: svg3_dom::NodeId,
-    viewport: Viewport,
     filters: &FilterDefinitions,
-    markers: &MarkerDefinitions,
+    context: &SceneContext<'_>,
     pending_mesh: &mut Mesh,
     plan: &mut Vec<RenderOp>,
 ) {
@@ -88,7 +104,7 @@ fn append_render_ops(
 
     if let Some(chain) = filters.resolve(&node.element) {
         let mut filtered_mesh = Mesh::default();
-        append_subtree_mesh(document, id, viewport, markers, true, &mut filtered_mesh);
+        append_subtree_mesh(document, id, context, true, &mut filtered_mesh);
         // A primitive affects the chain output if either its parameters are
         // non-identity OR its DAG wiring is non-default. The wiring matters
         // because e.g. `<feGaussianBlur in="SourceAlpha" stdDeviation="0"/>`
@@ -125,25 +141,16 @@ fn append_render_ops(
         return;
     }
 
-    append_element_mesh(document, id, viewport, markers, true, pending_mesh);
+    append_element_mesh(document, &node.element, context, true, pending_mesh);
     for child in node.children.iter().copied() {
-        append_render_ops(
-            document,
-            child,
-            viewport,
-            filters,
-            markers,
-            pending_mesh,
-            plan,
-        );
+        append_render_ops(document, child, filters, context, pending_mesh, plan);
     }
 }
 
 fn append_subtree_mesh(
     document: &Document,
     id: NodeId,
-    viewport: Viewport,
-    markers: &MarkerDefinitions,
+    context: &SceneContext<'_>,
     include_markers: bool,
     mesh: &mut Mesh,
 ) {
@@ -151,31 +158,40 @@ fn append_subtree_mesh(
     if is_definition_container(&node.element.kind) {
         return;
     }
-    append_element_mesh(document, id, viewport, markers, include_markers, mesh);
+    append_element_mesh(document, &node.element, context, include_markers, mesh);
     for child in node.children.iter().copied() {
         // TODO: Nested filters need their own render plan and offscreen pass.
         // This first filter milestone treats a filtered subtree as raw source
         // geometry for the outer filter.
-        append_subtree_mesh(document, child, viewport, markers, include_markers, mesh);
+        append_subtree_mesh(document, child, context, include_markers, mesh);
     }
 }
 
 fn append_element_mesh(
     document: &Document,
-    id: NodeId,
-    viewport: Viewport,
-    markers: &MarkerDefinitions,
+    element: &Element,
+    context: &SceneContext<'_>,
     include_markers: bool,
     mesh: &mut Mesh,
 ) {
-    let element = document.element(id);
+    let viewport = context.viewport;
+    let markers = context.markers;
+    let features = context.features;
     match &element.kind {
         ElementKind::Rect => {
             if let Some(geo) = shapes::rect::resolve_rect(element, viewport) {
-                if let Some(color) = shapes::resolve_fill(element) {
+                if let Some(color) =
+                    shapes::resolve_fill_with_opacity(element, features.has_opacity_attrs)
+                {
                     mesh.append(shapes::rect::tessellate_rect(&geo, color));
                 }
-                if let Some(color) = shapes::resolve_stroke(element) {
+                if let Some(color) = features
+                    .has_strokes
+                    .then(|| {
+                        shapes::resolve_stroke_with_opacity(element, features.has_opacity_attrs)
+                    })
+                    .flatten()
+                {
                     let stroke_style = shapes::stroke::resolve_stroke_style(element, viewport);
                     mesh.append(shapes::rect::tessellate_rect_stroke(
                         &geo,
@@ -187,10 +203,18 @@ fn append_element_mesh(
         }
         ElementKind::Circle => {
             if let Some(geo) = shapes::circle::resolve_circle(element, viewport) {
-                if let Some(color) = shapes::resolve_fill(element) {
+                if let Some(color) =
+                    shapes::resolve_fill_with_opacity(element, features.has_opacity_attrs)
+                {
                     mesh.append(shapes::circle::tessellate_circle(&geo, color));
                 }
-                if let Some(color) = shapes::resolve_stroke(element) {
+                if let Some(color) = features
+                    .has_strokes
+                    .then(|| {
+                        shapes::resolve_stroke_with_opacity(element, features.has_opacity_attrs)
+                    })
+                    .flatten()
+                {
                     let stroke_style = shapes::stroke::resolve_stroke_style(element, viewport);
                     mesh.append(shapes::circle::tessellate_circle_stroke(
                         &geo,
@@ -202,10 +226,18 @@ fn append_element_mesh(
         }
         ElementKind::Ellipse => {
             if let Some(geo) = shapes::ellipse::resolve_ellipse(element, viewport) {
-                if let Some(color) = shapes::resolve_fill(element) {
+                if let Some(color) =
+                    shapes::resolve_fill_with_opacity(element, features.has_opacity_attrs)
+                {
                     mesh.append(shapes::ellipse::tessellate_ellipse(&geo, color));
                 }
-                if let Some(color) = shapes::resolve_stroke(element) {
+                if let Some(color) = features
+                    .has_strokes
+                    .then(|| {
+                        shapes::resolve_stroke_with_opacity(element, features.has_opacity_attrs)
+                    })
+                    .flatten()
+                {
                     let stroke_style = shapes::stroke::resolve_stroke_style(element, viewport);
                     mesh.append(shapes::ellipse::tessellate_ellipse_stroke(
                         &geo,
@@ -217,12 +249,20 @@ fn append_element_mesh(
         }
         ElementKind::Polygon => {
             if let Some(geo) = shapes::polygon::resolve_polygon(element) {
-                if let Some(color) = shapes::resolve_fill(element) {
+                if let Some(color) =
+                    shapes::resolve_fill_with_opacity(element, features.has_opacity_attrs)
+                {
                     mesh.append(shapes::polygon::tessellate_polygon(&geo, color));
                 }
-                let features = element_features(element, include_markers);
-                let has_markers = features.has_markers;
-                let stroke = shapes::resolve_stroke(element);
+                let element_features =
+                    element_features(element, include_markers && features.has_marker_refs, false);
+                let has_markers = element_features.has_markers;
+                let stroke = features
+                    .has_strokes
+                    .then(|| {
+                        shapes::resolve_stroke_with_opacity(element, features.has_opacity_attrs)
+                    })
+                    .flatten();
                 let stroke_style = (stroke.is_some() || has_markers)
                     .then(|| shapes::stroke::resolve_stroke_style(element, viewport));
                 if let Some(color) = stroke {
@@ -245,6 +285,7 @@ fn append_element_mesh(
                             .as_ref()
                             .expect("stroke style should exist when markers exist")
                             .width,
+                        features,
                         mesh,
                     );
                 }
@@ -252,12 +293,20 @@ fn append_element_mesh(
         }
         ElementKind::Polyline => {
             if let Some(geo) = shapes::polyline::resolve_polyline(element) {
-                if let Some(color) = shapes::resolve_fill(element) {
+                if let Some(color) =
+                    shapes::resolve_fill_with_opacity(element, features.has_opacity_attrs)
+                {
                     mesh.append(shapes::polyline::tessellate_polyline(&geo, color));
                 }
-                let features = element_features(element, include_markers);
-                let has_markers = features.has_markers;
-                let stroke = shapes::resolve_stroke(element);
+                let element_features =
+                    element_features(element, include_markers && features.has_marker_refs, false);
+                let has_markers = element_features.has_markers;
+                let stroke = features
+                    .has_strokes
+                    .then(|| {
+                        shapes::resolve_stroke_with_opacity(element, features.has_opacity_attrs)
+                    })
+                    .flatten();
                 let stroke_style = (stroke.is_some() || has_markers)
                     .then(|| shapes::stroke::resolve_stroke_style(element, viewport));
                 if let Some(color) = stroke {
@@ -280,6 +329,7 @@ fn append_element_mesh(
                             .as_ref()
                             .expect("stroke style should exist when markers exist")
                             .width,
+                        features,
                         mesh,
                     );
                 }
@@ -287,10 +337,20 @@ fn append_element_mesh(
         }
         ElementKind::Line => {
             if let Some(geo) = shapes::line::resolve_line(element, viewport) {
-                let features = element_features(element, include_markers);
-                let has_markers = features.has_markers;
-                let stroke = shapes::resolve_stroke(element);
-                let needs_general_stroke = features.line_needs_general_stroke;
+                let element_features = element_features(
+                    element,
+                    include_markers && features.has_marker_refs,
+                    features.has_strokes,
+                );
+                let has_markers = element_features.has_markers;
+                let stroke = features
+                    .has_strokes
+                    .then(|| {
+                        shapes::resolve_stroke_with_opacity(element, features.has_opacity_attrs)
+                    })
+                    .flatten();
+                let needs_general_stroke =
+                    stroke.is_some() && element_features.line_needs_general_stroke;
                 let stroke_width = (!needs_general_stroke && (stroke.is_some() || has_markers))
                     .then(|| shapes::resolve_stroke_width(element, viewport));
                 let stroke_style = (needs_general_stroke && (stroke.is_some() || has_markers))
@@ -315,6 +375,7 @@ fn append_element_mesh(
                         element,
                         &shapes::line::to_path(&geo),
                         marker_stroke_width,
+                        features,
                         mesh,
                     );
                 }
@@ -322,13 +383,23 @@ fn append_element_mesh(
         }
         ElementKind::Path => {
             if let Some(geo) = shapes::path::resolve_path(element, viewport) {
-                if let Some(color) = shapes::resolve_fill(element) {
+                if let Some(color) =
+                    shapes::resolve_fill_with_opacity(element, features.has_opacity_attrs)
+                {
                     mesh.append(shapes::path::tessellate_path_fill(&geo, color));
                 }
-                if let Some(color) = shapes::resolve_stroke(element) {
+                if let Some(color) = features
+                    .has_strokes
+                    .then(|| {
+                        shapes::resolve_stroke_with_opacity(element, features.has_opacity_attrs)
+                    })
+                    .flatten()
+                {
                     mesh.append(shapes::path::tessellate_path_stroke(&geo, color));
                 }
-                if element_features(element, include_markers).has_markers {
+                if element_features(element, include_markers && features.has_marker_refs, false)
+                    .has_markers
+                {
                     let stroke_style = shapes::stroke::resolve_stroke_style(element, viewport);
                     append_marker_instances(
                         document,
@@ -336,12 +407,53 @@ fn append_element_mesh(
                         element,
                         geo.path(),
                         stroke_style.width,
+                        features,
                         mesh,
                     );
                 }
             }
         }
         _ => {}
+    }
+}
+
+#[derive(Debug, Default)]
+struct DocumentFeatures {
+    has_strokes: bool,
+    has_marker_refs: bool,
+    has_opacity_attrs: bool,
+}
+
+impl DocumentFeatures {
+    fn scan(document: &Document) -> Self {
+        let mut features = Self::default();
+        let mut stack = vec![document.root()];
+        while let Some(id) = stack.pop() {
+            let node = document.node(id);
+            for (name, value) in &node.element.attributes {
+                match name.as_str() {
+                    "stroke" => {
+                        features.has_strokes |= !value.trim().eq_ignore_ascii_case("none");
+                    }
+                    "marker" | "marker-start" | "marker-mid" | "marker-end" => {
+                        features.has_marker_refs |= !value.trim().eq_ignore_ascii_case("none");
+                    }
+                    "opacity" | "fill-opacity" | "stroke-opacity" => {
+                        features.has_opacity_attrs = true;
+                    }
+                    _ => {}
+                }
+                if features.is_complete() {
+                    return features;
+                }
+            }
+            stack.extend(node.children.iter().rev().copied());
+        }
+        features
+    }
+
+    fn is_complete(&self) -> bool {
+        self.has_strokes && self.has_marker_refs && self.has_opacity_attrs
     }
 }
 
@@ -554,6 +666,7 @@ fn append_marker_instances(
     element: &Element,
     path: &lyon_tessellation::path::Path,
     stroke_width: f32,
+    features: &DocumentFeatures,
     mesh: &mut Mesh,
 ) {
     let refs = markers.marker_refs(document, element);
@@ -570,15 +683,13 @@ fn append_marker_instances(
             width: marker.marker_width,
             height: marker.marker_height,
         };
+        let marker_context = SceneContext {
+            viewport: marker_viewport,
+            markers,
+            features,
+        };
         for child in document.node(marker.node).children.iter().copied() {
-            append_subtree_mesh(
-                document,
-                child,
-                marker_viewport,
-                markers,
-                false,
-                &mut marker_mesh,
-            );
+            append_subtree_mesh(document, child, &marker_context, false, &mut marker_mesh);
         }
         if marker_mesh.is_empty() {
             continue;
@@ -594,22 +705,31 @@ struct ElementFeatures {
     line_needs_general_stroke: bool,
 }
 
-fn element_features(element: &Element, include_markers: bool) -> ElementFeatures {
+fn element_features(
+    element: &Element,
+    check_markers: bool,
+    check_line_stroke: bool,
+) -> ElementFeatures {
+    if !check_markers && !check_line_stroke {
+        return ElementFeatures::default();
+    }
     let mut features = ElementFeatures::default();
     for (name, value) in &element.attributes {
         match name.as_str() {
-            "marker" | "marker-start" | "marker-mid" | "marker-end" if include_markers => {
+            "marker" | "marker-start" | "marker-mid" | "marker-end" if check_markers => {
                 features.has_markers |= !value.trim().eq_ignore_ascii_case("none");
             }
-            "stroke-linecap" => {
+            "stroke-linecap" if check_line_stroke => {
                 features.line_needs_general_stroke |= !value.trim().eq_ignore_ascii_case("butt");
             }
-            "stroke-dasharray" => {
+            "stroke-dasharray" if check_line_stroke => {
                 features.line_needs_general_stroke |= !value.trim().eq_ignore_ascii_case("none");
             }
             _ => {}
         }
-        if features.has_markers && features.line_needs_general_stroke {
+        if (!check_markers || features.has_markers)
+            && (!check_line_stroke || features.line_needs_general_stroke)
+        {
             break;
         }
     }

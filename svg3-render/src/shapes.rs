@@ -60,13 +60,23 @@ pub(crate) const LYON_FLATTENING_TOLERANCE: f32 = 0.1;
 /// and the Stylo cascade are not consulted yet. `fill="none"` yields
 /// `None` (no fill geometry). A missing or unparseable value falls back to
 /// the SVG 1.1 initial value, opaque black.
+#[cfg(test)]
 pub(crate) fn resolve_fill(element: &Element) -> Option<[f32; 4]> {
+    resolve_fill_with_opacity(element, true)
+}
+
+pub(crate) fn resolve_fill_with_opacity(
+    element: &Element,
+    apply_opacity: bool,
+) -> Option<[f32; 4]> {
     let mut color = match element.attributes.get("fill") {
         Some(value) if value.trim().eq_ignore_ascii_case("none") => return None,
         Some(value) => parse_color(value.trim()).unwrap_or(DEFAULT_FILL),
         None => DEFAULT_FILL,
     };
-    color[3] *= resolve_opacity(element, "fill-opacity") * resolve_opacity(element, "opacity");
+    if apply_opacity {
+        color[3] *= resolve_opacity(element, "fill-opacity") * resolve_opacity(element, "opacity");
+    }
     Some(color)
 }
 
@@ -75,13 +85,24 @@ pub(crate) fn resolve_fill(element: &Element) -> Option<[f32; 4]> {
 /// Reads the `stroke` presentation attribute only. Unlike `fill`, SVG 1.1's
 /// initial `stroke` value is `none`, so a missing `stroke`, `stroke="none"`,
 /// or an unrecognised paint produces no stroke geometry.
+#[cfg(test)]
 pub(crate) fn resolve_stroke(element: &Element) -> Option<[f32; 4]> {
+    resolve_stroke_with_opacity(element, true)
+}
+
+pub(crate) fn resolve_stroke_with_opacity(
+    element: &Element,
+    apply_opacity: bool,
+) -> Option<[f32; 4]> {
     let value = element.attributes.get("stroke")?.trim();
     if value.eq_ignore_ascii_case("none") {
         return None;
     }
     let mut color = parse_color(value)?;
-    color[3] *= resolve_opacity(element, "stroke-opacity") * resolve_opacity(element, "opacity");
+    if apply_opacity {
+        color[3] *=
+            resolve_opacity(element, "stroke-opacity") * resolve_opacity(element, "opacity");
+    }
     Some(color)
 }
 
