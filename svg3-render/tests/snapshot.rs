@@ -471,6 +471,30 @@ fn cases() -> Vec<Case> {
             "filter-turbulence-recolour",
             r##"<svg><filter id="green-noise"><feTurbulence baseFrequency="0.08" numOctaves="2" seed="2"/><feColorMatrix type="matrix" values="0 0 0 0 0   1 0 0 0 0   0 0 0 0 0   0 0 0 0 1"/></filter><rect x="10" y="10" width="80" height="80" filter="url(#green-noise)"/></svg>"##,
         ),
+        // Bug guard (review P2): a parameter-wise no-op primitive with a
+        // non-default `in` must still run through the chain. A naive
+        // visibility gate would treat `stdDeviation="0"` as identity and
+        // surface the original *blue* circle; the correct output is a
+        // black SourceAlpha silhouette.
+        Case::square(
+            "filter-source-alpha-zero-blur",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="strip"><feGaussianBlur in="SourceAlpha" stdDeviation="0"/></filter><circle cx="50" cy="50" r="28" fill="blue" filter="url(#strip)"/></svg>"##,
+        ),
+        // Bug guard (review P2): a 2-entry `tableValues="0 1"` is identity.
+        // The previous fixed-4-entry implementation incorrectly stored
+        // `[0, 1, 0, 0]` and would have produced very wrong values for the
+        // upper half of the input range.
+        Case::square(
+            "filter-component-transfer-table-identity",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="t"><feComponentTransfer><feFuncR type="table" tableValues="0 1"/><feFuncG type="table" tableValues="0 1"/><feFuncB type="table" tableValues="0 1"/></feComponentTransfer></filter><rect x="20" y="20" width="60" height="60" fill="#c14b2b" filter="url(#t)"/></svg>"##,
+        ),
+        // Bug guard (review P3): `feSpotLight` used to be silently dropped
+        // and fell back to a default distant light. With proper cone math
+        // the disc shows a bright on-axis hotspot and dark off-axis edges.
+        Case::square(
+            "filter-spot-lighting",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="spot"><feDiffuseLighting surfaceScale="5" diffuseConstant="1" lighting-color="#ffffff"><feSpotLight x="50" y="50" z="40" pointsAtX="50" pointsAtY="50" pointsAtZ="0" specularExponent="4" limitingConeAngle="35"/></feDiffuseLighting></filter><circle cx="50" cy="50" r="28" fill="#888888" filter="url(#spot)"/></svg>"##,
+        ),
         // The canonical SVG sample, rendered at its declared 300×200 size. The
         // `<rect width="100%">` exercises percentage lengths; the `<text>` is
         // parsed but not yet rendered (text rendering is a separate milestone),

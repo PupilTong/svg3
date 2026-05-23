@@ -23,17 +23,23 @@ struct FilterUniform {
     color: vec4<f32>,
     extra: vec4<f32>,
     light: vec4<f32>,
+    light_dir: vec4<f32>,
     lighting: vec4<f32>,
     matrix_r0: vec4<f32>,
     matrix_r1: vec4<f32>,
     matrix_r2: vec4<f32>,
     matrix_r3: vec4<f32>,
     matrix_col4: vec4<f32>,
-    transfer_r: vec4<f32>,
-    transfer_g: vec4<f32>,
-    transfer_b: vec4<f32>,
-    transfer_a: vec4<f32>,
+    transfer_r0: vec4<f32>,
+    transfer_r1: vec4<f32>,
+    transfer_g0: vec4<f32>,
+    transfer_g1: vec4<f32>,
+    transfer_b0: vec4<f32>,
+    transfer_b1: vec4<f32>,
+    transfer_a0: vec4<f32>,
+    transfer_a1: vec4<f32>,
     transfer_kinds: vec4<u32>,
+    transfer_counts: vec4<u32>,
     sigma: f32,
     radius: u32,
     mode: u32,
@@ -224,9 +230,17 @@ fn surface_normal(uv: vec2<f32>) -> vec3<f32> {
     return normalize(vec3<f32>(nx, ny, 1.0));
 }
 
+// `lighting.w` light-source tag: keep in sync with `LIGHT_TYPE_*` constants
+// in `renderer.rs`'s `lighting_uniform` builder.
+const LIGHT_TYPE_DISTANT: f32 = 0.0;
+const LIGHT_TYPE_POINT: f32 = 1.0;
+const LIGHT_TYPE_SPOT: f32 = 2.0;
+
 fn light_vector(uv: vec2<f32>, surface_z: f32) -> vec3<f32> {
-    if (filter_params.lighting.w > 0.5) {
-        // Point light: position in filter pixel space.
+    let kind = filter_params.lighting.w;
+    if (kind >= LIGHT_TYPE_POINT - 0.5) {
+        // Point and spot lights both store an x/y/z position; the light
+        // vector is the unit vector from the surface point toward the light.
         let pos_x = filter_params.light.x * filter_params.texel_size.x;
         let pos_y = filter_params.light.y * filter_params.texel_size.y;
         let pos_z = filter_params.light.z;
@@ -236,11 +250,51 @@ fn light_vector(uv: vec2<f32>, surface_z: f32) -> vec3<f32> {
     return normalize(filter_params.light.xyz);
 }
 
+/// Cone-falloff factor for `<feSpotLight>`. Returns 1.0 for non-spot lights
+/// so the regular diffuse/specular paths are unaffected. Per SVG 1.1 §15.21.1,
+/// the cone factor is `max(-dot(L, axis), 0)^specularExponent`, zero outside
+/// `limitingConeAngle`.
+///
+/// The cone is evaluated in filter-pixel space rather than UV space so the
+/// angle math is dimensionally consistent — the existing diffuse/specular
+/// `light_vector` mixes UV (x, y) with pixel (z), which would degenerate the
+/// cone test for any light positioned above the surface.
+fn spot_cone_factor(uv: vec2<f32>, surface_z: f32) -> f32 {
+    if (filter_params.lighting.w < LIGHT_TYPE_SPOT - 0.5) {
+        return 1.0;
+    }
+    let axis = normalize(filter_params.light_dir.xyz);
+    let surface_pixel = vec3<f32>(
+        uv.x / filter_params.texel_size.x,
+        uv.y / filter_params.texel_size.y,
+        surface_z,
+    );
+    let light_pixel = filter_params.light.xyz;
+    let diff = surface_pixel - light_pixel;
+    if (dot(diff, diff) <= 1e-6) {
+        // Surface coincides with the light origin — fully lit.
+        return 1.0;
+    }
+    let to_surface = normalize(diff);
+    let cos_angle = dot(to_surface, axis);
+    if (cos_angle <= 0.0) {
+        return 0.0;
+    }
+    let cos_limit = filter_params.light_dir.w;
+    // `cos_limit < 0` encodes "no limiting cone".
+    if (cos_limit >= 0.0 && cos_angle < cos_limit) {
+        return 0.0;
+    }
+    let exponent = filter_params.extra.x;
+    return pow(cos_angle, exponent);
+}
+
 @fragment
 fn fs_lighting(in: VertexOutput) -> @location(0) vec4<f32> {
     let normal = surface_normal(in.uv);
     let surface_z = sample_in1(in.uv).a * filter_params.lighting.x;
     let light_dir = light_vector(in.uv, surface_z);
+    let cone = spot_cone_factor(in.uv, surface_z);
     let lighting_color = filter_params.color;
     let constant = filter_params.lighting.y;
     let specular = filter_params.lighting.z > 0.5;
@@ -252,14 +306,14 @@ fn fs_lighting(in: VertexOutput) -> @location(0) vec4<f32> {
         let half_vec = normalize(light_dir + view);
         let n_dot_h = max(dot(normal, half_vec), 0.0);
         let exponent = filter_params.light.w;
-        let intensity = constant * pow(n_dot_h, exponent);
+        let intensity = constant * pow(n_dot_h, exponent) * cone;
         let rgb = lighting_color.rgb * intensity;
         // Specular alpha = max(R, G, B), per SVG 1.1 §15.22.
         let alpha = clamp(max(rgb.r, max(rgb.g, rgb.b)), 0.0, 1.0);
         return vec4<f32>(clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0)) * alpha, alpha);
     } else {
         let n_dot_l = max(dot(normal, light_dir), 0.0);
-        let intensity = constant * n_dot_l;
+        let intensity = constant * n_dot_l * cone;
         let rgb = clamp(lighting_color.rgb * intensity, vec3<f32>(0.0), vec3<f32>(1.0));
         // Diffuse output alpha is opaque per SVG 1.1 §15.21.
         return vec4<f32>(rgb, 1.0);
@@ -383,36 +437,54 @@ fn fs_convolve(in: VertexOutput) -> @location(0) vec4<f32> {
 
 // ---- feComponentTransfer --------------------------------------------------
 
-fn transfer_apply(value: f32, kind: u32, params: vec4<f32>) -> f32 {
+// Index up to eight floats stored in two vec4s, returning zero out of range.
+fn table_pick(p0: vec4<f32>, p1: vec4<f32>, idx: i32) -> f32 {
+    if (idx == 0) { return p0.x; }
+    if (idx == 1) { return p0.y; }
+    if (idx == 2) { return p0.z; }
+    if (idx == 3) { return p0.w; }
+    if (idx == 4) { return p1.x; }
+    if (idx == 5) { return p1.y; }
+    if (idx == 6) { return p1.z; }
+    if (idx == 7) { return p1.w; }
+    return 0.0;
+}
+
+fn transfer_apply(value: f32, kind: u32, p0: vec4<f32>, p1: vec4<f32>, count: u32) -> f32 {
     if (kind == 0u) {
         // Identity.
         return value;
     }
     if (kind == 3u) {
-        // Linear: y = slope * C + intercept.
-        return params.x * value + params.y;
+        // Linear: y = slope * C + intercept (params in p0.x / p0.y).
+        return p0.x * value + p0.y;
     }
     if (kind == 4u) {
-        // Gamma: y = amplitude * C^exponent + offset.
-        return params.x * pow(max(value, 0.0), params.y) + params.z;
+        // Gamma: y = amplitude * C^exponent + offset (params in p0.x / p0.y / p0.z).
+        return p0.x * pow(max(value, 0.0), p0.y) + p0.z;
     }
-    // Table / discrete share the same up-to-four-entry storage.
-    let raw = vec4<f32>(params.x, params.y, params.z, params.w);
+    // Table / discrete share the same up-to-eight-entry storage.
+    let n = i32(count);
+    if (n < 2) {
+        return value;
+    }
     let v = clamp(value, 0.0, 1.0);
     if (kind == 1u) {
-        // Table: piecewise-linear over 4 control points spanning [0, 1].
-        let scaled = v * 3.0;
-        let i0 = i32(floor(scaled));
-        let i1 = min(i0 + 1, 3);
-        let t = scaled - f32(i0);
-        let a = raw[clamp(i0, 0, 3)];
-        let b = raw[i1];
+        // Table: piecewise-linear over N control points spanning [0, 1].
+        // N points define N - 1 segments.
+        let segments = f32(n - 1);
+        let scaled = v * segments;
+        let i0 = clamp(i32(floor(scaled)), 0, n - 2);
+        let i1 = i0 + 1;
+        let t = clamp(scaled - f32(i0), 0.0, 1.0);
+        let a = table_pick(p0, p1, i0);
+        let b = table_pick(p0, p1, i1);
         return mix(a, b, t);
     }
     if (kind == 2u) {
-        // Discrete: piecewise-constant over 4 buckets.
-        let idx = i32(clamp(v * 4.0, 0.0, 3.999));
-        return raw[idx];
+        // Discrete: piecewise-constant over N equal buckets.
+        let idx = clamp(i32(floor(v * f32(n))), 0, n - 1);
+        return table_pick(p0, p1, idx);
     }
     return value;
 }
@@ -422,10 +494,27 @@ fn fs_component_transfer(in: VertexOutput) -> @location(0) vec4<f32> {
     let src = sample_in1(in.uv);
     let straight = unpremultiply(src);
     let kinds = filter_params.transfer_kinds;
-    let r = transfer_apply(straight.r, kinds.x, filter_params.transfer_r);
-    let g = transfer_apply(straight.g, kinds.y, filter_params.transfer_g);
-    let b = transfer_apply(straight.b, kinds.z, filter_params.transfer_b);
-    let a = transfer_apply(straight.a, kinds.w, filter_params.transfer_a);
+    let counts = filter_params.transfer_counts;
+    let r = transfer_apply(
+        straight.r, kinds.x,
+        filter_params.transfer_r0, filter_params.transfer_r1,
+        counts.x,
+    );
+    let g = transfer_apply(
+        straight.g, kinds.y,
+        filter_params.transfer_g0, filter_params.transfer_g1,
+        counts.y,
+    );
+    let b = transfer_apply(
+        straight.b, kinds.z,
+        filter_params.transfer_b0, filter_params.transfer_b1,
+        counts.z,
+    );
+    let a = transfer_apply(
+        straight.a, kinds.w,
+        filter_params.transfer_a0, filter_params.transfer_a1,
+        counts.w,
+    );
     let result = clamp(vec4<f32>(r, g, b, a), vec4<f32>(0.0), vec4<f32>(1.0));
     return premultiply(result);
 }

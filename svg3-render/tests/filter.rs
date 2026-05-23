@@ -507,6 +507,117 @@ fn named_result_can_be_referenced_later() {
 }
 
 #[test]
+fn zero_deviation_blur_with_source_alpha_still_strips_rgb() {
+    // Bug guard (review P2): a primitive whose parameters are no-ops but
+    // whose `in` is non-default must still run through the chain. A naive
+    // "if no primitive is visible, just composite the source" gate would
+    // surface the original blue circle here; the correct behaviour is to
+    // run the chain, take `SourceAlpha`, blur it by zero (identity), and
+    // composite the (R=0, G=0, B=0, A=src.a) silhouette.
+    let Some(renderer) = skip_or_renderer("zero_deviation_blur_with_source_alpha_still_strips_rgb")
+    else {
+        return;
+    };
+    let image = render(
+        &renderer,
+        r##"<svg width="64" height="64"><filter id="strip"><feGaussianBlur in="SourceAlpha" stdDeviation="0"/></filter><circle cx="32" cy="32" r="20" fill="blue" filter="url(#strip)"/></svg>"##,
+    );
+    let centre = image.pixel(32, 32);
+    assert!(
+        centre[3] > 200 && centre[0] < 30 && centre[1] < 30 && centre[2] < 30,
+        "SourceAlpha + zero blur should leave an alpha-only silhouette, got {centre:?}"
+    );
+}
+
+#[test]
+fn component_transfer_table_with_two_entries_is_identity() {
+    // Bug guard (review P2): `tableValues="0 1"` as a piecewise-linear
+    // table is the identity function. The previous 4-entry-only impl
+    // stored `[0, 1, 0, 0]` and rendered the upper input range as black.
+    let Some(renderer) = skip_or_renderer("component_transfer_table_with_two_entries_is_identity")
+    else {
+        return;
+    };
+    let image = render(
+        &renderer,
+        r##"<svg width="64" height="64"><filter id="ident"><feComponentTransfer><feFuncR type="table" tableValues="0 1"/><feFuncG type="table" tableValues="0 1"/><feFuncB type="table" tableValues="0 1"/></feComponentTransfer></filter><rect x="16" y="16" width="32" height="32" fill="#cccccc" filter="url(#ident)"/></svg>"##,
+    );
+    // The grey rect must come through near-unchanged (small variation
+    // tolerated for sRGB rounding).
+    let centre = image.pixel(32, 32);
+    let max = centre[0].max(centre[1]).max(centre[2]);
+    let min = centre[0].min(centre[1]).min(centre[2]);
+    assert!(
+        centre[3] > 200 && min > 180 && (max - min) < 12,
+        "table=\"0 1\" should be identity on a light grey rect, got {centre:?}"
+    );
+}
+
+#[test]
+fn component_transfer_discrete_with_three_buckets() {
+    // A 3-bucket discrete function maps inputs [0, 1/3) -> 0,
+    // [1/3, 2/3) -> 0.5, [2/3, 1] -> 1. The previous fixed-4-bucket
+    // implementation would have used boundaries at 0.25 / 0.5 / 0.75 with
+    // a `0` in the fourth bucket, which is wrong for any non-4-entry table.
+    let Some(renderer) = skip_or_renderer("component_transfer_discrete_with_three_buckets") else {
+        return;
+    };
+    let image = render(
+        &renderer,
+        r##"<svg width="64" height="64"><filter id="d"><feComponentTransfer><feFuncR type="discrete" tableValues="0 0.5 1"/><feFuncG type="discrete" tableValues="0 0.5 1"/><feFuncB type="discrete" tableValues="0 0.5 1"/></feComponentTransfer></filter><rect x="16" y="16" width="32" height="32" fill="#ffffff" filter="url(#d)"/></svg>"##,
+    );
+    // White (1.0) input falls in the top bucket -> 1.0 output.
+    let centre = image.pixel(32, 32);
+    assert!(
+        centre[0] > 240 && centre[1] > 240 && centre[2] > 240 && centre[3] > 200,
+        "discrete \"0 0.5 1\" on white should output white, got {centre:?}"
+    );
+}
+
+#[test]
+fn spot_light_inside_cone_illuminates_surface() {
+    // Bug guard (review P3): feSpotLight was being silently dropped. The
+    // spotlight here is centred over the disc and pointed straight down,
+    // so the disc centre lies INSIDE the limiting cone and must receive
+    // visible illumination — a regression to "fall back to distant light"
+    // would also illuminate, but the *outside-cone* sibling test below
+    // ensures the cone math is honoured.
+    let Some(renderer) = skip_or_renderer("spot_light_inside_cone_illuminates_surface") else {
+        return;
+    };
+    let image = render(
+        &renderer,
+        r##"<svg width="64" height="64"><filter id="spot"><feDiffuseLighting surfaceScale="5" diffuseConstant="1" lighting-color="#ffffff"><feSpotLight x="32" y="32" z="40" pointsAtX="32" pointsAtY="32" pointsAtZ="0" specularExponent="2" limitingConeAngle="45"/></feDiffuseLighting></filter><circle cx="32" cy="32" r="22" fill="#888888" filter="url(#spot)"/></svg>"##,
+    );
+    let centre = image.pixel(32, 32);
+    assert!(
+        centre[3] > 200 && centre[0] > 60,
+        "spot-lit centre should be visible, got {centre:?}"
+    );
+}
+
+#[test]
+fn spot_light_limiting_cone_excludes_pixels_outside() {
+    // The cone is narrow (5°) and aimed at one quadrant — pixels far from
+    // the aim direction should fall to zero illumination.
+    let Some(renderer) = skip_or_renderer("spot_light_limiting_cone_excludes_pixels_outside")
+    else {
+        return;
+    };
+    let image = render(
+        &renderer,
+        r##"<svg width="64" height="64"><filter id="spot"><feDiffuseLighting surfaceScale="5" diffuseConstant="1" lighting-color="#ffffff"><feSpotLight x="10" y="10" z="20" pointsAtX="10" pointsAtY="10" pointsAtZ="0" specularExponent="2" limitingConeAngle="5"/></feDiffuseLighting></filter><rect x="0" y="0" width="64" height="64" fill="#888888" filter="url(#spot)"/></svg>"##,
+    );
+    // The far corner is far outside the 5° cone — RGB should be near black
+    // (diffuse output is opaque per SVG 1.1, so alpha stays ~255).
+    let far_corner = image.pixel(60, 60);
+    assert!(
+        far_corner[0] < 32 && far_corner[1] < 32 && far_corner[2] < 32,
+        "pixel outside the spotlight cone should be unlit, got {far_corner:?}"
+    );
+}
+
+#[test]
 fn primitive_chain_applies_blur_then_color_matrix() {
     let Some(renderer) = skip_or_renderer("primitive_chain_applies_blur_then_color_matrix") else {
         return;

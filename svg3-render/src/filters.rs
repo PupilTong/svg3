@@ -178,6 +178,17 @@ pub(crate) enum LightSource {
     Distant([f32; 3]),
     /// `<fePointLight>` — a position in filter space.
     Point([f32; 3]),
+    /// `<feSpotLight>` — a positional cone light. `position` is the light
+    /// origin; `direction` is the unit vector from the light toward
+    /// `pointsAt`; `cone_exponent` is the SVG `specularExponent` cone
+    /// falloff; `cos_limit` is `cos(limitingConeAngle)` (or `-1.0` when
+    /// no limit is set).
+    Spot {
+        position: [f32; 3],
+        direction: [f32; 3],
+        cone_exponent: f32,
+        cos_limit: f32,
+    },
 }
 
 /// Resolved `<feMorphology>` data.
@@ -248,29 +259,42 @@ pub(crate) struct ComponentTransfer {
     pub(crate) a: TransferFunction,
 }
 
+/// Maximum number of `tableValues` entries supported per channel. SVG places
+/// no upper bound, but practical filters use 2–4 entries; eight is generous
+/// without ballooning the uniform.
+pub(crate) const TRANSFER_TABLE_MAX: usize = 8;
+
 /// One per-channel transfer function for `<feComponentTransfer>`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct TransferFunction {
     /// Function kind tag — see `FN_*` constants.
     pub(crate) kind: u32,
-    /// Up to four parameters: slope/intercept (linear), amplitude/exponent/offset (gamma),
-    /// or the first four entries of the table (table/discrete).
-    pub(crate) params: [f32; 4],
+    /// Up to [`TRANSFER_TABLE_MAX`] floats. Layout depends on `kind`:
+    ///
+    /// - `FN_LINEAR`: `[slope, intercept, 0, 0, …]`.
+    /// - `FN_GAMMA`:  `[amplitude, exponent, offset, 0, …]`.
+    /// - `FN_TABLE` / `FN_DISCRETE`: the first `count` slots hold the parsed
+    ///   `tableValues`; the remainder are zero-padded.
+    pub(crate) table: [f32; TRANSFER_TABLE_MAX],
+    /// Valid entry count for `FN_TABLE` / `FN_DISCRETE`. Zero for the
+    /// scalar function kinds.
+    pub(crate) count: u32,
 }
 
 impl TransferFunction {
     /// SVG-1.1 default: identity (`y = C`).
     pub(crate) const IDENTITY: Self = Self {
         kind: FN_IDENTITY,
-        params: [0.0; 4],
+        table: [0.0; TRANSFER_TABLE_MAX],
+        count: 0,
     };
 }
 
 /// Identity transfer function: `y = C`.
 pub(crate) const FN_IDENTITY: u32 = 0;
-/// Table transfer function: linear interpolation over up to four control points.
+/// Table transfer function: piecewise-linear over `count` control points.
 pub(crate) const FN_TABLE: u32 = 1;
-/// Discrete transfer function: stepped over up to four control points.
+/// Discrete transfer function: piecewise-constant over `count` buckets.
 pub(crate) const FN_DISCRETE: u32 = 2;
 /// Linear transfer function: `y = slope * C + intercept`.
 pub(crate) const FN_LINEAR: u32 = 3;
@@ -664,6 +688,55 @@ fn parse_light_source(element: &Element) -> Option<LightSource> {
                 .unwrap_or(0.0);
             Some(LightSource::Point([x, y, z]))
         }
+        ElementKind::FeSpotLight => {
+            let read = |name: &str, default: f32| {
+                element
+                    .attributes
+                    .get(name)
+                    .and_then(|s| s.trim().parse::<f32>().ok())
+                    .unwrap_or(default)
+            };
+            let position = [read("x", 0.0), read("y", 0.0), read("z", 0.0)];
+            let aim = [
+                read("pointsAtX", 0.0),
+                read("pointsAtY", 0.0),
+                read("pointsAtZ", 0.0),
+            ];
+            let mut dir = [
+                aim[0] - position[0],
+                aim[1] - position[1],
+                aim[2] - position[2],
+            ];
+            let length = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
+            if length > 1e-6 {
+                dir[0] /= length;
+                dir[1] /= length;
+                dir[2] /= length;
+            } else {
+                // SVG-1.1 §15.21.1: when the light points at itself, fall
+                // back to the +Z axis so the cone still has a well-defined
+                // orientation.
+                dir = [0.0, 0.0, 1.0];
+            }
+            let cone_exponent = element
+                .attributes
+                .get("specularExponent")
+                .and_then(|s| s.trim().parse::<f32>().ok())
+                .unwrap_or(1.0)
+                .max(0.0);
+            let cos_limit = element
+                .attributes
+                .get("limitingConeAngle")
+                .and_then(|s| s.trim().parse::<f32>().ok())
+                .map(|deg| deg.to_radians().cos())
+                .unwrap_or(-1.0);
+            Some(LightSource::Spot {
+                position,
+                direction: dir,
+                cone_exponent,
+                cos_limit,
+            })
+        }
         _ => None,
     }
 }
@@ -850,24 +923,26 @@ fn parse_transfer_function(element: &Element) -> TransferFunction {
             } else {
                 FN_DISCRETE
             };
-            let table = element
+            let table_values = element
                 .attributes
                 .get("tableValues")
                 .map(|value| parse_numbers(value))
                 .unwrap_or_default();
-            let mut params = [0.0_f32; 4];
-            for (slot, value) in params.iter_mut().zip(table.iter()) {
-                *slot = *value;
-            }
-            // For discrete with 0 entries SVG falls back to identity; same
-            // for table. Mirror that here so the shader can just look at
-            // params and not need to special-case empty tables.
-            if table.is_empty() {
+            // SVG 1.1 §15.11: a table with fewer than two entries (or an
+            // empty `tableValues`) is identity. Mirror that here so the
+            // shader can treat any `count >= 2` as a valid table.
+            if table_values.len() < 2 {
                 return TransferFunction::IDENTITY;
             }
+            let mut table = [0.0_f32; TRANSFER_TABLE_MAX];
+            for (slot, value) in table.iter_mut().zip(table_values.iter()) {
+                *slot = *value;
+            }
+            let count = table_values.len().min(TRANSFER_TABLE_MAX) as u32;
             TransferFunction {
                 kind: kind_tag,
-                params,
+                table,
+                count,
             }
         }
         "linear" => {
@@ -881,9 +956,13 @@ fn parse_transfer_function(element: &Element) -> TransferFunction {
                 .get("intercept")
                 .and_then(|s| s.trim().parse::<f32>().ok())
                 .unwrap_or(0.0);
+            let mut table = [0.0_f32; TRANSFER_TABLE_MAX];
+            table[0] = slope;
+            table[1] = intercept;
             TransferFunction {
                 kind: FN_LINEAR,
-                params: [slope, intercept, 0.0, 0.0],
+                table,
+                count: 0,
             }
         }
         "gamma" => {
@@ -902,9 +981,14 @@ fn parse_transfer_function(element: &Element) -> TransferFunction {
                 .get("offset")
                 .and_then(|s| s.trim().parse::<f32>().ok())
                 .unwrap_or(0.0);
+            let mut table = [0.0_f32; TRANSFER_TABLE_MAX];
+            table[0] = amplitude;
+            table[1] = exponent;
+            table[2] = offset;
             TransferFunction {
                 kind: FN_GAMMA,
-                params: [amplitude, exponent, offset, 0.0],
+                table,
+                count: 0,
             }
         }
         _ => TransferFunction::IDENTITY,
@@ -1115,10 +1199,50 @@ mod tests {
             panic!("expected ComponentTransfer");
         };
         assert_eq!(t.r.kind, FN_LINEAR);
-        assert_eq!(t.r.params[..2], [2.0, -0.5]);
+        assert_eq!(t.r.table[..2], [2.0, -0.5]);
         assert_eq!(t.a.kind, FN_GAMMA);
-        assert_eq!(t.a.params[..3], [1.0, 0.5, 0.0]);
+        assert_eq!(t.a.table[..3], [1.0, 0.5, 0.0]);
         assert_eq!(t.g.kind, FN_IDENTITY);
+    }
+
+    #[test]
+    fn component_transfer_table_preserves_arbitrary_length() {
+        // A two-entry `table` is a piecewise-linear interpolation from
+        // the first value at C=0 to the second value at C=1 — the
+        // identity function when the entries are `0 1`. With the old
+        // 4-slot truncation this would have produced nonsense values.
+        let document = svg3_dom::parse(
+            r##"<svg><filter id="t"><feComponentTransfer><feFuncR type="table" tableValues="0 1"/><feFuncG type="discrete" tableValues="0 0.5 1"/></feComponentTransfer></filter><rect filter="url(#t)"/></svg>"##,
+        )
+        .unwrap();
+        let definitions = FilterDefinitions::collect(&document);
+        let rect_id = document.node(document.root()).children[1];
+        let chain = definitions.resolve(document.element(rect_id)).unwrap();
+        let FilterPrimitiveKind::ComponentTransfer(t) = &chain[0].kind else {
+            panic!("expected ComponentTransfer");
+        };
+        assert_eq!(t.r.kind, FN_TABLE);
+        assert_eq!(t.r.count, 2);
+        assert_eq!(t.r.table[..2], [0.0, 1.0]);
+        assert_eq!(t.g.kind, FN_DISCRETE);
+        assert_eq!(t.g.count, 3);
+        assert_eq!(t.g.table[..3], [0.0, 0.5, 1.0]);
+    }
+
+    #[test]
+    fn component_transfer_table_with_one_entry_is_identity() {
+        let document = svg3_dom::parse(
+            r##"<svg><filter id="t"><feComponentTransfer><feFuncR type="table" tableValues="0.5"/></feComponentTransfer></filter><rect filter="url(#t)"/></svg>"##,
+        )
+        .unwrap();
+        let definitions = FilterDefinitions::collect(&document);
+        let rect_id = document.node(document.root()).children[1];
+        let chain = definitions.resolve(document.element(rect_id)).unwrap();
+        let FilterPrimitiveKind::ComponentTransfer(t) = &chain[0].kind else {
+            panic!("expected ComponentTransfer");
+        };
+        // SVG-1.1 §15.11: a table with fewer than two entries is identity.
+        assert_eq!(t.r.kind, FN_IDENTITY);
     }
 
     #[test]

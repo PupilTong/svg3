@@ -64,17 +64,23 @@ struct FilterUniform {
     color: [f32; 4],
     extra: [f32; 4],
     light: [f32; 4],
+    light_dir: [f32; 4],
     lighting: [f32; 4],
     matrix_r0: [f32; 4],
     matrix_r1: [f32; 4],
     matrix_r2: [f32; 4],
     matrix_r3: [f32; 4],
     matrix_col4: [f32; 4],
-    transfer_r: [f32; 4],
-    transfer_g: [f32; 4],
-    transfer_b: [f32; 4],
-    transfer_a: [f32; 4],
+    transfer_r0: [f32; 4],
+    transfer_r1: [f32; 4],
+    transfer_g0: [f32; 4],
+    transfer_g1: [f32; 4],
+    transfer_b0: [f32; 4],
+    transfer_b1: [f32; 4],
+    transfer_a0: [f32; 4],
+    transfer_a1: [f32; 4],
     transfer_kinds: [u32; 4],
+    transfer_counts: [u32; 4],
     sigma: f32,
     radius: u32,
     mode: u32,
@@ -176,26 +182,36 @@ fn turbulence_uniform(extent: wgpu::Extent3d, t: Turbulence) -> FilterUniform {
 }
 
 fn lighting_uniform(extent: wgpu::Extent3d, l: Lighting, specular: bool) -> FilterUniform {
+    // `lighting.w` encodes the light source kind: 0 = distant, 1 = point,
+    // 2 = spot. Must stay in sync with `LIGHT_TYPE_*` constants in
+    // `filter.wgsl`.
     let mut uniform = FilterUniform::empty(extent.width, extent.height);
     uniform.color = l.lighting_color;
+    let is_specular = if specular { 1.0 } else { 0.0 };
     match l.light {
         LightSource::Distant(dir) => {
             uniform.light = [dir[0], dir[1], dir[2], l.specular_exponent];
-            uniform.lighting = [
-                l.surface_scale,
-                l.constant,
-                if specular { 1.0 } else { 0.0 },
-                0.0,
-            ];
+            uniform.lighting = [l.surface_scale, l.constant, is_specular, 0.0];
         }
         LightSource::Point(pos) => {
             uniform.light = [pos[0], pos[1], pos[2], l.specular_exponent];
-            uniform.lighting = [
-                l.surface_scale,
-                l.constant,
-                if specular { 1.0 } else { 0.0 },
-                1.0,
-            ];
+            uniform.lighting = [l.surface_scale, l.constant, is_specular, 1.0];
+        }
+        LightSource::Spot {
+            position,
+            direction,
+            cone_exponent,
+            cos_limit,
+        } => {
+            uniform.light = [position[0], position[1], position[2], l.specular_exponent];
+            // `light_dir.xyz` carries the cone axis (light -> pointsAt);
+            // `light_dir.w` carries `cos(limitingConeAngle)` or `-1.0` if
+            // the user did not constrain the cone.
+            uniform.light_dir = [direction[0], direction[1], direction[2], cos_limit];
+            uniform.lighting = [l.surface_scale, l.constant, is_specular, 2.0];
+            // `extra.x` is reused as the cone-falloff exponent — distinct
+            // from the surface Phong exponent stored in `light.w`.
+            uniform.extra[0] = cone_exponent;
         }
     }
     uniform
@@ -253,17 +269,40 @@ fn component_transfer_uniform(
     transfer: ComponentTransfer,
 ) -> FilterUniform {
     let mut uniform = FilterUniform::empty(extent.width, extent.height);
-    uniform.transfer_r = transfer.r.params;
-    uniform.transfer_g = transfer.g.params;
-    uniform.transfer_b = transfer.b.params;
-    uniform.transfer_a = transfer.a.params;
+    let (r0, r1) = split_transfer_table(&transfer.r.table);
+    let (g0, g1) = split_transfer_table(&transfer.g.table);
+    let (b0, b1) = split_transfer_table(&transfer.b.table);
+    let (a0, a1) = split_transfer_table(&transfer.a.table);
+    uniform.transfer_r0 = r0;
+    uniform.transfer_r1 = r1;
+    uniform.transfer_g0 = g0;
+    uniform.transfer_g1 = g1;
+    uniform.transfer_b0 = b0;
+    uniform.transfer_b1 = b1;
+    uniform.transfer_a0 = a0;
+    uniform.transfer_a1 = a1;
     uniform.transfer_kinds = [
         transfer.r.kind,
         transfer.g.kind,
         transfer.b.kind,
         transfer.a.kind,
     ];
+    uniform.transfer_counts = [
+        transfer.r.count,
+        transfer.g.count,
+        transfer.b.count,
+        transfer.a.count,
+    ];
     uniform
+}
+
+/// Split an 8-entry transfer table into two `vec4` halves matching the WGSL
+/// `transfer_<c>0` / `transfer_<c>1` layout.
+fn split_transfer_table(table: &[f32; 8]) -> ([f32; 4], [f32; 4]) {
+    (
+        [table[0], table[1], table[2], table[3]],
+        [table[4], table[5], table[6], table[7]],
+    )
 }
 
 impl TransformUniform {
@@ -1579,14 +1618,16 @@ mod tests {
 
     #[test]
     fn filter_uniform_matches_wgsl_layout() {
-        // The shared filter uniform packs:
-        //   texel_size(2) + direction(2)                        = 4 floats
-        //   + color + extra + light + lighting                  = 4 * 4 = 16 floats
-        //   + matrix rows r0..r3 + matrix_col4                  = 5 * 4 = 20 floats
-        //   + transfer_r + g + b + a + transfer_kinds(u32 ×4)   = 5 * 4 = 20 (4-byte words)
-        //   + sigma, radius, mode, flags                        = 4 (4-byte words)
-        // Total = 64 * 4 = 256 bytes, matching WGSL std140-style alignment.
-        assert_eq!(std::mem::size_of::<FilterUniform>(), 256);
+        // The shared filter uniform packs (16-byte-aligned vec4 blocks):
+        //   texel_size(2) + direction(2)                                = 4 floats
+        //   + color + extra + light + light_dir + lighting              = 5 * 4 = 20 floats
+        //   + matrix rows r0..r3 + matrix_col4                          = 5 * 4 = 20 floats
+        //   + 8 transfer halves (transfer_<rgba>{0,1})                  = 8 * 4 = 32 floats
+        //   + transfer_kinds(u32×4) + transfer_counts(u32×4)            = 2 * 4 = 8 (4-byte words)
+        //   + sigma, radius, mode, flags                                = 4 (4-byte words)
+        // Total = 88 * 4 = 352 bytes; a multiple of 16, satisfying
+        // WGSL std140-style alignment.
+        assert_eq!(std::mem::size_of::<FilterUniform>(), 352);
     }
 
     #[test]

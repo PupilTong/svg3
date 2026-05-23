@@ -7,7 +7,7 @@
 
 use svg3_dom::{Document, ElementKind};
 
-use crate::filters::{FilterDefinitions, FilterPrimitive, FilterPrimitiveKind};
+use crate::filters::{FilterDefinitions, FilterInput, FilterPrimitive, FilterPrimitiveKind};
 use crate::shapes;
 use crate::{Mesh, Viewport};
 
@@ -82,7 +82,20 @@ fn append_render_ops(
     if let Some(chain) = filters.resolve(&node.element) {
         let mut filtered_mesh = Mesh::default();
         append_subtree_mesh(document, id, viewport, &mut filtered_mesh);
-        let visible = chain.iter().any(FilterPrimitive::is_visible);
+        // A primitive affects the chain output if either its parameters are
+        // non-identity OR its DAG wiring is non-default. The wiring matters
+        // because e.g. `<feGaussianBlur in="SourceAlpha" stdDeviation="0"/>`
+        // is parameter-wise a no-op blur but still has to run — it must
+        // replace the RGB with SourceAlpha's `(0, 0, 0, src.a)`. A primitive
+        // with a `result` attribute is also "live" since a later primitive
+        // might reference it.
+        let affects_output = |primitive: &FilterPrimitive| {
+            primitive.is_visible()
+                || !matches!(primitive.input, FilterInput::Default)
+                || !matches!(primitive.input2, FilterInput::Default)
+                || primitive.result.is_some()
+        };
+        let visible = chain.iter().any(affects_output);
         let generator = chain.iter().any(|primitive| {
             matches!(
                 primitive.kind,
