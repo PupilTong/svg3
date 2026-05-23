@@ -1,10 +1,11 @@
 //! `svg3-macos` — native macOS demo window for svg3.
 //!
 //! Opens a Cocoa NSWindow via winit, accepts an SVG string through a macOS
-//! dialog, and draws the currently implemented 2D shape geometry
-//! into a Metal-backed wgpu surface. The document is viewed through an orbit
-//! camera the user can move: drag or the arrow keys to orbit, scroll to
-//! zoom, `R` to reset.
+//! dialog, and draws the currently implemented 2D shape geometry — including
+//! referenced `<feGaussianBlur>` filters — into a Metal-backed wgpu surface
+//! through [`Renderer::encode_document`], the same GPU path the headless
+//! renderer uses. The document is viewed through an orbit camera the user
+//! can move: drag or the arrow keys to orbit, scroll to zoom, `R` to reset.
 
 mod camera;
 
@@ -13,7 +14,8 @@ use std::process::Command;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
-use svg3_render::{build_scene, document_viewport, GpuScene, RenderConfig, Renderer, Viewport};
+use svg3_dom::Document;
+use svg3_render::{clear_target, document_viewport, RenderConfig, Renderer, Viewport};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalSize};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -52,13 +54,14 @@ const DEFAULT_SVG: &str = r##"<svg><rect x="40" y="40" width="220" height="130" 
 struct Gfx {
     window: Arc<Window>,
     surface: wgpu::Surface<'static>,
-    /// Shared renderer: owns the wgpu device, queue and render pipeline.
+    /// Shared renderer: owns the wgpu device, queue and render pipelines.
+    /// Drives every frame through [`Renderer::encode_document`] — the same
+    /// GPU path the headless renderer uses.
     renderer: Renderer,
     config: wgpu::SurfaceConfiguration,
-    /// The tessellated scene paired with the document viewport it was framed
-    /// against — `GpuScene` is GPU-only, so the viewport rides alongside it.
-    /// `None` when the document has no supported shapes.
-    scene: Option<(GpuScene, Viewport)>,
+    /// The parsed document paired with the document viewport for percentage
+    /// length resolution. `None` until the first successful parse.
+    document: Option<(Document, Viewport)>,
     svg_source: String,
     /// The orbit camera the document is viewed through.
     camera: OrbitCamera,
@@ -113,7 +116,7 @@ impl Gfx {
             surface,
             renderer,
             config,
-            scene: None,
+            document: None,
             svg_source: String::new(),
             camera: OrbitCamera::framing(Viewport {
                 width: width as f32,
@@ -134,7 +137,11 @@ impl Gfx {
         self.config.width = width;
         self.config.height = height;
         self.surface.configure(self.renderer.device(), &self.config);
-        self.rebuild_scene();
+        // A resize changes the surface dimensions percentage lengths resolve
+        // against. The parsed document stays valid; only the viewport needs
+        // refreshing so the per-frame walk sees the new size.
+        self.refresh_viewport();
+        self.window.request_redraw();
     }
 
     fn render(&mut self) {
@@ -163,38 +170,18 @@ impl Gfx {
             self.renderer
                 .device()
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("frame encoder"),
+                    label: Some("svg3 frame encoder"),
                 });
-        {
-            let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("clear pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(CLEAR_COLOR),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                ..Default::default()
-            });
-        }
-        if let Some((scene, _viewport)) = &self.scene {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("shape pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                ..Default::default()
-            });
-            self.renderer.draw(&mut pass, scene);
+        clear_target(&mut encoder, &view, CLEAR_COLOR, "svg3 frame clear pass");
+        if let Some((document, viewport)) = &self.document {
+            self.renderer.encode_document(
+                document,
+                *viewport,
+                self.view_projection(*viewport),
+                &view,
+                self.target_extent(),
+                &mut encoder,
+            );
         }
         self.renderer
             .queue()
@@ -206,19 +193,14 @@ impl Gfx {
         self.svg_source = source;
         match svg3_dom::parse(&self.svg_source) {
             Ok(document) => {
-                self.scene = self.build_draw_scene(&document);
-                match self.scene.as_ref().map(|(_, viewport)| *viewport) {
-                    Some(viewport) => {
-                        // A freshly loaded document gets a head-on framing.
-                        self.camera.reset(viewport);
-                        self.reproject();
-                        self.set_status("rendered");
-                    }
-                    None => self.set_status("no supported shapes"),
-                }
+                let viewport = document_viewport(&document, self.target_viewport());
+                // A freshly loaded document gets a head-on framing.
+                self.camera.reset(viewport);
+                self.document = Some((document, viewport));
+                self.set_status("rendered");
             }
             Err(e) => {
-                self.scene = None;
+                self.document = None;
                 self.set_status(&format!("parse error: {e}"));
                 log::error!("failed to parse SVG input: {e}");
             }
@@ -226,32 +208,40 @@ impl Gfx {
         self.window.request_redraw();
     }
 
-    fn rebuild_scene(&mut self) {
-        // A resize re-tessellates (percentage lengths track the viewport)
-        // but keeps the camera where the user left it.
-        self.scene = match svg3_dom::parse(&self.svg_source) {
-            Ok(document) => self.build_draw_scene(&document),
-            Err(_) => None,
+    /// Recompute the document viewport from the current target size.
+    ///
+    /// Called when the surface resizes — the parsed document is unchanged
+    /// but percentage lengths track the new viewport.
+    fn refresh_viewport(&mut self) {
+        let Some((document, viewport)) = self.document.as_mut() else {
+            return;
         };
-        self.reproject();
-        self.window.request_redraw();
+        *viewport = document_viewport(
+            document,
+            Viewport {
+                width: self.config.width.max(1) as f32,
+                height: self.config.height.max(1) as f32,
+            },
+        );
     }
 
-    /// Tessellate `document` into a GPU scene plus the document viewport it
-    /// was framed against. `None` when the document has no supported shapes.
-    fn build_draw_scene(&self, document: &svg3_dom::Document) -> Option<(GpuScene, Viewport)> {
-        let width = self.config.width.max(1);
-        let height = self.config.height.max(1);
-        let target_viewport = Viewport {
-            width: width as f32,
-            height: height as f32,
-        };
-        let viewport = document_viewport(document, target_viewport);
-        let mesh = build_scene(document, viewport);
-        let scene = self
-            .renderer
-            .create_scene(&mesh, self.view_projection(viewport))?;
-        Some((scene, viewport))
+    /// The render target viewed as a [`Viewport`], used as the fallback for
+    /// `<svg>` root sizing.
+    fn target_viewport(&self) -> Viewport {
+        Viewport {
+            width: self.config.width.max(1) as f32,
+            height: self.config.height.max(1) as f32,
+        }
+    }
+
+    /// The render target's wgpu extent, used to size offscreen filter
+    /// textures inside [`Renderer::encode_document`].
+    fn target_extent(&self) -> wgpu::Extent3d {
+        wgpu::Extent3d {
+            width: self.config.width.max(1),
+            height: self.config.height.max(1),
+            depth_or_array_layers: 1,
+        }
     }
 
     /// The view-projection matrix for the current camera framing `viewport`.
@@ -265,38 +255,27 @@ impl Gfx {
         .view_projection()
     }
 
-    /// Upload the current camera transform. Cheap enough to call on every
-    /// camera or surface change.
-    fn reproject(&self) {
-        let Some((scene, viewport)) = &self.scene else {
-            return;
-        };
-        self.renderer
-            .update_view_projection(scene, self.view_projection(*viewport));
-        self.window.request_redraw();
-    }
-
-    /// Orbit the camera by `dyaw` / `dpitch` radians and re-project.
+    /// Orbit the camera by `dyaw` / `dpitch` radians and redraw.
     fn orbit_camera(&mut self, dyaw: f32, dpitch: f32) {
         self.camera.orbit(dyaw, dpitch);
-        self.reproject();
+        self.window.request_redraw();
         self.refresh_title();
     }
 
-    /// Multiply the camera's eye distance by `factor` and re-project.
+    /// Multiply the camera's eye distance by `factor` and redraw.
     fn zoom_camera(&mut self, factor: f32) {
         self.camera.zoom(factor);
-        self.reproject();
+        self.window.request_redraw();
         self.refresh_title();
     }
 
     /// Reframe the camera head-on for the current document.
     fn reset_camera(&mut self) {
-        let Some(viewport) = self.scene.as_ref().map(|(_, viewport)| *viewport) else {
+        let Some(viewport) = self.document.as_ref().map(|(_, viewport)| *viewport) else {
             return;
         };
         self.camera.reset(viewport);
-        self.reproject();
+        self.window.request_redraw();
         self.refresh_title();
     }
 
@@ -488,7 +467,7 @@ fn prompt_for_svg(default_source: &str) -> Result<Option<String>> {
         .arg(format!(
             "set promptText to {}",
             apple_script_string(
-                "Paste an SVG string. This demo currently renders <rect>, <circle>, <ellipse>, <polygon>, filled <polyline>, <line>, and <path> elements."
+                "Paste an SVG string. This demo currently renders <rect>, <circle>, <ellipse>, <polygon>, filled <polyline>, <line>, and <path> elements, including referenced <filter><feGaussianBlur/></filter> definitions."
             )
         ))
         .arg("-e")

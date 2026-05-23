@@ -1,11 +1,24 @@
 //! The wgpu [`Renderer`] and its render paths.
 //!
 //! The [`Renderer`] owns and caches the wgpu device, queue, render pipelines
-//! and bind-group layouts. It drives two paths over the same GPU state: the
-//! headless [`Renderer::render_to_image`], which rasterises a document into
-//! an [`Image`] and applies supported filter passes, and the caller-owned
-//! windowed pass built from [`Renderer::create_scene`] + [`Renderer::draw`].
-//! A tessellated scene's GPU buffers live in [`GpuScene`].
+//! and bind-group layouts. It exposes one unified document encoder,
+//! [`Renderer::encode_document`], which walks a parsed document, tessellates
+//! every supported 2D shape, applies referenced `<feGaussianBlur>` filters via
+//! offscreen GPU passes, and composites them into a caller-owned target view
+//! through a caller-owned command encoder. The two render entry points are
+//! built on top of it:
+//!
+//! - [`Renderer::render_to_image`] drives the headless path — it owns the
+//!   offscreen sRGB texture, clears it, calls `encode_document`, then copies
+//!   the result back into an [`Image`].
+//! - A windowed caller (see `app-macos`) brings up its own
+//!   [`wgpu::Surface`] and per-frame encoder, clears the swap-chain texture
+//!   to its background colour, and calls `encode_document` to draw the
+//!   current document into that texture.
+//!
+//! [`Renderer::create_scene`] + [`Renderer::draw`] remain as a lower-level
+//! API for callers that pre-tessellate a [`Mesh`] outside the document walk;
+//! the high-level paths go through [`Renderer::encode_document`].
 
 use glam::Mat4;
 use svg3_dom::Document;
@@ -165,9 +178,9 @@ impl Renderer {
     /// For the windowed path: the caller brings up a surface-compatible device
     /// (so the adapter is chosen with `compatible_surface`) and hands it here
     /// with the surface's texture `format`. Such a renderer is driven through
-    /// [`create_scene`](Renderer::create_scene) and [`draw`](Renderer::draw);
-    /// [`render_to_image`](Renderer::render_to_image) additionally requires
-    /// `format` to be sRGB `RGBA8`.
+    /// [`encode_document`](Renderer::encode_document) into the caller's own
+    /// surface texture and encoder. [`render_to_image`](Renderer::render_to_image)
+    /// additionally requires `format` to be sRGB `RGBA8`.
     pub fn with_device(
         device: wgpu::Device,
         queue: wgpu::Queue,
@@ -307,8 +320,10 @@ impl Renderer {
     /// Render every supported 2D SVG shape in `document` headlessly into an
     /// [`Image`] of `config.width × config.height` pixels.
     ///
-    /// Rasterises the tessellated scene into an offscreen sRGB texture and
-    /// reads the pixels back; the surface is cleared to transparent first.
+    /// Wraps [`encode_document`](Renderer::encode_document) with the
+    /// headless-specific glue: it allocates the offscreen sRGB texture,
+    /// clears it to transparent, encodes the document draws, then copies
+    /// the texture into a CPU-mappable readback buffer.
     ///
     /// Returns [`RenderError::UnsupportedImageFormat`] when this renderer's
     /// pipeline does not target sRGB `RGBA8` — the readback assumes that byte
@@ -327,7 +342,7 @@ impl Renderer {
             width: width as f32,
             height: height as f32,
         };
-        let plan = build_render_plan(document, document_viewport(document, target_viewport));
+        let viewport = document_viewport(document, target_viewport);
         let view_projection = config.view_projection();
 
         let extent = wgpu::Extent3d {
@@ -362,42 +377,22 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("svg3 headless encoder"),
             });
-        {
-            // Execute the target clear once before replaying the render plan;
-            // later direct and filtered ops load from this cleared texture.
-            let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("svg3 target clear pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                ..Default::default()
-            });
-        }
-        for op in &plan {
-            match op {
-                RenderOp::Mesh(mesh) => {
-                    if let Some(scene) = self.create_scene(mesh, view_projection) {
-                        self.encode_scene_draw(&mut encoder, &view, &scene, "svg3 shape pass");
-                    }
-                }
-                RenderOp::GaussianBlur { mesh, blur } => {
-                    self.encode_gaussian_blur(
-                        &mut encoder,
-                        &view,
-                        mesh,
-                        *blur,
-                        view_projection,
-                        extent,
-                    );
-                }
-            }
-        }
+        // Clear the headless target up front so the document draws — direct
+        // meshes and filter composites — can `LoadOp::Load` from it.
+        clear_target(
+            &mut encoder,
+            &view,
+            wgpu::Color::TRANSPARENT,
+            "svg3 headless clear pass",
+        );
+        self.encode_document(
+            document,
+            viewport,
+            view_projection,
+            &view,
+            extent,
+            &mut encoder,
+        );
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
                 texture: &texture,
@@ -423,6 +418,59 @@ impl Renderer {
             height,
             pixels,
         })
+    }
+
+    /// Encode the GPU draw commands for `document` into `encoder`, painting
+    /// into `target`.
+    ///
+    /// Walks `document` once, tessellates every supported 2D shape, applies
+    /// any referenced `<feGaussianBlur>` filter through offscreen GPU passes
+    /// (allocated lazily against `target_extent`), and composites the result
+    /// onto `target` in painter's order. This is the single GPU path shared
+    /// by the headless [`Renderer::render_to_image`] and any windowed caller
+    /// driving its own surface.
+    ///
+    /// `target` is **loaded, not cleared** — callers are responsible for
+    /// clearing it to their desired background colour before this call.
+    /// `viewport` is the basis for percentage lengths in the document;
+    /// callers that want SVG root sizing should resolve it via
+    /// [`document_viewport`]. `view_projection` maps SVG user space to clip
+    /// space; for the standard 2D/3D mix, build it via
+    /// [`RenderConfig::view_projection`]. `target_extent` is the texture's
+    /// pixel size, used to size the offscreen filter textures.
+    ///
+    /// The caller owns the encoder, so the draws integrate into any larger
+    /// frame the caller is composing (e.g. a background-clear pass before
+    /// this call, an overlay UI pass after).
+    pub fn encode_document(
+        &self,
+        document: &Document,
+        viewport: Viewport,
+        view_projection: Mat4,
+        target: &wgpu::TextureView,
+        target_extent: wgpu::Extent3d,
+        encoder: &mut wgpu::CommandEncoder,
+    ) {
+        let plan = build_render_plan(document, viewport);
+        for op in &plan {
+            match op {
+                RenderOp::Mesh(mesh) => {
+                    if let Some(scene) = self.create_scene(mesh, view_projection) {
+                        self.encode_scene_draw(encoder, target, &scene, "svg3 shape pass");
+                    }
+                }
+                RenderOp::GaussianBlur { mesh, blur } => {
+                    self.encode_gaussian_blur(
+                        encoder,
+                        target,
+                        mesh,
+                        *blur,
+                        view_projection,
+                        target_extent,
+                    );
+                }
+            }
+        }
     }
 
     fn encode_scene_draw(
@@ -613,6 +661,31 @@ impl Renderer {
             view,
         }
     }
+}
+
+/// Execute a single render pass that clears `target` to `color`. Used by both
+/// the headless and the windowed paths to prime their target before
+/// [`Renderer::encode_document`], which always loads (rather than clears) the
+/// existing target so it can composite filter results on top.
+pub fn clear_target(
+    encoder: &mut wgpu::CommandEncoder,
+    target: &wgpu::TextureView,
+    color: wgpu::Color,
+    label: &str,
+) {
+    let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some(label),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: target,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Clear(color),
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        ..Default::default()
+    });
 }
 
 /// Acquire a headless wgpu device, or [`RenderError::NoAdapter`] if none.
