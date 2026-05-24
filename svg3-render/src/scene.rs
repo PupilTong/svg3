@@ -99,7 +99,9 @@ fn append_render_ops(
         let generator = chain.iter().any(|primitive| {
             matches!(
                 primitive.kind,
-                FilterPrimitiveKind::Flood(_) | FilterPrimitiveKind::Turbulence(_)
+                FilterPrimitiveKind::Image(_)
+                    | FilterPrimitiveKind::Flood(_)
+                    | FilterPrimitiveKind::Turbulence(_)
             )
         });
         if !filtered_mesh.is_empty() || generator {
@@ -335,6 +337,29 @@ mod tests {
         assert_eq!(plan.len(), 3);
         assert!(matches!(plan[0], RenderOp::Mesh(_)));
         assert!(matches!(plan[1], RenderOp::Filter { .. }));
+        assert!(matches!(plan[2], RenderOp::Mesh(_)));
+    }
+
+    #[test]
+    fn render_plan_isolates_fe_image_filter_in_painter_order() {
+        let document = svg3_dom::parse(
+            r##"<svg><rect width="10" height="10" fill="blue"/><filter id="tex"><feImage href="data:image/png;base64,abc" x="20" y="0" width="10" height="10"/></filter><rect width="10" height="10" fill="red" filter="url(#tex)"/><rect x="40" width="10" height="10" fill="green"/></svg>"##,
+        )
+        .unwrap();
+        let plan = build_render_plan(&document, vp());
+
+        assert_eq!(plan.len(), 3);
+        assert!(matches!(plan[0], RenderOp::Mesh(_)));
+        let RenderOp::Filter { primitives, .. } = &plan[1] else {
+            panic!("expected feImage filter op");
+        };
+        assert!(matches!(
+            primitives.as_slice(),
+            [FilterPrimitive {
+                kind: FilterPrimitiveKind::Image(_),
+                ..
+            }]
+        ));
         assert!(matches!(plan[2], RenderOp::Mesh(_)));
     }
 

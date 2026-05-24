@@ -7,11 +7,13 @@
 //! `<polygon>`, `<polyline>`, `<line>`, and `<path>` shapes plus referenced
 //! `<filter>` elements composed from a multi-primitive chain executed
 //! end-to-end on the GPU. The supported primitives are `<feGaussianBlur>`,
-//! `<feColorMatrix>`, `<feTurbulence>`, `<feSpecularLighting>`,
+//! `<feImage>`, `<feColorMatrix>`, `<feTurbulence>`, `<feSpecularLighting>`,
 //! `<feDiffuseLighting>`, `<feMorphology>`, `<feFlood>`, `<feDropShadow>`,
 //! `<feDisplacementMap>`, `<feConvolveMatrix>`, and `<feComponentTransfer>`.
-//! Every primitive ships as a fragment-shader pipeline backed by
-//! `filter.wgsl`; there is no CPU filter path. [`Renderer::encode_document`]
+//! Filter primitives ship as fragment-shader pipelines backed by
+//! `filter.wgsl`, while PNG data-URL `<feImage>` sources decode/upload
+//! lazily when a referenced filter paints and are sampled through
+//! `image.wgsl`. [`Renderer::encode_document`]
 //! is the single GPU entry point: it walks a parsed document, tessellates
 //! every supported shape, runs each referenced filter's primitive chain
 //! through offscreen ping/pong textures, and encodes the draws into a

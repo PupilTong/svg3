@@ -30,6 +30,7 @@ glam = "0.32"
 lyon_tessellation = "1"
 
 # Parsing
+base64 = { version = "0.22", default-features = false, features = ["std"] }
 quick-xml = "0.40"
 svgtypes = "0.16"
 
@@ -49,6 +50,7 @@ anyhow = "1"
 # produce the right binary.
 criterion = { package = "codspeed-criterion-compat", version = "4" }
 
-# Testing
-# `png` encodes/decodes the golden images for svg3-render's snapshot tests.
+# Images / testing
+# `png` decodes embedded `<feImage>` PNG data URLs at render time and
+# encodes/decodes the golden images for svg3-render's snapshot tests.
 png = "0.18"

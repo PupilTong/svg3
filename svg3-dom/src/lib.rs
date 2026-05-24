@@ -45,6 +45,8 @@ pub enum ElementKind {
     Filter,
     /// Gaussian blur filter primitive (SVG 1.1 `<feGaussianBlur>`).
     FeGaussianBlur,
+    /// Image filter primitive (SVG 1.1 `<feImage>`).
+    FeImage,
     /// Colour matrix filter primitive (SVG 1.1 `<feColorMatrix>`).
     FeColorMatrix,
     /// Turbulence / fractal-noise filter primitive (SVG 1.1 `<feTurbulence>`).
@@ -106,6 +108,7 @@ impl ElementKind {
             "path" => Self::Path,
             "filter" => Self::Filter,
             "feGaussianBlur" => Self::FeGaussianBlur,
+            "feImage" => Self::FeImage,
             "feColorMatrix" => Self::FeColorMatrix,
             "feTurbulence" => Self::FeTurbulence,
             "feSpecularLighting" => Self::FeSpecularLighting,
@@ -143,6 +146,7 @@ impl ElementKind {
             Self::Path => "path",
             Self::Filter => "filter",
             Self::FeGaussianBlur => "feGaussianBlur",
+            Self::FeImage => "feImage",
             Self::FeColorMatrix => "feColorMatrix",
             Self::FeTurbulence => "feTurbulence",
             Self::FeSpecularLighting => "feSpecularLighting",
@@ -428,6 +432,7 @@ mod tests {
             ElementKind::from_tag("feGaussianBlur"),
             ElementKind::FeGaussianBlur
         );
+        assert_eq!(ElementKind::from_tag("feImage"), ElementKind::FeImage);
         assert_eq!(
             ElementKind::from_tag("feColorMatrix"),
             ElementKind::FeColorMatrix
@@ -490,6 +495,7 @@ mod tests {
         assert_eq!(ElementKind::Path.as_tag(), "path");
         assert_eq!(ElementKind::Filter.as_tag(), "filter");
         assert_eq!(ElementKind::FeGaussianBlur.as_tag(), "feGaussianBlur");
+        assert_eq!(ElementKind::FeImage.as_tag(), "feImage");
         assert_eq!(ElementKind::FeColorMatrix.as_tag(), "feColorMatrix");
         assert_eq!(ElementKind::FeFlood.as_tag(), "feFlood");
         assert_eq!(ElementKind::FeDropShadow.as_tag(), "feDropShadow");
@@ -709,6 +715,33 @@ mod tests {
         assert_eq!(
             blur.attributes.get("stdDeviation").map(String::as_str),
             Some("4 2")
+        );
+    }
+
+    #[test]
+    fn parse_filter_preserves_fe_image_attributes() {
+        let xml = r#"<svg><filter id="tex"><feImage href="data:image/png;base64,abc" x="4" y="6" width="12" height="14"/></filter></svg>"#;
+        let doc = parse(xml).unwrap();
+        let filter_id = doc.node(doc.root()).children[0];
+        let filter = doc.node(filter_id);
+        assert_eq!(filter.element.kind, ElementKind::Filter);
+        assert_eq!(filter.children.len(), 1);
+
+        let image = doc.element(filter.children[0]);
+        assert_eq!(image.kind, ElementKind::FeImage);
+        assert_eq!(
+            image.attributes.get("href").map(String::as_str),
+            Some("data:image/png;base64,abc")
+        );
+        assert_eq!(image.attributes.get("x").map(String::as_str), Some("4"));
+        assert_eq!(image.attributes.get("y").map(String::as_str), Some("6"));
+        assert_eq!(
+            image.attributes.get("width").map(String::as_str),
+            Some("12")
+        );
+        assert_eq!(
+            image.attributes.get("height").map(String::as_str),
+            Some("14")
         );
     }
 

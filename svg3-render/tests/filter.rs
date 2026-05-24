@@ -5,6 +5,8 @@
 //! GPU-backed and self-skip on hosts without an adapter, matching the snapshot
 //! suite's behavior.
 
+use base64::engine::general_purpose;
+use base64::Engine as _;
 use svg3_dom::parse;
 use svg3_render::{Image, RenderConfig, RenderError, Renderer};
 
@@ -33,6 +35,23 @@ fn render(renderer: &Renderer, svg: &str) -> Image {
             },
         )
         .expect("filter E2E render failed")
+}
+
+fn png_data_uri(width: u32, height: u32, rgba: &[u8]) -> String {
+    let mut bytes = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut bytes, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().expect("PNG header should encode");
+        writer
+            .write_image_data(rgba)
+            .expect("PNG pixels should encode");
+    }
+    format!(
+        "data:image/png;base64,{}",
+        general_purpose::STANDARD.encode(bytes)
+    )
 }
 
 fn assert_transparent(image: &Image, x: u32, y: u32) {
@@ -177,6 +196,40 @@ fn filter_definition_subtree_does_not_paint_directly() {
     );
 
     assert_transparent(&image, 32, 32);
+}
+
+#[test]
+fn fe_image_filter_paints_embedded_png() {
+    let Some(renderer) = skip_or_renderer("fe_image_filter_paints_embedded_png") else {
+        return;
+    };
+    let href = png_data_uri(1, 1, &[255, 0, 0, 255]);
+    let svg = format!(
+        r##"<svg><filter id="tex"><feImage href="{href}" x="20" y="18" width="24" height="22"/></filter><rect x="2" y="2" width="10" height="10" fill="blue" filter="url(#tex)"/></svg>"##
+    );
+    let image = render(&renderer, &svg);
+
+    assert_transparent(&image, 6, 6);
+    let pixel = image.pixel(32, 28);
+    assert!(
+        pixel[0] > 200 && pixel[1] < 40 && pixel[2] < 40 && pixel[3] > 250,
+        "<feImage> should paint the embedded red PNG, got {pixel:?}"
+    );
+}
+
+#[test]
+fn fe_image_can_feed_gaussian_blur() {
+    let Some(renderer) = skip_or_renderer("fe_image_can_feed_gaussian_blur") else {
+        return;
+    };
+    let href = png_data_uri(1, 1, &[0, 0, 255, 255]);
+    let svg = format!(
+        r##"<svg><filter id="tex"><feImage href="{href}" x="28" y="28" width="8" height="8"/><feGaussianBlur stdDeviation="4"/></filter><rect width="64" height="64" filter="url(#tex)"/></svg>"##
+    );
+    let image = render(&renderer, &svg);
+
+    assert_blue_halo(&image, 24, 32);
+    assert_transparent(&image, 8, 8);
 }
 
 // ---- Per-primitive GPU pipeline tests -------------------------------------

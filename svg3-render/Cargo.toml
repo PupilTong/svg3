@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 svg3-dom.workspace = true
+base64.workspace = true
 wgpu.workspace = true
 pollster.workspace = true
 bytemuck = { workspace = true, features = ["derive"] }
@@ -14,10 +15,10 @@ thiserror.workspace = true
 log.workspace = true
 lyon_tessellation.workspace = true
 svgtypes.workspace = true
+png.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
-png.workspace = true
 
 [[bench]]
 name = "tessellate"
