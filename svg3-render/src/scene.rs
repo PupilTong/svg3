@@ -34,8 +34,8 @@ pub(crate) enum RenderOp {
 /// callers that want SVG root sizing should pass [`document_viewport`]. The
 /// mesh is in SVG user space (origin top-left, y-down, `z = 0`). Shapes are
 /// appended in document order, so a later shape paints over an earlier one. A
-/// shape that is not rendered — a degenerate size, `fill="none"`, or a
-/// missing/`none` stroke on stroke-only geometry — contributes nothing.
+/// shape paint that is not rendered — a degenerate size, `fill="none"`, or a
+/// missing/`none` stroke — contributes nothing.
 /// `transform` and grouping are not applied yet, so a shape is placed at its
 /// own coordinates regardless of any ancestor `<g>`.
 pub fn build_scene(document: &Document, viewport: Viewport) -> Mesh {
@@ -144,11 +144,19 @@ fn append_subtree_mesh(
 fn append_element_mesh(element: &svg3_dom::Element, viewport: Viewport, mesh: &mut Mesh) {
     match &element.kind {
         ElementKind::Rect => {
-            if let (Some(geo), Some(color)) = (
-                shapes::rect::resolve_rect(element, viewport),
-                shapes::resolve_fill(element),
-            ) {
-                mesh.append(shapes::rect::tessellate_rect(&geo, color));
+            if let Some(geo) = shapes::rect::resolve_rect(element, viewport) {
+                if let Some(color) = shapes::resolve_fill(element) {
+                    mesh.append(shapes::rect::tessellate_rect(&geo, color));
+                }
+                if let Some(color) = shapes::resolve_stroke(element) {
+                    mesh.append(shapes::rect::tessellate_rect_stroke(
+                        &geo,
+                        shapes::resolve_stroke_width(element, viewport),
+                        shapes::resolve_linejoin(element),
+                        shapes::resolve_miterlimit(element),
+                        color,
+                    ));
+                }
             }
         }
         ElementKind::Circle => {
@@ -265,8 +273,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known WPT failure dump: rect stroke geometry is not implemented yet"]
-    fn known_wpt_failure_build_scene_tessellates_rect_stroke() {
+    fn build_scene_tessellates_rect_stroke() {
         // WPT `svg/shapes/rect-04.svg`: a rounded rect with `fill="none"`
         // and a visible stroke should render its stroke outline.
         let document = svg3_dom::parse(
