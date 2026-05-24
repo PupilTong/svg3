@@ -7,7 +7,6 @@
 
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
-
 use svg3_dom::{Document, Element, ElementKind, NodeId};
 
 use crate::filters::{FilterDefinitions, FilterInput, FilterPrimitive, FilterPrimitiveKind};
@@ -33,7 +32,6 @@ pub(crate) enum RenderOp {
 struct SceneContext<'a> {
     viewport: Viewport,
     markers: &'a MarkerDefinitions,
-    features: &'a DocumentFeatures,
 }
 
 /// Walk `document` and tessellate every supported 2D SVG shape into one
@@ -48,12 +46,10 @@ struct SceneContext<'a> {
 /// `transform` and grouping are not applied yet, so a shape is placed at its
 /// own coordinates regardless of any ancestor `<g>`.
 pub fn build_scene(document: &Document, viewport: Viewport) -> Mesh {
-    let features = DocumentFeatures::scan(document);
     let markers = MarkerDefinitions::default();
     let context = SceneContext {
         viewport,
         markers: &markers,
-        features: &features,
     };
     let mut mesh = Mesh::default();
     for child in document.node(document.root()).children.iter().copied() {
@@ -65,13 +61,11 @@ pub fn build_scene(document: &Document, viewport: Viewport) -> Mesh {
 /// Build headless render operations that preserve SVG painter's order while
 /// isolating filtered subtrees into their own GPU post-process pass.
 pub(crate) fn build_render_plan(document: &Document, viewport: Viewport) -> Vec<RenderOp> {
-    let features = DocumentFeatures::scan(document);
     let filters = FilterDefinitions::collect(document);
     let markers = MarkerDefinitions::default();
     let context = SceneContext {
         viewport,
         markers: &markers,
-        features: &features,
     };
     let mut plan = Vec::new();
     let mut pending_mesh = Mesh::default();
@@ -176,7 +170,7 @@ fn append_element_mesh(
 ) {
     let viewport = context.viewport;
     let markers = context.markers;
-    let features = context.features;
+    let features = element_features(element, include_markers);
     match &element.kind {
         ElementKind::Rect => {
             if let Some(geo) = shapes::rect::resolve_rect(element, viewport) {
@@ -254,9 +248,7 @@ fn append_element_mesh(
                 {
                     mesh.append(shapes::polygon::tessellate_polygon(&geo, color));
                 }
-                let element_features =
-                    element_features(element, include_markers && features.has_marker_refs);
-                let has_markers = element_features.has_markers;
+                let has_markers = features.has_markers;
                 let stroke = features
                     .has_strokes
                     .then(|| {
@@ -285,7 +277,6 @@ fn append_element_mesh(
                             .as_ref()
                             .expect("stroke style should exist when markers exist")
                             .width,
-                        features,
                         mesh,
                     );
                 }
@@ -298,9 +289,7 @@ fn append_element_mesh(
                 {
                     mesh.append(shapes::polyline::tessellate_polyline(&geo, color));
                 }
-                let element_features =
-                    element_features(element, include_markers && features.has_marker_refs);
-                let has_markers = element_features.has_markers;
+                let has_markers = features.has_markers;
                 let stroke = features
                     .has_strokes
                     .then(|| {
@@ -329,7 +318,6 @@ fn append_element_mesh(
                             .as_ref()
                             .expect("stroke style should exist when markers exist")
                             .width,
-                        features,
                         mesh,
                     );
                 }
@@ -337,7 +325,11 @@ fn append_element_mesh(
         }
         ElementKind::Line => {
             if let Some(geo) = shapes::line::resolve_line(element, viewport) {
-                if !features.has_marker_refs
+                // Joins and miter limits are intentionally absent from
+                // `has_general_line_strokes`; they do not change a single
+                // open segment, so a butt-capped solid line can stay on the
+                // SDF segment fast path.
+                if !features.has_markers
                     && !features.has_general_line_strokes
                     && !features.has_opacity_attrs
                 {
@@ -351,14 +343,10 @@ fn append_element_mesh(
                     return;
                 }
 
-                let element_features =
-                    element_features(element, include_markers && features.has_marker_refs);
-                let has_markers = element_features.has_markers;
+                let has_markers = features.has_markers;
                 let stroke =
                     shapes::resolve_stroke_with_opacity(element, features.has_opacity_attrs);
-                let needs_general_stroke = stroke.is_some()
-                    && features.has_general_line_strokes
-                    && line_needs_general_stroke(element);
+                let needs_general_stroke = stroke.is_some() && features.has_general_line_strokes;
                 let stroke_width = (!needs_general_stroke && (stroke.is_some() || has_markers))
                     .then_some(geo.stroke_width);
                 let stroke_style = (needs_general_stroke && (stroke.is_some() || has_markers))
@@ -383,7 +371,6 @@ fn append_element_mesh(
                         element,
                         &shapes::line::to_path(&geo),
                         marker_stroke_width,
-                        features,
                         mesh,
                     );
                 }
@@ -405,9 +392,7 @@ fn append_element_mesh(
                 {
                     mesh.append(shapes::path::tessellate_path_stroke(&geo, color));
                 }
-                if element_features(element, include_markers && features.has_marker_refs)
-                    .has_markers
-                {
+                if features.has_markers {
                     let stroke_style = shapes::stroke::resolve_stroke_style(element, viewport);
                     append_marker_instances(
                         document,
@@ -415,7 +400,6 @@ fn append_element_mesh(
                         element,
                         geo.path(),
                         stroke_style.width,
-                        features,
                         mesh,
                     );
                 }
@@ -426,67 +410,9 @@ fn append_element_mesh(
 }
 
 #[derive(Debug, Default)]
-struct DocumentFeatures {
-    has_strokes: bool,
-    has_marker_refs: bool,
-    has_opacity_attrs: bool,
-    has_general_line_strokes: bool,
-}
-
-impl DocumentFeatures {
-    fn scan(document: &Document) -> Self {
-        let mut features = Self::default();
-        features.scan_node(document, document.root());
-        features
-    }
-
-    fn scan_node(&mut self, document: &Document, id: NodeId) -> bool {
-        let node = document.node(id);
-        let scan_stroke_paint = node.element.kind != ElementKind::Line;
-        for (name, value) in &node.element.attributes {
-            if name.as_str() >= "stroke-width" {
-                break;
-            }
-            match name.as_str() {
-                "stroke" if scan_stroke_paint => {
-                    self.has_strokes |= !value.trim().eq_ignore_ascii_case("none");
-                }
-                "stroke-linecap" => {
-                    self.has_general_line_strokes |= !value.trim().eq_ignore_ascii_case("butt");
-                }
-                "stroke-dasharray" => {
-                    self.has_general_line_strokes |= !value.trim().eq_ignore_ascii_case("none");
-                }
-                "marker" | "marker-start" | "marker-mid" | "marker-end" => {
-                    self.has_marker_refs |= !value.trim().eq_ignore_ascii_case("none");
-                }
-                "opacity" | "fill-opacity" | "stroke-opacity" => {
-                    self.has_opacity_attrs = true;
-                }
-                _ => {}
-            }
-            if self.is_complete() {
-                return true;
-            }
-        }
-        for child in node.children.iter().copied() {
-            if self.scan_node(document, child) {
-                return true;
-            }
-        }
-        false
-    }
-
-    fn is_complete(&self) -> bool {
-        self.has_strokes
-            && self.has_marker_refs
-            && self.has_opacity_attrs
-            && self.has_general_line_strokes
-    }
-}
-
-#[derive(Debug, Default)]
 struct MarkerDefinitions {
+    // Collected on the first actual marker reference. No-marker documents are
+    // common and should not pay a separate definition walk.
     markers: OnceLock<BTreeMap<String, MarkerDefinition>>,
 }
 
@@ -694,7 +620,6 @@ fn append_marker_instances(
     element: &Element,
     path: &lyon_tessellation::path::Path,
     stroke_width: f32,
-    features: &DocumentFeatures,
     mesh: &mut Mesh,
 ) {
     let refs = markers.marker_refs(document, element);
@@ -714,8 +639,10 @@ fn append_marker_instances(
         let marker_context = SceneContext {
             viewport: marker_viewport,
             markers,
-            features,
         };
+        // Marker subtrees render with marker expansion disabled. This keeps
+        // authored marker references inside a marker from recursively
+        // instancing other marker definitions.
         for child in document.node(marker.node).children.iter().copied() {
             append_subtree_mesh(document, child, &marker_context, false, &mut marker_mesh);
         }
@@ -729,37 +656,42 @@ fn append_marker_instances(
 
 #[derive(Debug, Default)]
 struct ElementFeatures {
+    has_strokes: bool,
     has_markers: bool,
+    has_opacity_attrs: bool,
+    has_general_line_strokes: bool,
 }
 
 fn element_features(element: &Element, check_markers: bool) -> ElementFeatures {
-    if !check_markers {
-        return ElementFeatures::default();
-    }
     let mut features = ElementFeatures::default();
+    let scan_stroke_paint = element.kind != ElementKind::Line;
     for (name, value) in &element.attributes {
+        // Attributes are stored in a BTreeMap. Every feature flag watched here
+        // sorts before `stroke-width`; update this guard when adding a watched
+        // attribute that sorts later.
+        if name.as_str() >= "stroke-width" {
+            break;
+        }
         match name.as_str() {
+            "stroke" if scan_stroke_paint => {
+                features.has_strokes |= !value.trim().eq_ignore_ascii_case("none");
+            }
+            "stroke-linecap" => {
+                features.has_general_line_strokes |= !value.trim().eq_ignore_ascii_case("butt");
+            }
+            "stroke-dasharray" => {
+                features.has_general_line_strokes |= !value.trim().eq_ignore_ascii_case("none");
+            }
             "marker" | "marker-start" | "marker-mid" | "marker-end" if check_markers => {
                 features.has_markers |= !value.trim().eq_ignore_ascii_case("none");
             }
+            "opacity" | "fill-opacity" | "stroke-opacity" => {
+                features.has_opacity_attrs = true;
+            }
             _ => {}
-        }
-        if features.has_markers {
-            break;
         }
     }
     features
-}
-
-fn line_needs_general_stroke(element: &Element) -> bool {
-    element
-        .attributes
-        .get("stroke-linecap")
-        .is_some_and(|value| !value.trim().eq_ignore_ascii_case("butt"))
-        || element
-            .attributes
-            .get("stroke-dasharray")
-            .is_some_and(|value| !value.trim().eq_ignore_ascii_case("none"))
 }
 
 fn transform_marker_mesh(
@@ -800,13 +732,17 @@ fn transform_marker_mesh(
 
 fn parse_angle(value: &str) -> Option<f32> {
     let trimmed = value.trim();
-    let degrees = trimmed
-        .strip_suffix("deg")
-        .unwrap_or(trimmed)
-        .trim()
-        .parse::<f32>()
-        .ok()?;
-    degrees.is_finite().then_some(degrees.to_radians())
+    let (number, radians_per_unit) = if let Some(number) = trimmed.strip_suffix("deg") {
+        (number.trim(), std::f32::consts::PI / 180.0)
+    } else if let Some(number) = trimmed.strip_suffix("grad") {
+        (number.trim(), std::f32::consts::PI / 200.0)
+    } else if let Some(number) = trimmed.strip_suffix("rad") {
+        (number.trim(), 1.0)
+    } else {
+        (trimmed, std::f32::consts::PI / 180.0)
+    };
+    let value = number.parse::<f32>().ok()?;
+    value.is_finite().then_some(value * radians_per_unit)
 }
 
 fn url_reference_id(value: &str) -> Option<&str> {
@@ -896,8 +832,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known WPT failure dump: rect stroke geometry is not implemented yet"]
-    fn known_wpt_failure_build_scene_tessellates_rect_stroke() {
+    fn build_scene_tessellates_rect_stroke() {
         // WPT `svg/shapes/rect-04.svg`: a rounded rect with `fill="none"`
         // and a visible stroke should render its stroke outline.
         let document = svg3_dom::parse(
@@ -1222,6 +1157,68 @@ mod tests {
                 .all(|vertex| vertex.position[0] >= 90.0),
             "marker definition geometry should be instanced at the line end, not drawn in <defs>"
         );
+    }
+
+    #[test]
+    fn marker_start_none_overrides_marker_shorthand() {
+        let document = svg3_dom::parse(
+            r##"<svg><defs><marker id="dot" markerUnits="userSpaceOnUse" markerWidth="4" markerHeight="4" orient="0"><rect width="4" height="4" fill="red"/></marker></defs><line x1="10" y1="50" x2="90" y2="50" stroke="none" marker="url(#dot)" marker-start="none"/></svg>"##,
+        )
+        .unwrap();
+        let mesh = build_scene(&document, vp());
+        let red_vertices: Vec<_> = mesh
+            .vertices
+            .iter()
+            .filter(|vertex| vertex.color == [1.0, 0.0, 0.0, 1.0])
+            .collect();
+
+        assert!(!red_vertices.is_empty());
+        assert!(
+            red_vertices.iter().all(|vertex| vertex.position[0] >= 90.0),
+            "`marker-start=\"none\"` should suppress the shorthand marker at the start"
+        );
+    }
+
+    #[test]
+    fn closed_polygon_marker_end_lands_at_start_vertex() {
+        let document = svg3_dom::parse(
+            r##"<svg><defs><marker id="dot" markerUnits="userSpaceOnUse" markerWidth="4" markerHeight="4" orient="0"><rect width="4" height="4" fill="red"/></marker></defs><polygon points="20,20 80,20 80,80" fill="none" stroke="none" marker-end="url(#dot)"/></svg>"##,
+        )
+        .unwrap();
+        let mesh = build_scene(&document, vp());
+        let red_vertices: Vec<_> = mesh
+            .vertices
+            .iter()
+            .filter(|vertex| vertex.color == [1.0, 0.0, 0.0, 1.0])
+            .collect();
+
+        assert!(!red_vertices.is_empty());
+        assert!(
+            red_vertices.iter().all(|vertex| {
+                (20.0..=24.0).contains(&vertex.position[0])
+                    && (20.0..=24.0).contains(&vertex.position[1])
+            }),
+            "`marker-end` on a closed polygon should be placed at the initial vertex"
+        );
+    }
+
+    #[test]
+    fn parse_angle_accepts_svg_angle_units() {
+        fn assert_close(actual: f32, expected: f32) {
+            assert!(
+                (actual - expected).abs() < 1e-6,
+                "expected {expected}, got {actual}"
+            );
+        }
+
+        assert_close(parse_angle("45").unwrap(), 45.0_f32.to_radians());
+        assert_close(parse_angle("45deg").unwrap(), 45.0_f32.to_radians());
+        assert_close(
+            parse_angle("1.5707964rad").unwrap(),
+            std::f32::consts::FRAC_PI_2,
+        );
+        assert_close(parse_angle("100grad").unwrap(), std::f32::consts::FRAC_PI_2);
+        assert!(parse_angle("nan").is_none());
     }
 
     #[test]

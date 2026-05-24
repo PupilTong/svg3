@@ -436,12 +436,16 @@ fn marker_subpaths(path: &Path) -> Vec<MarkerSubpath> {
             PathEvent::End { first, last, close } => {
                 if close && (first - last).length() > EPSILON {
                     let dir = first - last;
+                    let incoming = normalized(dir);
+                    let outgoing = current.first().and_then(|vertex| vertex.outgoing);
                     if let Some(last_vertex) = current.last_mut() {
-                        last_vertex.outgoing = normalized(dir);
+                        last_vertex.outgoing = incoming;
                     }
-                    if let Some(first_vertex) = current.first_mut() {
-                        first_vertex.incoming = normalized(dir);
-                    }
+                    current.push(MarkerVertex {
+                        point: first,
+                        incoming,
+                        outgoing,
+                    });
                 }
                 flush_marker_subpath(&mut current, &mut subpaths);
             }
@@ -726,5 +730,21 @@ mod tests {
         assert_eq!((placements[1].x, placements[1].y), (40.0, 20.0));
         assert_eq!(placements[2].kind, MarkerKind::End);
         assert_eq!((placements[2].x, placements[2].y), (40.0, 60.0));
+    }
+
+    #[test]
+    fn closed_marker_placements_put_end_at_subpath_start() {
+        let path = path_from_points(&[(10.0, 20.0), (40.0, 20.0), (40.0, 60.0)], true).unwrap();
+        let placements = marker_placements(&path);
+
+        assert_eq!(placements.len(), 4);
+        assert_eq!(placements[0].kind, MarkerKind::Start);
+        assert_eq!((placements[0].x, placements[0].y), (10.0, 20.0));
+        assert_eq!(placements[1].kind, MarkerKind::Mid);
+        assert_eq!((placements[1].x, placements[1].y), (40.0, 20.0));
+        assert_eq!(placements[2].kind, MarkerKind::Mid);
+        assert_eq!((placements[2].x, placements[2].y), (40.0, 60.0));
+        assert_eq!(placements[3].kind, MarkerKind::End);
+        assert_eq!((placements[3].x, placements[3].y), (10.0, 20.0));
     }
 }

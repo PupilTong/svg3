@@ -196,8 +196,7 @@ fn wpt_rect_stroke_case_passes() {
 }
 
 #[test]
-#[ignore = "known WPT failure dump: circle stroke geometry is not implemented yet"]
-fn known_wpt_failure_circle_stroke() {
+fn wpt_circle_stroke_case_passes() {
     // WPT `svg/import/shapes-circle-01-t-manual.svg`: `fill="none"` circles
     // with visible stroke should render the stroke outline.
     let mesh = renderable_mesh(
@@ -210,8 +209,7 @@ fn known_wpt_failure_circle_stroke() {
 }
 
 #[test]
-#[ignore = "known WPT failure dump: ellipse stroke geometry is not implemented yet"]
-fn known_wpt_failure_ellipse_stroke() {
+fn wpt_ellipse_stroke_case_passes() {
     // WPT `svg/import/shapes-ellipse-01-t-manual.svg`: `fill="none"`
     // ellipses with visible stroke should render the stroke outline.
     let mesh = renderable_mesh(
@@ -224,8 +222,7 @@ fn known_wpt_failure_ellipse_stroke() {
 }
 
 #[test]
-#[ignore = "known WPT failure dump: polygon stroke geometry is not implemented yet"]
-fn known_wpt_failure_polygon_stroke() {
+fn wpt_polygon_stroke_case_passes() {
     // WPT `svg/import/shapes-polygon-01-t-manual.svg`: `fill="none"`
     // polygons with visible stroke should render the stroke outline.
     let mesh = renderable_mesh(
@@ -238,8 +235,7 @@ fn known_wpt_failure_polygon_stroke() {
 }
 
 #[test]
-#[ignore = "known WPT failure dump: polyline stroke geometry is not implemented yet"]
-fn known_wpt_failure_polyline_stroke() {
+fn wpt_polyline_stroke_case_passes() {
     // WPT `svg/import/shapes-polyline-01-t-manual.svg`: `fill="none"`
     // polylines with visible stroke should render the stroke outline.
     let mesh = renderable_mesh(

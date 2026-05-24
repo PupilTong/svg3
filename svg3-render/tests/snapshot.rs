@@ -371,6 +371,12 @@ fn cases() -> Vec<Case> {
             "polyline-markers",
             r##"<svg><defs><marker id="dot" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="8" refX="4" refY="4"><circle cx="4" cy="4" r="4" fill="#f2c14e"/></marker><marker id="arrow" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="10" refX="10" refY="5" orient="auto"><path d="M0 0 L12 5 L0 10 Z" fill="#c14b2b"/></marker></defs><polyline points="14,72 38,28 64,72 86,28" fill="none" stroke="#2563eb" stroke-width="5" marker-start="url(#dot)" marker-mid="url(#dot)" marker-end="url(#arrow)"/></svg>"##,
         ),
+        // A closed shape's end marker belongs at the initial vertex, not the
+        // last authored point before the implicit close segment.
+        Case::square(
+            "polygon-closed-marker-end",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><defs><marker id="dot" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" refX="5" refY="5" orient="0"><circle cx="5" cy="5" r="5" fill="#f2c14e"/></marker></defs><polygon points="24,24 78,26 76,78" fill="none" stroke="#2563eb" stroke-width="5" marker-end="url(#dot)"/></svg>"##,
+        ),
         // Mixed basic shapes in painter's order: the line is composited over
         // filled rect/circle/ellipse geometry in one end-to-end scene.
         Case::square(

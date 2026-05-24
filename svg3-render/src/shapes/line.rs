@@ -246,4 +246,15 @@ mod tests {
         assert!(!mesh.is_empty());
         assert_eq!(mesh.indices.len() % 3, 0);
     }
+
+    #[test]
+    fn tessellate_segment_skips_zero_stroke_width() {
+        let geo = resolve_line(
+            &line(&[("x1", "10"), ("y1", "20"), ("x2", "50"), ("y2", "20")]),
+            vp(),
+        )
+        .unwrap();
+
+        assert!(tessellate_segment(&geo, 0.0, [0.0, 0.0, 1.0, 1.0]).is_empty());
+    }
 }
