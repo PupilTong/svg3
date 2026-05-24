@@ -24,6 +24,9 @@ pub(crate) mod rect;
 
 mod triangulate;
 
+use lyon_tessellation::geometry_builder::{BuffersBuilder, VertexBuffers};
+use lyon_tessellation::path::Path;
+use lyon_tessellation::{LineCap, LineJoin, StrokeOptions, StrokeTessellator, StrokeVertex};
 use svg3_dom::Element;
 
 use crate::{Mesh, Vertex};
@@ -46,6 +49,9 @@ pub(crate) const KIND_SEGMENT: u32 = 3;
 /// ramp to it, so the band never extends past the quad — even under heavy
 /// minification. Keep the two values in sync.
 pub(crate) const SDF_PAD: f32 = 1.0;
+
+/// Flattening tolerance, in user units, for Lyon path tessellation.
+pub(crate) const LYON_FLATTENING_TOLERANCE: f32 = 0.1;
 
 /// Resolve a shape's solid fill as linear RGBA in `[0, 1]`.
 ///
@@ -98,6 +104,71 @@ pub(crate) fn resolve_length(element: &Element, name: &str, basis: f32) -> Optio
 /// nor vertical ([SVG11] §7.10).
 pub(crate) fn resolve_stroke_width(element: &Element, viewport: Viewport) -> f32 {
     resolve_length(element, "stroke-width", viewport.diagonal()).unwrap_or(1.0)
+}
+
+/// Resolve a shape's `stroke-linecap` presentation attribute.
+pub(crate) fn resolve_linecap(element: &Element) -> LineCap {
+    match element
+        .attributes
+        .get("stroke-linecap")
+        .map(|value| value.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("round") => LineCap::Round,
+        Some("square") => LineCap::Square,
+        _ => LineCap::Butt,
+    }
+}
+
+/// Resolve a shape's `stroke-linejoin` presentation attribute.
+pub(crate) fn resolve_linejoin(element: &Element) -> LineJoin {
+    match element
+        .attributes
+        .get("stroke-linejoin")
+        .map(|value| value.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("round") => LineJoin::Round,
+        Some("bevel") => LineJoin::Bevel,
+        Some("miter-clip") => LineJoin::MiterClip,
+        _ => LineJoin::Miter,
+    }
+}
+
+/// Resolve a shape's `stroke-miterlimit` presentation attribute.
+pub(crate) fn resolve_miterlimit(element: &Element) -> f32 {
+    element
+        .attributes
+        .get("stroke-miterlimit")
+        .and_then(|value| value.trim().parse::<f32>().ok())
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or(4.0)
+}
+
+/// Tessellate a Lyon path stroke into triangle geometry.
+pub(crate) fn tessellate_stroke_path(
+    path: &Path,
+    options: &StrokeOptions,
+    color: [f32; 4],
+) -> Mesh {
+    let mut buffers: VertexBuffers<Vertex, u32> = VertexBuffers::new();
+    let mut tessellator = StrokeTessellator::new();
+    let mut builder = BuffersBuilder::new(&mut buffers, move |v: StrokeVertex<'_, '_>| {
+        let p = v.position();
+        vertex(p.x, p.y, color)
+    });
+
+    if tessellator
+        .tessellate_path(path, options, &mut builder)
+        .is_err()
+    {
+        return Mesh::default();
+    }
+
+    Mesh {
+        vertices: buffers.vertices,
+        indices: buffers.indices,
+    }
 }
 
 /// A solid-fill mesh [`Vertex`] at `(x, y)` in SVG user space. Basic shapes
@@ -416,6 +487,29 @@ mod tests {
                 },
             ),
             35.355_34
+        );
+    }
+
+    #[test]
+    fn resolve_stroke_join_attributes() {
+        assert_eq!(resolve_linecap(&element(&[])), LineCap::Butt);
+        assert_eq!(
+            resolve_linecap(&element(&[("stroke-linecap", "round")])),
+            LineCap::Round
+        );
+        assert_eq!(resolve_linejoin(&element(&[])), LineJoin::Miter);
+        assert_eq!(
+            resolve_linejoin(&element(&[("stroke-linejoin", "bevel")])),
+            LineJoin::Bevel
+        );
+        assert_eq!(resolve_miterlimit(&element(&[])), 4.0);
+        assert_eq!(
+            resolve_miterlimit(&element(&[("stroke-miterlimit", "2")])),
+            2.0
+        );
+        assert_eq!(
+            resolve_miterlimit(&element(&[("stroke-miterlimit", "-1")])),
+            4.0
         );
     }
 

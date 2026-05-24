@@ -13,15 +13,15 @@ use lyon_tessellation::path::math::{point, vector, Angle};
 use lyon_tessellation::path::{ArcFlags, Path};
 use lyon_tessellation::{
     FillOptions, FillRule, FillTessellator, FillVertex, LineCap, LineJoin, StrokeOptions,
-    StrokeTessellator, StrokeVertex,
 };
 use svg3_dom::Element;
 use svgtypes::{PathParser, PathSegment};
 
-use super::{resolve_stroke_width, vertex, Viewport};
+use super::{
+    resolve_linecap, resolve_linejoin, resolve_miterlimit, resolve_stroke_width,
+    tessellate_stroke_path, vertex, Viewport, LYON_FLATTENING_TOLERANCE,
+};
 use crate::{Mesh, Vertex};
-
-const FLATTENING_TOLERANCE: f32 = 0.1;
 
 /// A `<path>`'s resolved geometry and path-local paint parameters.
 #[derive(Debug)]
@@ -56,7 +56,7 @@ pub(crate) fn tessellate_path_fill(geo: &PathGeometry, color: [f32; 4]) -> Mesh 
     let mut buffers: VertexBuffers<Vertex, u32> = VertexBuffers::new();
     let options = FillOptions::default()
         .with_fill_rule(geo.fill_rule)
-        .with_tolerance(FLATTENING_TOLERANCE);
+        .with_tolerance(LYON_FLATTENING_TOLERANCE);
     let mut tessellator = FillTessellator::new();
     let mut builder = BuffersBuilder::new(&mut buffers, move |v: FillVertex<'_>| {
         let p = v.position();
@@ -82,30 +82,13 @@ pub(crate) fn tessellate_path_stroke(geo: &PathGeometry, color: [f32; 4]) -> Mes
         return Mesh::default();
     }
 
-    let mut buffers: VertexBuffers<Vertex, u32> = VertexBuffers::new();
     let options = StrokeOptions::default()
         .with_line_width(geo.stroke_width)
         .with_line_cap(geo.stroke_linecap)
         .with_line_join(geo.stroke_linejoin)
         .with_miter_limit(geo.stroke_miterlimit)
-        .with_tolerance(FLATTENING_TOLERANCE);
-    let mut tessellator = StrokeTessellator::new();
-    let mut builder = BuffersBuilder::new(&mut buffers, move |v: StrokeVertex<'_, '_>| {
-        let p = v.position();
-        vertex(p.x, p.y, color)
-    });
-
-    if tessellator
-        .tessellate_path(&geo.path, &options, &mut builder)
-        .is_err()
-    {
-        return Mesh::default();
-    }
-
-    Mesh {
-        vertices: buffers.vertices,
-        indices: buffers.indices,
-    }
+        .with_tolerance(LYON_FLATTENING_TOLERANCE);
+    tessellate_stroke_path(&geo.path, &options, color)
 }
 
 fn parse_path(data: &str) -> Option<Path> {
@@ -242,42 +225,6 @@ fn resolve_fill_rule(element: &Element) -> FillRule {
         Some("evenodd") => FillRule::EvenOdd,
         _ => FillRule::NonZero,
     }
-}
-
-fn resolve_linecap(element: &Element) -> LineCap {
-    match element
-        .attributes
-        .get("stroke-linecap")
-        .map(|value| value.trim().to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("round") => LineCap::Round,
-        Some("square") => LineCap::Square,
-        _ => LineCap::Butt,
-    }
-}
-
-fn resolve_linejoin(element: &Element) -> LineJoin {
-    match element
-        .attributes
-        .get("stroke-linejoin")
-        .map(|value| value.trim().to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("round") => LineJoin::Round,
-        Some("bevel") => LineJoin::Bevel,
-        Some("miter-clip") => LineJoin::MiterClip,
-        _ => LineJoin::Miter,
-    }
-}
-
-fn resolve_miterlimit(element: &Element) -> f32 {
-    element
-        .attributes
-        .get("stroke-miterlimit")
-        .and_then(|value| value.trim().parse::<f32>().ok())
-        .filter(|value| value.is_finite() && *value > 0.0)
-        .unwrap_or(4.0)
 }
 
 #[cfg(test)]

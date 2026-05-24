@@ -10,17 +10,17 @@
 //! shapes — see [`crate::shapes`]. `transform` and grouping are not handled
 //! yet — see the crate roadmap.
 
-use lyon_tessellation::geometry_builder::{BuffersBuilder, VertexBuffers};
 use lyon_tessellation::path::builder::SvgPathBuilder;
 use lyon_tessellation::path::math::{point, vector, Angle};
 use lyon_tessellation::path::{ArcFlags, Path};
-use lyon_tessellation::{LineCap, LineJoin, StrokeOptions, StrokeTessellator, StrokeVertex};
+use lyon_tessellation::{LineCap, LineJoin, StrokeOptions};
 use svg3_dom::Element;
 
-use super::{resolve_length, sdf_quad, vertex, Length, Viewport, KIND_ROUND_BOX, SDF_PAD};
-use crate::{Mesh, Vertex};
-
-const STROKE_FLATTENING_TOLERANCE: f32 = 0.1;
+use super::{
+    resolve_length, sdf_quad, tessellate_stroke_path, vertex, Length, Viewport, KIND_ROUND_BOX,
+    LYON_FLATTENING_TOLERANCE, SDF_PAD,
+};
+use crate::Mesh;
 
 /// A `<rect>`'s geometry after SVG 1.1 defaulting and corner-radius
 /// clamping. All values are in SVG user units.
@@ -111,12 +111,14 @@ pub(crate) fn tessellate_rect(geo: &RectGeometry, color: [f32; 4]) -> Mesh {
 
 /// Tessellate a resolved rectangle's stroke into triangle geometry.
 ///
-/// The stroke follows the SVG rectangle outline, including rounded corners.
-/// Stroke line joins use SVG's initial miter join; line caps are irrelevant
-/// because the path is closed.
+/// The stroke follows the SVG rectangle outline, including rounded corners,
+/// and respects the resolved line join and miter limit. Line caps are
+/// irrelevant because the path is closed.
 pub(crate) fn tessellate_rect_stroke(
     geo: &RectGeometry,
     stroke_width: f32,
+    stroke_linejoin: LineJoin,
+    stroke_miterlimit: f32,
     color: [f32; 4],
 ) -> Mesh {
     if stroke_width <= 0.0 {
@@ -124,30 +126,13 @@ pub(crate) fn tessellate_rect_stroke(
     }
 
     let path = outline_path(geo);
-    let mut buffers: VertexBuffers<Vertex, u32> = VertexBuffers::new();
     let options = StrokeOptions::default()
         .with_line_width(stroke_width)
         .with_line_cap(LineCap::Butt)
-        .with_line_join(LineJoin::Miter)
-        .with_miter_limit(4.0)
-        .with_tolerance(STROKE_FLATTENING_TOLERANCE);
-    let mut tessellator = StrokeTessellator::new();
-    let mut builder = BuffersBuilder::new(&mut buffers, move |v: StrokeVertex<'_, '_>| {
-        let p = v.position();
-        vertex(p.x, p.y, color)
-    });
-
-    if tessellator
-        .tessellate_path(&path, &options, &mut builder)
-        .is_err()
-    {
-        return Mesh::default();
-    }
-
-    Mesh {
-        vertices: buffers.vertices,
-        indices: buffers.indices,
-    }
+        .with_line_join(stroke_linejoin)
+        .with_miter_limit(stroke_miterlimit)
+        .with_tolerance(LYON_FLATTENING_TOLERANCE);
+    tessellate_stroke_path(&path, &options, color)
 }
 
 fn sharp_mesh(geo: &RectGeometry, color: [f32; 4]) -> Mesh {
@@ -249,6 +234,36 @@ mod tests {
             width: 100.0,
             height: 100.0,
         }
+    }
+
+    fn assert_close(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() < 1e-4,
+            "expected {actual} to be close to {expected}"
+        );
+    }
+
+    fn assert_bounds(mesh: &Mesh, expected: [f32; 4]) {
+        let [min_x, min_y, max_x, max_y] = mesh.vertices.iter().fold(
+            [
+                f32::INFINITY,
+                f32::INFINITY,
+                f32::NEG_INFINITY,
+                f32::NEG_INFINITY,
+            ],
+            |[min_x, min_y, max_x, max_y], vertex| {
+                [
+                    min_x.min(vertex.position[0]),
+                    min_y.min(vertex.position[1]),
+                    max_x.max(vertex.position[0]),
+                    max_y.max(vertex.position[1]),
+                ]
+            },
+        );
+        assert_close(min_x, expected[0]);
+        assert_close(min_y, expected[1]);
+        assert_close(max_x, expected[2]);
+        assert_close(max_y, expected[3]);
     }
 
     #[test]
@@ -443,13 +458,14 @@ mod tests {
             vp(),
         )
         .unwrap();
-        let mesh = tessellate_rect_stroke(&geo, 4.0, [0.0, 0.0, 1.0, 1.0]);
+        let mesh = tessellate_rect_stroke(&geo, 4.0, LineJoin::Miter, 4.0, [0.0, 0.0, 1.0, 1.0]);
         assert!(!mesh.is_empty());
         assert!(mesh
             .vertices
             .iter()
             .all(|vertex| vertex.color == [0.0, 0.0, 1.0, 1.0]));
         assert!(mesh.indices.len().is_multiple_of(3));
+        assert_bounds(&mesh, [8.0, 8.0, 62.0, 62.0]);
     }
 
     #[test]
@@ -466,14 +482,27 @@ mod tests {
             vp(),
         )
         .unwrap();
-        let mesh = tessellate_rect_stroke(&geo, 4.0, [0.0, 0.0, 1.0, 1.0]);
+        let mesh = tessellate_rect_stroke(&geo, 4.0, LineJoin::Miter, 4.0, [0.0, 0.0, 1.0, 1.0]);
         assert!(!mesh.is_empty());
         assert!(mesh.vertices.len() > 4);
+        assert_bounds(&mesh, [8.0, 8.0, 62.0, 62.0]);
+    }
+
+    #[test]
+    fn tessellate_rect_stroke_uses_linejoin() {
+        let geo = resolve_rect(
+            &rect(&[("x", "10"), ("y", "10"), ("width", "50"), ("height", "50")]),
+            vp(),
+        )
+        .unwrap();
+        let miter = tessellate_rect_stroke(&geo, 6.0, LineJoin::Miter, 4.0, [0.0, 0.0, 1.0, 1.0]);
+        let round = tessellate_rect_stroke(&geo, 6.0, LineJoin::Round, 4.0, [0.0, 0.0, 1.0, 1.0]);
+        assert!(round.vertices.len() > miter.vertices.len());
     }
 
     #[test]
     fn tessellate_rect_stroke_skips_non_positive_width() {
         let geo = resolve_rect(&rect(&[("width", "50"), ("height", "50")]), vp()).unwrap();
-        assert!(tessellate_rect_stroke(&geo, 0.0, [1.0; 4]).is_empty());
+        assert!(tessellate_rect_stroke(&geo, 0.0, LineJoin::Miter, 4.0, [1.0; 4]).is_empty());
     }
 }

@@ -152,6 +152,8 @@ fn append_element_mesh(element: &svg3_dom::Element, viewport: Viewport, mesh: &m
                     mesh.append(shapes::rect::tessellate_rect_stroke(
                         &geo,
                         shapes::resolve_stroke_width(element, viewport),
+                        shapes::resolve_linejoin(element),
+                        shapes::resolve_miterlimit(element),
                         color,
                     ));
                 }

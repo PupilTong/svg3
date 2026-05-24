@@ -30,6 +30,31 @@ fn assert_all_vertices_are(mesh: &Mesh, color: [f32; 4]) {
     );
 }
 
+fn assert_vertex_bounds(mesh: &Mesh, expected: [f32; 4]) {
+    let actual = mesh.vertices.iter().fold(
+        [
+            f32::INFINITY,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NEG_INFINITY,
+        ],
+        |[min_x, min_y, max_x, max_y], vertex| {
+            [
+                min_x.min(vertex.position[0]),
+                min_y.min(vertex.position[1]),
+                max_x.max(vertex.position[0]),
+                max_y.max(vertex.position[1]),
+            ]
+        },
+    );
+    for (actual_component, expected_component) in actual.into_iter().zip(expected) {
+        assert!(
+            (actual_component - expected_component).abs() < 1e-4,
+            "expected bounds {expected:?}, got {actual:?}"
+        );
+    }
+}
+
 #[test]
 fn wpt_rect_fill_and_degenerate_cases_pass() {
     // WPT `svg/shapes/rect-01.svg`: a basic filled rect renders.
@@ -166,6 +191,8 @@ fn wpt_rect_stroke_case_passes() {
         !mesh.is_empty(),
         "rect stroke geometry should be emitted even when fill is none"
     );
+    assert_all_vertices_are(&mesh, [0.0, 0.0, 1.0, 1.0]);
+    assert_vertex_bounds(&mesh, [8.0, 8.0, 62.0, 62.0]);
 }
 
 #[test]
