@@ -2,9 +2,9 @@
 //
 // Vertex positions arrive in SVG/world space; the vertex stage applies the
 // configured view-projection matrix. Solid triangle geometry (`KIND_SOLID`)
-// is painted at full coverage. The curved primitives and `<line>` arrive as
-// bounding quads: the fragment stage evaluates a signed-distance function on
-// the interpolated shape-local coordinate and derives anti-aliased coverage.
+// is painted at full coverage. The curved primitives arrive as bounding
+// quads: the fragment stage evaluates a signed-distance function on the
+// interpolated shape-local coordinate and derives anti-aliased coverage.
 // Colours are linear RGBA; the `Rgba8UnormSrgb` target encodes them on store.
 
 // Shape-kind tags. Must stay in sync with the `KIND_*` constants in shape.rs.

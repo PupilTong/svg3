@@ -1,14 +1,15 @@
-//! SVG 1.1 `<polyline>` — point-list resolution and fill tessellation.
+//! SVG 1.1 `<polyline>` — point-list resolution plus fill and stroke tessellation.
 //!
 //! `<polyline>` is a two-dimensional basic shape; per [`SPEC.md`](../../SPEC.md)
 //! §3.1 it lies in the plane `z = 0`. This module turns a parsed `<polyline>`
-//! [`Element`] into filled triangle geometry in SVG user space, applying the
-//! SVG 1.1 geometry rules ([SVG11] §9.6 and §9.7). Stroke rendering is not
-//! implemented yet, so only the SVG fill behavior is represented: the open
-//! polyline is closed by the fill operation.
+//! [`Element`] into filled and stroked triangle geometry in SVG user space,
+//! applying the SVG 1.1 geometry rules ([SVG11] §9.6 and §9.7). SVG fills
+//! open subpaths as if they were closed, while strokes keep the path open.
 
+use lyon_tessellation::path::Path;
 use svg3_dom::Element;
 
+use super::stroke::{self, StrokeStyle};
 use super::triangulate::triangulate;
 use super::vertex;
 use crate::Mesh;
@@ -34,14 +35,13 @@ pub(crate) struct PolylineGeometry {
 ///
 /// SVG 1.1 `points` coordinates are plain numbers, not lengths; units and
 /// percentages are rejected. Missing, malformed, odd, or degenerate point
-/// lists are skipped. Because this renderer does not support stroke yet, fewer
-/// than three distinct points have no filled area and contribute no geometry.
+/// lists are skipped. Two distinct points are enough for stroke geometry;
+/// fill tessellation separately rejects lists with no closed area.
 pub(crate) fn resolve_polyline(element: &Element) -> Option<PolylineGeometry> {
     let points = element.attributes.get("points")?;
     let points = parse_points(points)?;
     let points = normalize_points(points);
-    (points.len() >= 3 && signed_area(&points).abs() > EPSILON)
-        .then_some(PolylineGeometry { points })
+    (points.len() >= 2).then_some(PolylineGeometry { points })
 }
 
 /// Tessellate a resolved polyline into a filled triangle [`Mesh`].
@@ -51,6 +51,10 @@ pub(crate) fn resolve_polyline(element: &Element) -> Option<PolylineGeometry> {
 /// simple polygons; self-intersecting point lists may produce incorrect
 /// geometry until the fill-rule pipeline exists.
 pub(crate) fn tessellate_polyline(geo: &PolylineGeometry, color: [f32; 4]) -> Mesh {
+    if geo.points.len() < 3 || signed_area(&geo.points).abs() <= EPSILON {
+        return Mesh::default();
+    }
+
     let points: Vec<(f32, f32)> = geo.points.iter().map(|p| (p.x, p.y)).collect();
     let vertices = points.iter().map(|&(x, y)| vertex(x, y, color)).collect();
     let indices = triangulate(&points)
@@ -58,6 +62,21 @@ pub(crate) fn tessellate_polyline(geo: &PolylineGeometry, color: [f32; 4]) -> Me
         .flat_map(|tri| tri.map(|index| index as u32))
         .collect();
     Mesh { vertices, indices }
+}
+
+/// Tessellate a resolved polyline's open stroke into triangle geometry.
+pub(crate) fn tessellate_polyline_stroke(
+    geo: &PolylineGeometry,
+    style: &StrokeStyle,
+    color: [f32; 4],
+) -> Mesh {
+    stroke::tessellate_stroke_path(&to_path(geo), style, color)
+}
+
+/// Convert the polyline to an open Lyon path for stroke and marker logic.
+pub(crate) fn to_path(geo: &PolylineGeometry) -> Path {
+    let points: Vec<(f32, f32)> = geo.points.iter().map(|point| (point.x, point.y)).collect();
+    stroke::path_from_points(&points, false).expect("resolved polyline has points")
 }
 
 fn parse_points(value: &str) -> Option<Vec<Point>> {
@@ -77,7 +96,7 @@ fn parse_points(value: &str) -> Option<Vec<Point>> {
         cursor = consume_coordinate_separator(bytes, cursor)?;
     }
 
-    if coordinates.len() < 6 || coordinates.len() % 2 != 0 {
+    if coordinates.len() < 4 || coordinates.len() % 2 != 0 {
         return None;
     }
 
@@ -205,6 +224,7 @@ fn signed_area(points: &[Point]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Viewport;
     use svg3_dom::ElementKind;
 
     fn polyline(points: &str) -> Element {
@@ -213,6 +233,22 @@ mod tests {
             .attributes
             .insert("points".to_owned(), points.to_owned());
         element
+    }
+
+    fn style(attrs: &[(&str, &str)]) -> StrokeStyle {
+        let mut element = Element::new(ElementKind::Polyline);
+        for (key, value) in attrs {
+            element
+                .attributes
+                .insert((*key).to_owned(), (*value).to_owned());
+        }
+        stroke::resolve_stroke_style(
+            &element,
+            Viewport {
+                width: 100.0,
+                height: 100.0,
+            },
+        )
     }
 
     #[test]
@@ -244,9 +280,9 @@ mod tests {
     #[test]
     fn resolve_polyline_skips_degenerate_or_malformed_points() {
         assert_eq!(resolve_polyline(&Element::new(ElementKind::Polyline)), None);
-        assert_eq!(resolve_polyline(&polyline("10,10 20,20")), None);
+        assert!(resolve_polyline(&polyline("10,10 20,20")).is_some());
         assert_eq!(resolve_polyline(&polyline("10,10 20,20 30")), None);
-        assert_eq!(resolve_polyline(&polyline("10,10 20,20 30,30")), None);
+        assert!(resolve_polyline(&polyline("10,10 20,20 30,30")).is_some());
         assert_eq!(resolve_polyline(&polyline("0,0 50%,50 100,0")), None);
         assert_eq!(resolve_polyline(&polyline("0,0 50px,50 100,0")), None);
         assert_eq!(resolve_polyline(&polyline("0,0 50,50+100,0")), None);
@@ -287,6 +323,32 @@ mod tests {
         let mesh = tessellate_polyline(&geo, [1.0; 4]);
         assert_eq!(mesh.vertices.len(), 3);
         assert_eq!(mesh.indices.len(), 3);
+    }
+
+    #[test]
+    fn tessellate_polyline_fill_skips_open_line_area() {
+        let geo = resolve_polyline(&polyline("10,10 20,20")).unwrap();
+        assert!(tessellate_polyline(&geo, [1.0; 4]).is_empty());
+
+        let geo = resolve_polyline(&polyline("10,10 20,20 30,30")).unwrap();
+        assert!(tessellate_polyline(&geo, [1.0; 4]).is_empty());
+    }
+
+    #[test]
+    fn tessellate_polyline_stroke_keeps_path_open() {
+        let geo = resolve_polyline(&polyline("10,10 80,10 80,60")).unwrap();
+        let mesh = tessellate_polyline_stroke(
+            &geo,
+            &style(&[
+                ("stroke-width", "6"),
+                ("stroke-linejoin", "round"),
+                ("stroke-dasharray", "12 4"),
+            ]),
+            [0.0, 0.0, 1.0, 1.0],
+        );
+
+        assert!(!mesh.is_empty());
+        assert_eq!(mesh.indices.len() % 3, 0);
     }
 
     fn mesh_area(mesh: &Mesh) -> f32 {

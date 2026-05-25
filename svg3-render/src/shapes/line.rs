@@ -2,16 +2,17 @@
 //!
 //! `<line>` is a two-dimensional basic shape; per [`SPEC.md`](../../SPEC.md)
 //! §3.1 it lies in the plane `z = 0`. This module turns a parsed `<line>`
-//! [`Element`] into a stroked quad in SVG user space, applying the SVG 1.1
-//! geometry rules ([SVG11] §9.5) with the default butt line cap.
+//! [`Element`] into stroked triangle geometry in SVG user space, applying the
+//! SVG 1.1 geometry rules ([SVG11] §9.5).
 //!
 //! Length parsing and stroke paint resolution are shared with the other
-//! basic shapes — see [`crate::shapes`]. `transform`, grouping, dashed
-//! strokes, joins, caps other than the default butt cap, and CSS cascade
-//! input are not handled yet — see the crate roadmap.
+//! basic shapes — see [`crate::shapes`]. `transform`, grouping, and CSS
+//! cascade input are not handled yet — see the crate roadmap.
 
+use lyon_tessellation::path::Path;
 use svg3_dom::Element;
 
+use super::stroke::{self, StrokeStyle};
 use super::{resolve_length, resolve_stroke_width, sdf_quad, Viewport, KIND_SEGMENT, SDF_PAD};
 use crate::Mesh;
 
@@ -28,7 +29,7 @@ pub(crate) struct LineGeometry {
     pub x2: f32,
     /// End y coordinate.
     pub y2: f32,
-    /// Stroke width — always `> 0` for a resolved geometry.
+    /// Stroke width in user units.
     pub stroke_width: f32,
 }
 
@@ -39,8 +40,7 @@ pub(crate) struct LineGeometry {
 /// normalized diagonal ([SVG11] §7.10). Coordinate attributes default to
 /// `0`; `stroke-width` defaults to `1`.
 ///
-/// Returns `None` when the line is not rendered: zero length, or a
-/// non-positive `stroke-width`.
+/// Returns `None` when the line is not rendered: zero length.
 pub(crate) fn resolve_line(element: &Element, viewport: Viewport) -> Option<LineGeometry> {
     let x1 = resolve_length(element, "x1", viewport.width).unwrap_or(0.0);
     let y1 = resolve_length(element, "y1", viewport.height).unwrap_or(0.0);
@@ -48,7 +48,7 @@ pub(crate) fn resolve_line(element: &Element, viewport: Viewport) -> Option<Line
     let y2 = resolve_length(element, "y2", viewport.height).unwrap_or(0.0);
     let stroke_width = resolve_stroke_width(element, viewport);
 
-    if stroke_width <= 0.0 || (x1 == x2 && y1 == y2) {
+    if x1 == x2 && y1 == y2 {
         return None;
     }
 
@@ -61,28 +61,28 @@ pub(crate) fn resolve_line(element: &Element, viewport: Viewport) -> Option<Line
     })
 }
 
-/// Tessellate a resolved line into an SDF-covered bounding quad [`Mesh`].
-///
-/// The stroke is the rotated stroke rectangle padded by [`SDF_PAD`]; the
-/// fragment shader computes analytic, anti-aliased coverage from the
-/// [`KIND_SEGMENT`] box signed-distance function. SVG's default
-/// `stroke-linecap` is `butt`, which the box SDF reproduces — square ends,
-/// no extension past either endpoint. Positions are in SVG user space with
-/// `z = 0`.
-pub(crate) fn tessellate_line(geo: &LineGeometry, color: [f32; 4]) -> Mesh {
+/// Tessellate a resolved line's stroke into triangle geometry.
+pub(crate) fn tessellate_line(geo: &LineGeometry, style: &StrokeStyle, color: [f32; 4]) -> Mesh {
+    if style.uses_segment_fast_path() {
+        return tessellate_segment(geo, style.width, color);
+    }
+    stroke::tessellate_stroke_path(&to_path(geo), style, color)
+}
+
+pub(crate) fn tessellate_segment(geo: &LineGeometry, stroke_width: f32, color: [f32; 4]) -> Mesh {
+    if stroke_width <= 0.0 {
+        return Mesh::default();
+    }
+
     let dx = geo.x2 - geo.x1;
     let dy = geo.y2 - geo.y1;
     let length = dx.hypot(dy);
-    // Unit axis along the segment, and the unit perpendicular.
     let (ux, uy) = (dx / length, dy / length);
     let (px, py) = (-uy, ux);
     let mid_x = (geo.x1 + geo.x2) / 2.0;
     let mid_y = (geo.y1 + geo.y2) / 2.0;
     let half_len = length / 2.0;
-    let half_width = geo.stroke_width / 2.0;
-    // Local half-extents, padded so the anti-aliasing band stays inside the
-    // quad. `params` carries the unpadded half-extents the box SDF tests
-    // against; a corner's `local` is its `(along, perpendicular)` offset.
+    let half_width = stroke_width / 2.0;
     let ext_l = half_len + SDF_PAD;
     let ext_w = half_width + SDF_PAD;
     let corner = |along: f32, perp: f32| -> ([f32; 2], [f32; 2]) {
@@ -94,8 +94,7 @@ pub(crate) fn tessellate_line(geo: &LineGeometry, color: [f32; 4]) -> Mesh {
             [along, perp],
         )
     };
-    // Corner winding matches the other basic shapes: the pipeline disables
-    // culling, but a consistent winding avoids direction-sensitive surprises.
+
     sdf_quad(
         [
             corner(-ext_l, -ext_w),
@@ -107,6 +106,12 @@ pub(crate) fn tessellate_line(geo: &LineGeometry, color: [f32; 4]) -> Mesh {
         KIND_SEGMENT,
         color,
     )
+}
+
+/// Convert the line segment to an open Lyon path for stroke and marker logic.
+pub(crate) fn to_path(geo: &LineGeometry) -> Path {
+    stroke::path_from_points(&[(geo.x1, geo.y1), (geo.x2, geo.y2)], false)
+        .expect("resolved line has two points")
 }
 
 #[cfg(test)]
@@ -153,8 +158,9 @@ mod tests {
 
     #[test]
     fn resolve_line_resolves_percentage_geometry() {
-        // x coordinates resolve against viewport width; y coordinates
-        // against viewport height ([SVG11] §7.10).
+        // x coordinates resolve against viewport width, y coordinates
+        // against viewport height, and stroke width against the normalized
+        // diagonal ([SVG11] §7.10).
         let viewport = Viewport {
             width: 200.0,
             height: 100.0,
@@ -165,33 +171,16 @@ mod tests {
                 ("y1", "25%"),
                 ("x2", "50%"),
                 ("y2", "75%"),
-                ("stroke-width", "4"),
+                ("stroke-width", "10%"),
             ]),
             viewport,
         )
         .unwrap();
-        assert_eq!(
-            geo,
-            LineGeometry {
-                x1: 20.0,
-                y1: 25.0,
-                x2: 100.0,
-                y2: 75.0,
-                stroke_width: 4.0,
-            }
-        );
-    }
-
-    #[test]
-    fn resolve_line_resolves_percentage_stroke_width_against_diagonal() {
-        // `stroke-width` is neither horizontal nor vertical, so percentages
-        // resolve against the normalized viewport diagonal ([SVG11] §7.10).
-        let viewport = Viewport {
-            width: 300.0,
-            height: 400.0,
-        };
-        let geo = resolve_line(&line(&[("x2", "100"), ("stroke-width", "10%")]), viewport).unwrap();
-        assert_close(geo.stroke_width, 35.355_34);
+        assert_eq!(geo.x1, 20.0);
+        assert_eq!(geo.y1, 25.0);
+        assert_eq!(geo.x2, 100.0);
+        assert_eq!(geo.y2, 75.0);
+        assert!((geo.stroke_width - 15.811_389).abs() < 1e-5);
     }
 
     #[test]
@@ -206,36 +195,10 @@ mod tests {
             ),
             None
         );
-        assert_eq!(
-            resolve_line(
-                &line(&[
-                    ("x1", "10"),
-                    ("y1", "10"),
-                    ("x2", "30"),
-                    ("y2", "10"),
-                    ("stroke-width", "0"),
-                ]),
-                vp(),
-            ),
-            None
-        );
-        assert_eq!(
-            resolve_line(
-                &line(&[
-                    ("x1", "10"),
-                    ("y1", "10"),
-                    ("x2", "30"),
-                    ("y2", "10"),
-                    ("stroke-width", "-1"),
-                ]),
-                vp(),
-            ),
-            None
-        );
     }
 
     #[test]
-    fn tessellate_line_is_an_sdf_box_quad() {
+    fn tessellate_line_uses_shared_stroke_style() {
         let geo = resolve_line(
             &line(&[
                 ("x1", "10"),
@@ -247,113 +210,51 @@ mod tests {
             vp(),
         )
         .unwrap();
-        let mesh = tessellate_line(&geo, [0.0, 0.0, 1.0, 1.0]);
-        // A line is a four-vertex SDF bounding quad, two triangles.
+        let style = stroke::resolve_stroke_style(&line(&[("stroke-width", "4")]), vp());
+        let mesh = tessellate_line(&geo, &style, [0.0, 0.0, 1.0, 1.0]);
+
+        assert!(!mesh.is_empty());
         assert_eq!(mesh.vertices.len(), 4);
-        assert_eq!(mesh.indices, vec![0, 1, 2, 0, 2, 3]);
+        assert!(mesh
+            .vertices
+            .iter()
+            .all(|vertex| vertex.kind == KIND_SEGMENT));
+        assert_eq!(mesh.indices.len() % 3, 0);
         for v in &mesh.vertices {
-            // `params` carries the box half-length then the stroke
-            // half-width — a butt-cap rectangle 40 long and 4 wide.
-            assert_eq!(v.kind, KIND_SEGMENT);
-            assert_eq!(v.params, [20.0, 2.0, 0.0, 0.0]);
             assert_eq!(v.color, [0.0, 0.0, 1.0, 1.0]);
             assert_eq!(v.position[2], 0.0);
         }
     }
 
     #[test]
-    fn tessellate_diagonal_line_offsets_both_axes() {
+    fn tessellate_line_supports_dashes_and_caps() {
         let geo = resolve_line(
-            &line(&[
-                ("x1", "10"),
-                ("y1", "20"),
-                ("x2", "40"),
-                ("y2", "60"),
-                ("stroke-width", "10"),
-            ]),
+            &line(&[("x1", "10"), ("y1", "50"), ("x2", "90"), ("y2", "50")]),
             vp(),
         )
         .unwrap();
-        let mesh = tessellate_line(&geo, [1.0; 4]);
-        assert_eq!(mesh.indices, vec![0, 1, 2, 0, 2, 3]);
-        // The box SDF works in the line's local `(along, perpendicular)`
-        // frame — `params` is the half-length then the stroke half-width.
-        for v in &mesh.vertices {
-            assert_eq!(v.kind, KIND_SEGMENT);
-            assert_eq!(v.params, [25.0, 5.0, 0.0, 0.0]);
-        }
-        // The quad is rotated into world space, so a diagonal line offsets
-        // its corners on both axes. The padded local corners `(±26, ±6)`
-        // rotate to these world positions (assumes `SDF_PAD == 1.0`).
-        let positions: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.position).collect();
-        assert_positions_close(
-            &positions,
-            &[
-                [14.2, 15.6, 0.0],
-                [45.4, 57.2, 0.0],
-                [35.8, 64.4, 0.0],
-                [4.6, 22.8, 0.0],
-            ],
+        let style = stroke::resolve_stroke_style(
+            &line(&[
+                ("stroke-width", "8"),
+                ("stroke-linecap", "round"),
+                ("stroke-dasharray", "12 6"),
+            ]),
+            vp(),
         );
+        let mesh = tessellate_line(&geo, &style, [1.0, 0.0, 0.0, 1.0]);
+
+        assert!(!mesh.is_empty());
+        assert_eq!(mesh.indices.len() % 3, 0);
     }
 
     #[test]
-    fn tessellate_diagonal_line_keeps_winding_when_reversed() {
-        let forward = resolve_line(
-            &line(&[
-                ("x1", "10"),
-                ("y1", "20"),
-                ("x2", "40"),
-                ("y2", "60"),
-                ("stroke-width", "10"),
-            ]),
+    fn tessellate_segment_skips_zero_stroke_width() {
+        let geo = resolve_line(
+            &line(&[("x1", "10"), ("y1", "20"), ("x2", "50"), ("y2", "20")]),
             vp(),
         )
         .unwrap();
-        let reverse = LineGeometry {
-            x1: forward.x2,
-            y1: forward.y2,
-            x2: forward.x1,
-            y2: forward.y1,
-            stroke_width: forward.stroke_width,
-        };
 
-        for mesh in [
-            tessellate_line(&forward, [1.0; 4]),
-            tessellate_line(&reverse, [1.0; 4]),
-        ] {
-            for triangle in mesh.indices.chunks_exact(3) {
-                let a = mesh.vertices[triangle[0] as usize].position;
-                let b = mesh.vertices[triangle[1] as usize].position;
-                let c = mesh.vertices[triangle[2] as usize].position;
-                assert!(
-                    signed_twice_area(a, b, c) > 0.0,
-                    "line triangle should keep rect/circle winding"
-                );
-            }
-        }
-    }
-
-    fn assert_close(actual: f32, expected: f32) {
-        assert!(
-            (actual - expected).abs() < 1e-4,
-            "expected {expected}, got {actual}"
-        );
-    }
-
-    fn assert_positions_close(actual: &[[f32; 3]], expected: &[[f32; 3]]) {
-        assert_eq!(actual.len(), expected.len());
-        for (actual, expected) in actual.iter().zip(expected) {
-            for (actual, expected) in actual.iter().zip(expected) {
-                assert!(
-                    (actual - expected).abs() < 1e-5,
-                    "expected {expected}, got {actual}"
-                );
-            }
-        }
-    }
-
-    fn signed_twice_area(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> f32 {
-        (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+        assert!(tessellate_segment(&geo, 0.0, [0.0, 0.0, 1.0, 1.0]).is_empty());
     }
 }

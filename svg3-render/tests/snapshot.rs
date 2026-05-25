@@ -2,8 +2,9 @@
 //!
 //! Each case parses an svg3 document — the SVG WPT `shapes/rect-*`,
 //! `shapes/circle-*`, `shapes/ellipse-*`, and `shapes/polygon-*` reference
-//! tests, plus polyline fill, line, path, Gaussian blur and image filters,
-//! mixed-shape, and canonical SVG samples — renders it headlessly with
+//! tests, plus polyline fill, stroked shapes, line, path, markers, Gaussian
+//! blur and image filters, mixed-shape, and canonical SVG samples — renders
+//! it headlessly with
 //! [`Renderer::render_to_image`], and compares the result against a committed
 //! golden PNG in `tests/snapshots/`. Those
 //! PNGs are the reviewable snapshots — open them in a pull request to see
@@ -189,6 +190,12 @@ fn cases() -> Vec<Case> {
             "rect-rounded-clamped",
             r#"<svg><rect x="15" y="30" width="70" height="40" rx="80" ry="80" fill="blue"/></svg>"#,
         ),
+        // Basic-shape stroke: fill paints first, then a dashed rounded-rect
+        // stroke is tessellated through the same mesh path.
+        Case::square(
+            "rect-rounded-dashed-stroke",
+            r##"<svg><rect x="14" y="16" width="72" height="68" rx="14" ry="22" fill="#f2c14e" stroke="#13294b" stroke-width="8" stroke-dasharray="12 7" stroke-linejoin="round"/></svg>"##,
+        ),
         // WPT `shapes/rect-05`: a zero-width rectangle is not rendered.
         Case::square(
             "rect-zero-size",
@@ -229,6 +236,13 @@ fn cases() -> Vec<Case> {
             "circle-hex-fill",
             r##"<svg><circle cx="50" cy="50" r="38" fill="#11aa55"/></svg>"##,
         ),
+        // Circular stroke dashes are calibrated by `pathLength`, so the dash
+        // pattern follows the authored path-length scale rather than raw user
+        // units.
+        Case::square(
+            "circle-dashed-pathlength-stroke",
+            r##"<svg><circle cx="50" cy="50" r="34" fill="none" stroke="#2563eb" stroke-width="9" stroke-dasharray="10 7" stroke-dashoffset="4" pathLength="100"/></svg>"##,
+        ),
         // SVG WPT `shapes/ellipse-*`: a basic filled ellipse, wider than it
         // is tall so it is visibly not a circle.
         Case::square(
@@ -250,6 +264,12 @@ fn cases() -> Vec<Case> {
             "ellipse-overlap",
             r#"<svg><ellipse cx="40" cy="44" rx="38" ry="24" fill="blue"/><ellipse cx="62" cy="58" rx="30" ry="40" fill="red"/></svg>"#,
         ),
+        // Stroke opacity and global opacity multiply the stroke paint before
+        // compositing over the filled ground.
+        Case::square(
+            "ellipse-stroke-opacity",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><ellipse cx="50" cy="50" rx="38" ry="24" fill="none" stroke="#f2c14e" stroke-width="12" stroke-opacity="0.7" opacity="0.8"/></svg>"##,
+        ),
         // WPT `shapes/polygon-*`: a basic filled (convex) triangle.
         Case::square(
             "polygon-triangle",
@@ -260,6 +280,12 @@ fn cases() -> Vec<Case> {
         Case::square(
             "polygon-star",
             r##"<svg><polygon points="50,5 61,35 93,36 67,56 76,86 50,68 24,86 33,56 7,36 39,35" fill="#11aa55"/></svg>"##,
+        ),
+        // Polygon strokes exercise closed-path joins independently from fill
+        // triangulation.
+        Case::square(
+            "polygon-round-join-stroke",
+            r##"<svg><polygon points="50,8 88,84 12,84" fill="#f2c14e" stroke="#c14b2b" stroke-width="12" stroke-linejoin="round"/></svg>"##,
         ),
         // SVG WPT `shapes/polyline-*`: an open point list is closed for fill
         // rendering, producing a filled triangle.
@@ -290,6 +316,12 @@ fn cases() -> Vec<Case> {
         Case::square(
             "polyline-overlap-order",
             r#"<svg><polyline points="10,84 50,10 90,84" fill="blue"/><rect x="35" y="45" width="30" height="30" fill="red"/></svg>"#,
+        ),
+        // Open polylines can now be stroked without requiring fill geometry,
+        // and dashes keep round caps and bevel joins through tessellation.
+        Case::square(
+            "polyline-dashed-roundcap-stroke",
+            r##"<svg><polyline points="10,78 32,24 56,76 78,24 90,78" fill="none" stroke="#11aa55" stroke-width="8" stroke-linecap="round" stroke-linejoin="bevel" stroke-dasharray="14 9"/></svg>"##,
         ),
         // Invalid SVG 1.1 point coordinates are skipped, so the red polyline
         // with a percentage coordinate does not cover the gray background.
@@ -332,6 +364,18 @@ fn cases() -> Vec<Case> {
         Case::square(
             "path-evenodd-hole",
             r##"<svg><path fill="#13294b" fill-rule="evenodd" d="M 10 10 H 90 V 90 H 10 Z M 30 30 H 70 V 70 H 30 Z"/></svg>"##,
+        ),
+        // Referenced markers are collected from `<defs>` and instanced at the
+        // start, middle, and end placements after the stroked polyline.
+        Case::square(
+            "polyline-markers",
+            r##"<svg><defs><marker id="dot" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="8" refX="4" refY="4"><circle cx="4" cy="4" r="4" fill="#f2c14e"/></marker><marker id="arrow" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="10" refX="10" refY="5" orient="auto"><path d="M0 0 L12 5 L0 10 Z" fill="#c14b2b"/></marker></defs><polyline points="14,72 38,28 64,72 86,28" fill="none" stroke="#2563eb" stroke-width="5" marker-start="url(#dot)" marker-mid="url(#dot)" marker-end="url(#arrow)"/></svg>"##,
+        ),
+        // A closed shape's end marker belongs at the initial vertex, not the
+        // last authored point before the implicit close segment.
+        Case::square(
+            "polygon-closed-marker-end",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><defs><marker id="dot" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" refX="5" refY="5" orient="0"><circle cx="5" cy="5" r="5" fill="#f2c14e"/></marker></defs><polygon points="24,24 78,26 76,78" fill="none" stroke="#2563eb" stroke-width="5" marker-end="url(#dot)"/></svg>"##,
         ),
         // Mixed basic shapes in painter's order: the line is composited over
         // filled rect/circle/ellipse geometry in one end-to-end scene.

@@ -4,23 +4,20 @@
 //! module parses its `d` attribute with `svgtypes` and tessellates the
 //! resulting path with Lyon, while keeping the rest of the crate's current
 //! presentation-attribute model: `fill`, `stroke`, `stroke-width`,
-//! `stroke-linecap`, `stroke-linejoin`, and `fill-rule` are read directly
-//! from attributes; CSS and transforms are not applied yet.
+//! `stroke-linecap`, `stroke-linejoin`, dashed strokes, `pathLength`, and
+//! `fill-rule` are read directly from attributes; CSS and transforms are not
+//! applied yet.
 
 use lyon_tessellation::geometry_builder::{BuffersBuilder, VertexBuffers};
 use lyon_tessellation::path::builder::SvgPathBuilder;
 use lyon_tessellation::path::math::{point, vector, Angle};
 use lyon_tessellation::path::{ArcFlags, Path};
-use lyon_tessellation::{
-    FillOptions, FillRule, FillTessellator, FillVertex, LineCap, LineJoin, StrokeOptions,
-};
+use lyon_tessellation::{FillOptions, FillRule, FillTessellator, FillVertex};
 use svg3_dom::Element;
 use svgtypes::{PathParser, PathSegment};
 
-use super::{
-    resolve_linecap, resolve_linejoin, resolve_miterlimit, resolve_stroke_width,
-    tessellate_stroke_path, vertex, Viewport, LYON_FLATTENING_TOLERANCE,
-};
+use super::stroke::{self, StrokeStyle, FLATTENING_TOLERANCE};
+use super::{vertex, Viewport};
 use crate::{Mesh, Vertex};
 
 /// A `<path>`'s resolved geometry and path-local paint parameters.
@@ -28,10 +25,14 @@ use crate::{Mesh, Vertex};
 pub(crate) struct PathGeometry {
     path: Path,
     fill_rule: FillRule,
-    stroke_width: f32,
-    stroke_linecap: LineCap,
-    stroke_linejoin: LineJoin,
-    stroke_miterlimit: f32,
+    stroke: StrokeStyle,
+}
+
+impl PathGeometry {
+    /// The resolved Lyon path used for fill, stroke, and marker placement.
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
 }
 
 /// Resolve a `<path>`'s `d` data and stroke geometry attributes.
@@ -44,10 +45,7 @@ pub(crate) fn resolve_path(element: &Element, viewport: Viewport) -> Option<Path
     Some(PathGeometry {
         path,
         fill_rule: resolve_fill_rule(element),
-        stroke_width: resolve_stroke_width(element, viewport),
-        stroke_linecap: resolve_linecap(element),
-        stroke_linejoin: resolve_linejoin(element),
-        stroke_miterlimit: resolve_miterlimit(element),
+        stroke: stroke::resolve_stroke_style(element, viewport),
     })
 }
 
@@ -56,7 +54,7 @@ pub(crate) fn tessellate_path_fill(geo: &PathGeometry, color: [f32; 4]) -> Mesh 
     let mut buffers: VertexBuffers<Vertex, u32> = VertexBuffers::new();
     let options = FillOptions::default()
         .with_fill_rule(geo.fill_rule)
-        .with_tolerance(LYON_FLATTENING_TOLERANCE);
+        .with_tolerance(FLATTENING_TOLERANCE);
     let mut tessellator = FillTessellator::new();
     let mut builder = BuffersBuilder::new(&mut buffers, move |v: FillVertex<'_>| {
         let p = v.position();
@@ -78,17 +76,7 @@ pub(crate) fn tessellate_path_fill(geo: &PathGeometry, color: [f32; 4]) -> Mesh 
 
 /// Tessellate a resolved path's stroke into triangle geometry.
 pub(crate) fn tessellate_path_stroke(geo: &PathGeometry, color: [f32; 4]) -> Mesh {
-    if geo.stroke_width <= 0.0 {
-        return Mesh::default();
-    }
-
-    let options = StrokeOptions::default()
-        .with_line_width(geo.stroke_width)
-        .with_line_cap(geo.stroke_linecap)
-        .with_line_join(geo.stroke_linejoin)
-        .with_miter_limit(geo.stroke_miterlimit)
-        .with_tolerance(LYON_FLATTENING_TOLERANCE);
-    tessellate_stroke_path(&geo.path, &options, color)
+    stroke::tessellate_stroke_path(&geo.path, &geo.stroke, color)
 }
 
 fn parse_path(data: &str) -> Option<Path> {
@@ -340,6 +328,22 @@ mod tests {
             },
         )
         .unwrap();
-        assert!((geo.stroke_width - 35.355_34).abs() < 1e-4);
+        assert!((geo.stroke.width - 35.355_34).abs() < 1e-4);
+    }
+
+    #[test]
+    fn tessellate_path_stroke_supports_dashes() {
+        let geo = resolve_path(
+            &path(&[
+                ("d", "M 10 20 H 90"),
+                ("stroke-width", "4"),
+                ("stroke-dasharray", "10 5"),
+            ]),
+            vp(),
+        )
+        .unwrap();
+        let dashed = tessellate_path_stroke(&geo, [1.0, 0.0, 0.0, 1.0]);
+
+        assert!(!dashed.is_empty());
     }
 }

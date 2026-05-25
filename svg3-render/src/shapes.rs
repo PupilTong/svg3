@@ -11,8 +11,8 @@
 //! [`triangulate`] ear clipper, since both fill an outline that may be
 //! concave.
 //!
-//! `fill-opacity`, `stroke-opacity`, CSS / `style=""`-set properties, and
-//! the Stylo cascade are not consulted yet — see the crate roadmap.
+//! CSS / `style=""`-set properties and the Stylo cascade are not consulted
+//! yet — see the crate roadmap.
 
 pub(crate) mod circle;
 pub(crate) mod ellipse;
@@ -21,12 +21,10 @@ pub(crate) mod path;
 pub(crate) mod polygon;
 pub(crate) mod polyline;
 pub(crate) mod rect;
+pub(crate) mod stroke;
 
 mod triangulate;
 
-use lyon_tessellation::geometry_builder::{BuffersBuilder, VertexBuffers};
-use lyon_tessellation::path::Path;
-use lyon_tessellation::{LineCap, LineJoin, StrokeOptions, StrokeTessellator, StrokeVertex};
 use svg3_dom::Element;
 
 use crate::{Mesh, Vertex};
@@ -35,7 +33,7 @@ use crate::{Mesh, Vertex};
 const DEFAULT_FILL: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 
 /// Shape-kind tags carried in [`Vertex::kind`]. Solid triangle geometry is
-/// [`KIND_SOLID`]; the curved primitives and `<line>` carry an SDF kind whose
+/// [`KIND_SOLID`]; the curved primitives carry an SDF kind whose
 /// coverage the fragment shader computes analytically. Must stay in sync with
 /// the `KIND_*` constants in `shader.wgsl`.
 pub(crate) const KIND_SOLID: u32 = 0;
@@ -50,24 +48,30 @@ pub(crate) const KIND_SEGMENT: u32 = 3;
 /// minification. Keep the two values in sync.
 pub(crate) const SDF_PAD: f32 = 1.0;
 
-/// Flattening tolerance, in user units, for Lyon path tessellation.
-pub(crate) const LYON_FLATTENING_TOLERANCE: f32 = 0.1;
-
 /// Resolve a shape's solid fill as linear RGBA in `[0, 1]`.
 ///
 /// Reads the `fill` presentation attribute only — the CSS `style=""` form
 /// and the Stylo cascade are not consulted yet. `fill="none"` yields
 /// `None` (no fill geometry). A missing or unparseable value falls back to
 /// the SVG 1.1 initial value, opaque black.
+#[cfg(test)]
 pub(crate) fn resolve_fill(element: &Element) -> Option<[f32; 4]> {
-    let Some(value) = element.attributes.get("fill") else {
-        return Some(DEFAULT_FILL);
+    resolve_fill_with_opacity(element, true)
+}
+
+pub(crate) fn resolve_fill_with_opacity(
+    element: &Element,
+    apply_opacity: bool,
+) -> Option<[f32; 4]> {
+    let mut color = match element.attributes.get("fill") {
+        Some(value) if value.trim().eq_ignore_ascii_case("none") => return None,
+        Some(value) => parse_color(value.trim()).unwrap_or(DEFAULT_FILL),
+        None => DEFAULT_FILL,
     };
-    let value = value.trim();
-    if value.eq_ignore_ascii_case("none") {
-        return None;
+    if apply_opacity {
+        color[3] *= resolve_opacity(element, "fill-opacity") * resolve_opacity(element, "opacity");
     }
-    Some(parse_color(value).unwrap_or(DEFAULT_FILL))
+    Some(color)
 }
 
 /// Resolve a shape's solid stroke as linear RGBA in `[0, 1]`.
@@ -75,12 +79,25 @@ pub(crate) fn resolve_fill(element: &Element) -> Option<[f32; 4]> {
 /// Reads the `stroke` presentation attribute only. Unlike `fill`, SVG 1.1's
 /// initial `stroke` value is `none`, so a missing `stroke`, `stroke="none"`,
 /// or an unrecognised paint produces no stroke geometry.
+#[cfg(test)]
 pub(crate) fn resolve_stroke(element: &Element) -> Option<[f32; 4]> {
+    resolve_stroke_with_opacity(element, true)
+}
+
+pub(crate) fn resolve_stroke_with_opacity(
+    element: &Element,
+    apply_opacity: bool,
+) -> Option<[f32; 4]> {
     let value = element.attributes.get("stroke")?.trim();
     if value.eq_ignore_ascii_case("none") {
         return None;
     }
-    parse_color(value)
+    let mut color = parse_color(value)?;
+    if apply_opacity {
+        color[3] *=
+            resolve_opacity(element, "stroke-opacity") * resolve_opacity(element, "opacity");
+    }
+    Some(color)
 }
 
 /// Resolve a named `<length>` presentation attribute to user units, taking a
@@ -104,71 +121,6 @@ pub(crate) fn resolve_length(element: &Element, name: &str, basis: f32) -> Optio
 /// nor vertical ([SVG11] §7.10).
 pub(crate) fn resolve_stroke_width(element: &Element, viewport: Viewport) -> f32 {
     resolve_length(element, "stroke-width", viewport.diagonal()).unwrap_or(1.0)
-}
-
-/// Resolve a shape's `stroke-linecap` presentation attribute.
-pub(crate) fn resolve_linecap(element: &Element) -> LineCap {
-    match element
-        .attributes
-        .get("stroke-linecap")
-        .map(|value| value.trim().to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("round") => LineCap::Round,
-        Some("square") => LineCap::Square,
-        _ => LineCap::Butt,
-    }
-}
-
-/// Resolve a shape's `stroke-linejoin` presentation attribute.
-pub(crate) fn resolve_linejoin(element: &Element) -> LineJoin {
-    match element
-        .attributes
-        .get("stroke-linejoin")
-        .map(|value| value.trim().to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("round") => LineJoin::Round,
-        Some("bevel") => LineJoin::Bevel,
-        Some("miter-clip") => LineJoin::MiterClip,
-        _ => LineJoin::Miter,
-    }
-}
-
-/// Resolve a shape's `stroke-miterlimit` presentation attribute.
-pub(crate) fn resolve_miterlimit(element: &Element) -> f32 {
-    element
-        .attributes
-        .get("stroke-miterlimit")
-        .and_then(|value| value.trim().parse::<f32>().ok())
-        .filter(|value| value.is_finite() && *value > 0.0)
-        .unwrap_or(4.0)
-}
-
-/// Tessellate a Lyon path stroke into triangle geometry.
-pub(crate) fn tessellate_stroke_path(
-    path: &Path,
-    options: &StrokeOptions,
-    color: [f32; 4],
-) -> Mesh {
-    let mut buffers: VertexBuffers<Vertex, u32> = VertexBuffers::new();
-    let mut tessellator = StrokeTessellator::new();
-    let mut builder = BuffersBuilder::new(&mut buffers, move |v: StrokeVertex<'_, '_>| {
-        let p = v.position();
-        vertex(p.x, p.y, color)
-    });
-
-    if tessellator
-        .tessellate_path(path, options, &mut builder)
-        .is_err()
-    {
-        return Mesh::default();
-    }
-
-    Mesh {
-        vertices: buffers.vertices,
-        indices: buffers.indices,
-    }
 }
 
 /// A solid-fill mesh [`Vertex`] at `(x, y)` in SVG user space. Basic shapes
@@ -313,6 +265,24 @@ pub(crate) fn parse_color_value(value: &str) -> Option<[f32; 4]> {
     }
 }
 
+fn resolve_opacity(element: &Element, name: &str) -> f32 {
+    element
+        .attributes
+        .get(name)
+        .and_then(|value| parse_opacity(value))
+        .unwrap_or(1.0)
+}
+
+fn parse_opacity(value: &str) -> Option<f32> {
+    let value = value.trim();
+    let opacity = if let Some(percent) = value.strip_suffix('%') {
+        percent.trim().parse::<f32>().ok()? / 100.0
+    } else {
+        value.parse::<f32>().ok()?
+    };
+    opacity.is_finite().then_some(opacity.clamp(0.0, 1.0))
+}
+
 fn parse_hex(hex: &str) -> Option<[f32; 4]> {
     if !hex.is_ascii() {
         return None;
@@ -342,7 +312,14 @@ fn byte(hi: u8, lo: u8) -> Option<u8> {
 /// A small subset of the SVG named colours — enough for the WPT basic-shape
 /// tests and common authoring.
 fn parse_named(name: &str) -> Option<[f32; 4]> {
-    let hex = match name.to_ascii_lowercase().as_str() {
+    let lower;
+    let name = if name.as_bytes().iter().any(u8::is_ascii_uppercase) {
+        lower = name.to_ascii_lowercase();
+        lower.as_str()
+    } else {
+        name
+    };
+    let hex = match name {
         "black" => "000000",
         "white" => "ffffff",
         "red" => "ff0000",
@@ -419,6 +396,10 @@ mod tests {
             Some([0.0, 0.0, 1.0, 1.0])
         );
         assert_eq!(
+            resolve_fill(&element(&[("fill", "BLUE")])),
+            Some([0.0, 0.0, 1.0, 1.0])
+        );
+        assert_eq!(
             resolve_fill(&element(&[("fill", "#0000ff")])),
             Some([0.0, 0.0, 1.0, 1.0])
         );
@@ -434,6 +415,14 @@ mod tests {
         assert_eq!(
             resolve_fill(&element(&[("fill", "bogus")])),
             Some([0.0, 0.0, 0.0, 1.0])
+        );
+        assert_eq!(
+            resolve_fill(&element(&[("fill", "blue"), ("fill-opacity", "50%")])),
+            Some([0.0, 0.0, 1.0, 0.5])
+        );
+        assert_eq!(
+            resolve_fill(&element(&[("fill", "blue"), ("opacity", "0.25")])),
+            Some([0.0, 0.0, 1.0, 0.25])
         );
     }
 
@@ -454,6 +443,14 @@ mod tests {
         );
         // Invalid stroke paint is ignored, leaving the initial `none`.
         assert_eq!(resolve_stroke(&element(&[("stroke", "bogus")])), None);
+        assert_eq!(
+            resolve_stroke(&element(&[("stroke", "blue"), ("stroke-opacity", "0.5")])),
+            Some([0.0, 0.0, 1.0, 0.5])
+        );
+        assert_eq!(
+            resolve_stroke(&element(&[("stroke", "blue"), ("opacity", "25%")])),
+            Some([0.0, 0.0, 1.0, 0.25])
+        );
     }
 
     #[test]
@@ -487,29 +484,6 @@ mod tests {
                 },
             ),
             35.355_34
-        );
-    }
-
-    #[test]
-    fn resolve_stroke_join_attributes() {
-        assert_eq!(resolve_linecap(&element(&[])), LineCap::Butt);
-        assert_eq!(
-            resolve_linecap(&element(&[("stroke-linecap", "round")])),
-            LineCap::Round
-        );
-        assert_eq!(resolve_linejoin(&element(&[])), LineJoin::Miter);
-        assert_eq!(
-            resolve_linejoin(&element(&[("stroke-linejoin", "bevel")])),
-            LineJoin::Bevel
-        );
-        assert_eq!(resolve_miterlimit(&element(&[])), 4.0);
-        assert_eq!(
-            resolve_miterlimit(&element(&[("stroke-miterlimit", "2")])),
-            2.0
-        );
-        assert_eq!(
-            resolve_miterlimit(&element(&[("stroke-miterlimit", "-1")])),
-            4.0
         );
     }
 

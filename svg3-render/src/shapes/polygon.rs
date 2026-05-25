@@ -1,19 +1,21 @@
-//! SVG 1.1 `<polygon>` — geometry resolution and fill tessellation.
+//! SVG 1.1 `<polygon>` — geometry resolution plus fill and stroke tessellation.
 //!
 //! `<polygon>` is a two-dimensional basic shape; per [`SPEC.md`](../../SPEC.md)
 //! §3.1 it lies in the plane `z = 0`. This module turns a parsed `<polygon>`
-//! [`Element`] into a filled triangle [`Mesh`] in SVG user space, applying
+//! [`Element`] into filled and stroked triangle [`Mesh`]es in SVG user space, applying
 //! the SVG 1.1 geometry rules ([SVG11] §9.7). The behavioural reference is
 //! the SVG WPT suite (`svg/shapes/polygon-0*.svg`).
 //!
 //! Unlike `<rect>` and `<circle>`, a polygon can be concave, so its fill is
 //! tessellated by ear clipping rather than a centre-pivoted triangle fan.
-//! `fill` resolution and the mesh [`Vertex`] constructor are shared with the
-//! other basic shapes — see [`crate::shapes`]. `transform` and grouping are
-//! not handled yet — see the crate roadmap.
+//! `fill` and stroke resolution and the mesh [`Vertex`] constructor are
+//! shared with the other basic shapes — see [`crate::shapes`]. `transform`
+//! and grouping are not handled yet — see the crate roadmap.
 
+use lyon_tessellation::path::Path;
 use svg3_dom::Element;
 
+use super::stroke::{self, StrokeStyle};
 use super::triangulate::triangulate;
 use super::vertex;
 use crate::Mesh;
@@ -119,6 +121,21 @@ pub(crate) fn tessellate_polygon(geo: &PolygonGeometry, color: [f32; 4]) -> Mesh
         .flat_map(|tri| tri.map(|index| index as u32))
         .collect();
     Mesh { vertices, indices }
+}
+
+/// Tessellate a resolved polygon's stroke into triangle geometry.
+pub(crate) fn tessellate_polygon_stroke(
+    geo: &PolygonGeometry,
+    style: &StrokeStyle,
+    color: [f32; 4],
+) -> Mesh {
+    stroke::tessellate_stroke_path(&to_path(geo), style, color)
+}
+
+/// Convert the polygon outline to a closed Lyon path for stroke and marker
+/// logic.
+pub(crate) fn to_path(geo: &PolygonGeometry) -> Path {
+    stroke::path_from_points(&geo.points, true).expect("resolved polygon has points")
 }
 
 #[cfg(test)]
