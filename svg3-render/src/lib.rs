@@ -13,21 +13,19 @@
 //! Filter primitives ship as fragment-shader pipelines backed by
 //! `filter.wgsl`, while PNG data-URL `<feImage>` sources decode/upload
 //! lazily when a referenced filter paints and are sampled through
-//! `image.wgsl`. [`Renderer::encode_document`]
-//! is the single GPU entry point: it walks a parsed document, tessellates
-//! every supported shape, runs each referenced filter's primitive chain
+//! `image.wgsl`. [`Renderer::encode_document`] is the one-shot entry point:
+//! it walks a parsed document, tessellates every supported shape, builds a
+//! temporary [`GpuDocument`], runs each referenced filter's primitive chain
 //! through offscreen ping/pong textures, and encodes the draws into a
-//! caller-supplied [`wgpu::CommandEncoder`] / [`wgpu::TextureView`]. Both
-//! render paths are built on top of it:
-//! [`Renderer::render_to_image`] wraps it with offscreen-texture allocation,
-//! a transparent [`clear_target`], and CPU readback to produce an [`Image`];
-//! a windowed caller (see the `app-macos` demo) wraps it with surface
-//! acquisition, [`clear_target`] to its background colour, and a `present`.
+//! caller-supplied [`wgpu::CommandEncoder`] / [`wgpu::TextureView`].
+//! Windowed callers can instead keep a [`GpuDocument`] from
+//! [`Renderer::create_document_scene`] and redraw it with
+//! [`Renderer::encode_prepared_document`] so camera-only movement updates
+//! transform uniforms without rebuilding geometry.
 //!
 //! [`Renderer::create_scene`] + [`Renderer::draw`] remain available for
 //! callers that want to pre-tessellate and re-draw a [`Mesh`] without going
-//! through the document walk; new code should prefer
-//! [`Renderer::encode_document`].
+//! through the document walk.
 //!
 //! Basic shapes are two-dimensional, so geometry lies in the world plane
 //! `z = 0`: by default it is drawn flat through the orthographic
@@ -54,6 +52,8 @@ mod shapes;
 
 pub use camera::{Camera, RenderConfig};
 pub use mesh::{Mesh, Vertex};
-pub use renderer::{clear_target, GpuScene, Image, RenderError, Renderer, DEPTH_FORMAT};
+pub use renderer::{
+    clear_target, GpuDocument, GpuScene, Image, RenderError, Renderer, DEPTH_FORMAT,
+};
 pub use scene::{build_scene, document_viewport};
 pub use shapes::Viewport;
