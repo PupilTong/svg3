@@ -752,6 +752,44 @@ fn cases() -> Vec<Case> {
             "cube-occluded-by-filtered-rect",
             r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><filter id="soft"><feGaussianBlur stdDeviation="3"/></filter><rect x="30" y="30" width="40" height="40" fill="#c14b2b" filter="url(#soft)"/><cube cx="50" cy="50" cz="-20" size="30" fill="#f2c14e"/></svg>"##,
         ),
+        // SPEC §5.3 `<ellipsoid>` through the orthographic default. With
+        // `rx = ry = rz`, the ellipsoid collapses to its bounding disc; an
+        // anisotropic `rx ≠ ry` case follows so the per-axis radii are
+        // visible in the silhouette.
+        Case::square(
+            "ellipsoid-orthographic",
+            r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><ellipsoid cx="50" cy="50" cz="0" r="30" fill="#f2c14e"/></svg>"##,
+        ),
+        Case::square(
+            "ellipsoid-anisotropic",
+            r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><ellipsoid cx="50" cy="50" cz="0" rx="40" ry="20" rz="20" fill="#c14b2b"/></svg>"##,
+        ),
+        // Through the camera the ellipsoid's depth is visible: the
+        // background `<rect>` at `z = 0` (per SPEC §7.3) occludes any
+        // ellipsoid surface behind it, so the off-axis camera reveals
+        // only the front hemisphere.
+        Case::square(
+            "ellipsoid-camera-angled",
+            r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><ellipsoid cx="50" cy="50" cz="0" r="25" fill="#f2c14e"/></svg>"##,
+        )
+        .with_camera({
+            let mut c = Camera::facing(100, 100);
+            c.eye.x += 60.0;
+            c
+        }),
+        // 2D-3D depth occlusion with `<ellipsoid>`. The ellipsoid lies
+        // fully behind the rect plane (cz = -25, r = 20 → z in [-45, -5]),
+        // so the rect at z = 0 hides it completely at the overlap.
+        Case::square(
+            "ellipsoid-occluded-by-2d-rect",
+            r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><rect x="30" y="30" width="40" height="40" fill="#c14b2b"/><ellipsoid cx="50" cy="50" cz="-25" r="20" fill="#f2c14e"/></svg>"##,
+        ),
+        // Converse: an ellipsoid in front of `z = 0` (cz = +25) paints
+        // over a coplanar 2D rect declared earlier as the background.
+        Case::square(
+            "ellipsoid-in-front-of-2d-rect",
+            r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><rect x="30" y="30" width="40" height="40" fill="#c14b2b"/><ellipsoid cx="50" cy="50" cz="25" r="20" fill="#f2c14e"/></svg>"##,
+        ),
     ]
 }
 

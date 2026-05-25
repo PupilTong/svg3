@@ -4,9 +4,10 @@
 //! with [wgpu](https://crates.io/crates/wgpu).
 //!
 //! This milestone implements the SVG 1.1 `<rect>`, `<circle>`, `<ellipse>`,
-//! `<polygon>`, `<polyline>`, `<line>`, and `<path>` shapes plus referenced
-//! `<filter>` elements composed from a multi-primitive chain executed
-//! end-to-end on the GPU. The supported primitives are `<feGaussianBlur>`,
+//! `<polygon>`, `<polyline>`, `<line>`, and `<path>` shapes, svg3's 3D
+//! `<cube>` and `<ellipsoid>` primitives, plus referenced `<filter>`
+//! elements composed from a multi-primitive chain executed end-to-end on
+//! the GPU. The supported primitives are `<feGaussianBlur>`,
 //! `<feImage>`, `<feColorMatrix>`, `<feTurbulence>`, `<feSpecularLighting>`,
 //! `<feDiffuseLighting>`, `<feMorphology>`, `<feFlood>`, `<feDropShadow>`,
 //! `<feDisplacementMap>`, `<feConvolveMatrix>`, and `<feComponentTransfer>`.
@@ -29,13 +30,17 @@
 //! through the document walk; new code should prefer
 //! [`Renderer::encode_document`].
 //!
-//! Basic shapes are two-dimensional, so geometry lies in the world plane
-//! `z = 0`: by default it is drawn flat through the orthographic
-//! [`RenderConfig::projection`], but an optional [`Camera`] on
-//! [`RenderConfig`] instead views that plane through a movable 3D
-//! perspective camera. The root `<svg width>` / `<svg height>` set the
-//! default viewport for percentage lengths; when either is omitted or
-//! invalid, the render target dimension is used.
+//! Basic shapes are two-dimensional, so their geometry lies in the world
+//! plane `z = 0`; the 3D `<cube>` and `<ellipsoid>` primitives occupy the
+//! cuboid / implicit-surface volume implied by their attributes. By
+//! default content is drawn through the orthographic
+//! [`RenderConfig::projection`] — collapsing the 3D primitives to their
+//! axis-aligned 2D projection — but an optional [`Camera`] on
+//! [`RenderConfig`] instead views the scene through a movable 3D
+//! perspective camera, where the depth dimension is visible. The root
+//! `<svg width>` / `<svg height>` set the default viewport for percentage
+//! lengths; when either is omitted or invalid, the render target
+//! dimension is used.
 //!
 //! The crate is split into focused modules: `mesh` holds the [`Vertex`] /
 //! [`Mesh`] geometry model that shapes tessellate into; `shapes` resolves
