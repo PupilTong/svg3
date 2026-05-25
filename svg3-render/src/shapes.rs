@@ -3,14 +3,14 @@
 //!
 //! Each submodule — [`rect`], [`circle`], [`ellipse`], [`polygon`],
 //! [`polyline`], [`line`], and [`path`] for SVG 1.1 basic shapes, plus
-//! [`cube`] for svg3's 3D primitive — resolves one element's attributes
-//! into geometry and tessellates it into a [`Mesh`]. They share paint
-//! resolution and the mesh [`Vertex`] constructors — and, for the
-//! `<length>`-based shapes, the SVG length grammar — collected here so a
-//! new shape reuses the SVG 1.1 attribute rules instead of reimplementing
-//! them. The `<polygon>` and `<polyline>` fills further share the
-//! [`triangulate`] ear clipper, since both fill an outline that may be
-//! concave.
+//! [`cube`] and [`ellipsoid`] for svg3's 3D primitives — resolves one
+//! element's attributes into geometry and tessellates it into a [`Mesh`].
+//! They share paint resolution and the mesh [`Vertex`] constructors —
+//! and, for the `<length>`-based shapes, the SVG length grammar —
+//! collected here so a new shape reuses the SVG 1.1 attribute rules
+//! instead of reimplementing them. The `<polygon>` and `<polyline>` fills
+//! further share the [`triangulate`] ear clipper, since both fill an
+//! outline that may be concave.
 //!
 //! CSS / `style=""`-set properties and the Stylo cascade are not consulted
 //! yet — see the crate roadmap.
@@ -18,6 +18,7 @@
 pub(crate) mod circle;
 pub(crate) mod cube;
 pub(crate) mod ellipse;
+pub(crate) mod ellipsoid;
 pub(crate) mod line;
 pub(crate) mod path;
 pub(crate) mod polygon;

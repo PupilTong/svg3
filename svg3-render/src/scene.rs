@@ -66,7 +66,7 @@ enum ElementDimension {
 impl ElementDimension {
     fn of(kind: &ElementKind) -> Self {
         match kind {
-            ElementKind::Cube => Self::ThreeD,
+            ElementKind::Cube | ElementKind::Ellipsoid => Self::ThreeD,
             _ => Self::TwoD,
         }
     }
@@ -495,6 +495,14 @@ fn append_element_mesh(
                 shapes::resolve_fill_with_opacity(element, features.has_opacity_attrs),
             ) {
                 mesh.append(shapes::cube::tessellate_cube(&geo, color));
+            }
+        }
+        ElementKind::Ellipsoid => {
+            if let (Some(geo), Some(color)) = (
+                shapes::ellipsoid::resolve_ellipsoid(element, viewport),
+                shapes::resolve_fill_with_opacity(element, features.has_opacity_attrs),
+            ) {
+                mesh.append(shapes::ellipsoid::tessellate_ellipsoid(&geo, color));
             }
         }
         _ => {}
@@ -1029,6 +1037,39 @@ mod tests {
             }]
         ));
         assert!(matches!(plan[2], RenderOp::Mesh(_)));
+    }
+
+    #[test]
+    fn build_scene_tessellates_ellipsoid() {
+        // An `<ellipsoid>` is dispatched to the ellipsoid tessellator and
+        // contributes its UV-parameterised surface mesh to the combined
+        // mesh — KIND_SOLID triangles, vertices on the implicit surface,
+        // 3D so left at its authored Z (no painter bias).
+        let document =
+            svg3_dom::parse(r#"<svg><ellipsoid cx="50" cy="50" cz="0" r="20"/></svg>"#).unwrap();
+        let mesh = build_scene(&document, vp());
+        assert!(!mesh.vertices.is_empty());
+        assert_eq!(mesh.indices.len() % 3, 0);
+        assert!(mesh.vertices.iter().all(|v| v.kind == 0));
+        // Every vertex sits on the implicit surface (within float precision).
+        for v in &mesh.vertices {
+            let nx = (v.position[0] - 50.0) / 20.0;
+            let ny = (v.position[1] - 50.0) / 20.0;
+            let nz = v.position[2] / 20.0;
+            let r2 = nx * nx + ny * ny + nz * nz;
+            assert!(
+                (r2 - 1.0).abs() < 1e-4,
+                "vertex {v:?} off the surface (r² = {r2})"
+            );
+        }
+    }
+
+    #[test]
+    fn build_scene_skips_zero_radius_ellipsoid() {
+        // SPEC §5.3: a zero radius on any axis disables rendering.
+        let document =
+            svg3_dom::parse(r#"<svg><ellipsoid cx="50" cy="50" r="10" rz="0"/></svg>"#).unwrap();
+        assert!(build_scene(&document, vp()).is_empty());
     }
 
     #[test]

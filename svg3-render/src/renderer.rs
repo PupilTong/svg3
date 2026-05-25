@@ -2970,6 +2970,116 @@ mod tests {
     }
 
     #[test]
+    fn render_to_image_draws_ellipsoid_orthographic() {
+        // Through the default orthographic projection an `<ellipsoid>`
+        // collapses to its axis-aligned ellipse projection (rx along X,
+        // ry along Y). With `rx = ry`, that's a disc of radius rx.
+        let document = svg3_dom::parse(
+            r#"<svg width="64" height="64"><ellipsoid cx="32" cy="32" cz="0" r="16" fill="blue"/></svg>"#,
+        )
+        .unwrap();
+        let config = RenderConfig {
+            width: 64,
+            height: 64,
+            ..RenderConfig::default()
+        };
+        let Some(renderer) = skip_or_renderer("render_to_image_draws_ellipsoid_orthographic")
+        else {
+            return;
+        };
+        let image = renderer
+            .render_to_image(&document, config)
+            .expect("headless render failed");
+        let centre = image.pixel(32, 32);
+        assert!(
+            centre[2] > 200 && centre[0] < 60 && centre[1] < 60,
+            "ellipsoid centre pixel not blue: {centre:?}"
+        );
+        // A pixel outside the projected disc keeps the transparent clear.
+        assert_eq!(image.pixel(2, 2)[3], 0, "background should be transparent");
+    }
+
+    #[test]
+    fn render_to_image_draws_ellipsoid_through_camera() {
+        // Through the perspective camera the ellipsoid still hits its
+        // centre pixel — the 3D mesh reaches the framebuffer through the
+        // WGSL view-projection uniform.
+        let document = svg3_dom::parse(
+            r#"<svg width="64" height="64"><ellipsoid cx="32" cy="32" cz="0" r="14" fill="blue"/></svg>"#,
+        )
+        .unwrap();
+        let config = RenderConfig {
+            width: 64,
+            height: 64,
+            camera: Some(Camera::facing(64, 64)),
+            ..RenderConfig::default()
+        };
+        let Some(renderer) = skip_or_renderer("render_to_image_draws_ellipsoid_through_camera")
+        else {
+            return;
+        };
+        let image = renderer
+            .render_to_image(&document, config)
+            .expect("headless render failed");
+        let centre = image.pixel(32, 32);
+        assert!(
+            centre[2] > 200 && centre[0] < 60 && centre[1] < 60,
+            "ellipsoid centre pixel not blue: {centre:?}"
+        );
+    }
+
+    #[test]
+    fn render_to_image_skips_degenerate_ellipsoid() {
+        // SPEC §5.3: zero radius on any axis disables rendering.
+        let document = svg3_dom::parse(
+            r#"<svg width="64" height="64"><ellipsoid cx="32" cy="32" r="16" rz="0" fill="blue"/></svg>"#,
+        )
+        .unwrap();
+        let config = RenderConfig {
+            width: 64,
+            height: 64,
+            ..RenderConfig::default()
+        };
+        let Some(renderer) = skip_or_renderer("render_to_image_skips_degenerate_ellipsoid") else {
+            return;
+        };
+        let image = renderer
+            .render_to_image(&document, config)
+            .expect("headless render failed");
+        assert_eq!(image.pixel(32, 32)[3], 0);
+    }
+
+    #[test]
+    fn render_to_image_2d_rect_occludes_ellipsoid_fully_behind_z0() {
+        // SPEC §7.3: an ellipsoid entirely behind the z=0 plane is fully
+        // hidden by a coplanar 2D rect declared first, just like for
+        // `<cube>`. The ellipsoid extends from cz - rz to cz + rz; here
+        // cz = -20, rz = 15 → z in [-35, -5], all behind the rect.
+        let document = svg3_dom::parse(
+            r#"<svg width="64" height="64"><rect x="16" y="16" width="32" height="32" fill="red"/><ellipsoid cx="32" cy="32" cz="-20" r="15" fill="blue"/></svg>"#,
+        )
+        .unwrap();
+        let config = RenderConfig {
+            width: 64,
+            height: 64,
+            ..RenderConfig::default()
+        };
+        let Some(renderer) =
+            skip_or_renderer("render_to_image_2d_rect_occludes_ellipsoid_fully_behind_z0")
+        else {
+            return;
+        };
+        let image = renderer
+            .render_to_image(&document, config)
+            .expect("headless render failed");
+        let centre = image.pixel(32, 32);
+        assert!(
+            centre[0] > 200 && centre[2] < 60,
+            "2D rect at z=0 should occlude an ellipsoid fully behind: {centre:?}"
+        );
+    }
+
+    #[test]
     fn render_to_image_2d_rect_occludes_cube_behind_z0() {
         // SPEC §7.3: a 2D `<rect>` at z=0 (declared first) occludes any
         // cube surface at z < 0 and must paint over it; cube surfaces at
