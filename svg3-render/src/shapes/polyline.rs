@@ -34,9 +34,10 @@ pub(crate) struct PolylineGeometry {
 /// Resolve a `<polyline>`'s raw `points` attribute into a [`PolylineGeometry`].
 ///
 /// SVG 1.1 `points` coordinates are plain numbers, not lengths; units and
-/// percentages are rejected. Missing, malformed, odd, or degenerate point
-/// lists are skipped. Two distinct points are enough for stroke geometry;
-/// fill tessellation separately rejects lists with no closed area.
+/// percentages are rejected. Missing, malformed, or degenerate point lists
+/// are skipped. A trailing unpaired coordinate is dropped, matching SVG
+/// point-list error handling. Two distinct points are enough for stroke
+/// geometry; fill tessellation separately rejects lists with no closed area.
 pub(crate) fn resolve_polyline(element: &Element) -> Option<PolylineGeometry> {
     let points = element.attributes.get("points")?;
     let points = parse_points(points)?;
@@ -96,7 +97,7 @@ fn parse_points(value: &str) -> Option<Vec<Point>> {
         cursor = consume_coordinate_separator(bytes, cursor)?;
     }
 
-    if coordinates.len() < 4 || coordinates.len() % 2 != 0 {
+    if coordinates.len() < 4 {
         return None;
     }
 
@@ -281,13 +282,21 @@ mod tests {
     fn resolve_polyline_skips_degenerate_or_malformed_points() {
         assert_eq!(resolve_polyline(&Element::new(ElementKind::Polyline)), None);
         assert!(resolve_polyline(&polyline("10,10 20,20")).is_some());
-        assert_eq!(resolve_polyline(&polyline("10,10 20,20 30")), None);
         assert!(resolve_polyline(&polyline("10,10 20,20 30,30")).is_some());
         assert_eq!(resolve_polyline(&polyline("0,0 50%,50 100,0")), None);
         assert_eq!(resolve_polyline(&polyline("0,0 50px,50 100,0")), None);
         assert_eq!(resolve_polyline(&polyline("0,0 50,50+100,0")), None);
         assert_eq!(resolve_polyline(&polyline("0,0 50,,50 100,0")), None);
         assert_eq!(resolve_polyline(&polyline("0,0 50,50 100,0,")), None);
+    }
+
+    #[test]
+    fn resolve_polyline_ignores_trailing_unpaired_coordinate() {
+        let geo = resolve_polyline(&polyline("10,10 20,20 30")).unwrap();
+        assert_eq!(
+            geo.points,
+            vec![Point { x: 10.0, y: 10.0 }, Point { x: 20.0, y: 20.0 }]
+        );
     }
 
     #[test]
