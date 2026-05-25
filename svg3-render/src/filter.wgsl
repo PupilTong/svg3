@@ -55,6 +55,16 @@ var source_texture2: texture_2d<f32>;
 @group(0) @binding(3)
 var<uniform> filter_params: FilterUniform;
 
+// Bindings 4-5 are used ONLY by `fs_composite`. The other filter
+// pipelines bind a 4-entry layout; the composite pipeline binds a
+// 6-entry layout that adds the source depth texture and a non-filtering
+// depth sampler. Sampling them from a fragment shader on a 4-entry
+// layout would be a validation error.
+@group(0) @binding(4)
+var source_depth_texture: texture_depth_2d;
+@group(0) @binding(5)
+var depth_sampler: sampler;
+
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) uv: vec2<f32>,
@@ -130,9 +140,41 @@ fn fs_blur(in: VertexOutput) -> @location(0) vec4<f32> {
 
 // ---- Final composite ------------------------------------------------------
 
+// Approximate NDC depth of the `z = 0` plane in the orthographic default
+// projection. Used as the fallback "filter plane" depth for composite
+// fragments that fall outside the source geometry (post-filter halo: the
+// source depth was never written, so the cleared `1.0` would otherwise
+// fail `LessEqual` against any earlier-drawn content). This is exact for
+// the orthographic camera and a reasonable approximation under
+// perspective — filter on a 3D element is implementation-defined per
+// SPEC §6.3.
+const FILTER_PLANE_NDC_DEPTH: f32 = 0.5;
+
+struct CompositeOutput {
+    @location(0) color: vec4<f32>,
+    // Forwards the source pass's per-pixel NDC depth into the target so
+    // subsequent 3D draws can spatially occlude or be occluded by the
+    // filtered geometry (SPEC §7.3). Pixels with no source geometry
+    // (halo / cleared depth) fall back to `FILTER_PLANE_NDC_DEPTH` so
+    // the halo composites cleanly over coplanar background content but
+    // still loses to a 3D primitive in front of the `z = 0` plane.
+    @builtin(frag_depth) depth: f32,
+}
+
 @fragment
-fn fs_composite(in: VertexOutput) -> @location(0) vec4<f32> {
-    return sample_in1(in.uv);
+fn fs_composite(in: VertexOutput) -> CompositeOutput {
+    let color = sample_in1(in.uv);
+    let src_depth = textureSample(source_depth_texture, depth_sampler, in.uv);
+    var depth: f32;
+    if (src_depth < 1.0) {
+        depth = src_depth;
+    } else {
+        depth = FILTER_PLANE_NDC_DEPTH;
+    }
+    var out: CompositeOutput;
+    out.color = color;
+    out.depth = depth;
+    return out;
 }
 
 // ---- feColorMatrix --------------------------------------------------------

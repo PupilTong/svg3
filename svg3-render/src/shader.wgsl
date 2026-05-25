@@ -112,6 +112,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         dist = sd_box(in.local, in.params.xy);
     }
 
+    // Discard SDF fragments fully outside the analytic shape so the depth
+    // buffer doesn't pick up the bounding quad's transparent corners. The
+    // anti-aliasing band sits within `SDF_PAD` user units of the shape edge
+    // (see `coverage`), so any fragment whose distance exceeds that band
+    // contributes no colour — and must not contribute depth either.
+    if (dist >= SDF_PAD) {
+        discard;
+    }
+
     // Straight (non-premultiplied) alpha: fold coverage into alpha only — the
     // pipeline's `ALPHA_BLENDING` multiplies rgb by alpha itself.
     return vec4<f32>(in.color.rgb, in.color.a * coverage(dist, in.local));

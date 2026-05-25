@@ -29,9 +29,65 @@ pub(crate) enum RenderOp {
     },
 }
 
+/// Per-2D-shape forward Z stride applied to push painter's order through
+/// the depth test (in svg3 user units, in the `+Z`-toward-viewer
+/// convention of [SPEC.md](../../SPEC.md) §3.1).
+///
+/// 2D content is conceptually coplanar at `z = 0`, so under
+/// `depth_compare: LessEqual` consecutive 2D shapes would z-fight (the
+/// perspective-correct interpolation produces tiny per-triangle NDC depth
+/// drift even on the same world plane). Each 2D shape is shifted forward
+/// by `(shape_index * Z_PAINTER_STRIDE)` user units instead, so painter's
+/// order maps cleanly to depth order: later shapes have larger world Z,
+/// smaller NDC depth, and win [`LessEqual`].
+///
+/// Sized so the resulting NDC depth delta is comfortably above
+/// `f32`-precision noise from perspective interpolation at the default
+/// camera distance (≈120 user units → `dNDC/dz ≈ 7e-6`, so a stride of
+/// `0.1` gives a delta around `7e-7`, ~10× the precision floor). Still
+/// well below typical 3D primitive sizes (a `<cube size="10">` extends ±5
+/// user units in Z), so a 2D shape's bias does not visibly disturb its
+/// position relative to nearby 3D content.
+const Z_PAINTER_STRIDE: f32 = 0.1;
+
+/// Whether an element belongs to the 2D plane (`z = 0`) or the 3D
+/// graphics-element set ([SPEC.md](../../SPEC.md) §5). Drives whether a
+/// shape's vertices get the per-shape forward Z bias for 2D painter's
+/// ordering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ElementDimension {
+    /// Lies in the plane `z = 0` (all of SVG 1.1's graphics elements).
+    TwoD,
+    /// One of svg3's 3D graphics elements (SPEC §5) — uses its authored
+    /// world Z.
+    ThreeD,
+}
+
+impl ElementDimension {
+    fn of(kind: &ElementKind) -> Self {
+        match kind {
+            ElementKind::Cube => Self::ThreeD,
+            _ => Self::TwoD,
+        }
+    }
+}
+
+/// Shift each vertex of `mesh` (in the range `[start..]`) forward in svg3
+/// world Z by `bias`. Used to give each 2D shape a unique forward-Z slot
+/// for painter's ordering under the unified `LessEqual` depth test.
+fn apply_painter_bias(mesh: &mut Mesh, start: usize, bias: f32) {
+    for vertex in &mut mesh.vertices[start..] {
+        vertex.position[2] += bias;
+    }
+}
+
 struct SceneContext<'a> {
     viewport: Viewport,
     markers: &'a MarkerDefinitions,
+    /// Monotonic counter for the next 2D shape's painter-order Z bias
+    /// slot. [`Cell`] so the immutable `&SceneContext` plumbing already
+    /// established here can mutate it as we walk.
+    twod_index: std::cell::Cell<u32>,
 }
 
 /// Walk `document` and tessellate every supported 2D SVG shape into one
@@ -50,6 +106,7 @@ pub fn build_scene(document: &Document, viewport: Viewport) -> Mesh {
     let context = SceneContext {
         viewport,
         markers: &markers,
+        twod_index: std::cell::Cell::new(0),
     };
     let mut mesh = Mesh::default();
     for child in document.node(document.root()).children.iter().copied() {
@@ -66,6 +123,7 @@ pub(crate) fn build_render_plan(document: &Document, viewport: Viewport) -> Vec<
     let context = SceneContext {
         viewport,
         markers: &markers,
+        twod_index: std::cell::Cell::new(0),
     };
     let mut plan = Vec::new();
     let mut pending_mesh = Mesh::default();
@@ -135,7 +193,7 @@ fn append_render_ops(
         return;
     }
 
-    append_element_mesh(document, &node.element, context, true, pending_mesh);
+    append_element_mesh_biased(document, &node.element, context, true, pending_mesh);
     for child in node.children.iter().copied() {
         append_render_ops(document, child, filters, context, pending_mesh, plan);
     }
@@ -152,12 +210,38 @@ fn append_subtree_mesh(
     if is_definition_container(&node.element.kind) {
         return;
     }
-    append_element_mesh(document, &node.element, context, include_markers, mesh);
+    append_element_mesh_biased(document, &node.element, context, include_markers, mesh);
     for child in node.children.iter().copied() {
         // TODO: Nested filters need their own render plan and offscreen pass.
         // This first filter milestone treats a filtered subtree as raw source
         // geometry for the outer filter.
         append_subtree_mesh(document, child, context, include_markers, mesh);
+    }
+}
+
+/// Wraps [`append_element_mesh`] with the per-2D-shape painter-order Z
+/// bias. Snapshots the mesh's vertex count, delegates to the tessellator,
+/// then shifts the newly-appended vertices forward in Z if the element is
+/// 2D — fill, stroke, and marker geometry all share the same bias slot so
+/// the element composites cleanly internally. 3D elements (`<cube>`) keep
+/// their authored world Z so spatial occlusion against the 2D plane and
+/// other 3D content works per [SPEC.md](../../SPEC.md) §7.3.
+fn append_element_mesh_biased(
+    document: &Document,
+    element: &Element,
+    context: &SceneContext<'_>,
+    include_markers: bool,
+    mesh: &mut Mesh,
+) {
+    let start = mesh.vertices.len();
+    append_element_mesh(document, element, context, include_markers, mesh);
+    if mesh.vertices.len() == start {
+        return;
+    }
+    if ElementDimension::of(&element.kind) == ElementDimension::TwoD {
+        let index = context.twod_index.get();
+        apply_painter_bias(mesh, start, (index as f32) * Z_PAINTER_STRIDE);
+        context.twod_index.set(index + 1);
     }
 }
 
@@ -405,6 +489,14 @@ fn append_element_mesh(
                 }
             }
         }
+        ElementKind::Cube => {
+            if let (Some(geo), Some(color)) = (
+                shapes::cube::resolve_cube(element, viewport),
+                shapes::resolve_fill_with_opacity(element, features.has_opacity_attrs),
+            ) {
+                mesh.append(shapes::cube::tessellate_cube(&geo, color));
+            }
+        }
         _ => {}
     }
 }
@@ -636,9 +728,13 @@ fn append_marker_instances(
             width: marker.marker_width,
             height: marker.marker_height,
         };
+        // Markers render with a fresh painter-bias counter so the marker's
+        // internal 2D content layers within itself, independent of the
+        // surrounding scene's bias slot the marker reference consumed.
         let marker_context = SceneContext {
             viewport: marker_viewport,
             markers,
+            twod_index: std::cell::Cell::new(0),
         };
         // Marker subtrees render with marker expansion disabled. This keeps
         // authored marker references inside a marker from recursively

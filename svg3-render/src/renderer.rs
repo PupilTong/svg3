@@ -45,6 +45,17 @@ use crate::{document_viewport, Mesh, RenderConfig, Vertex, Viewport};
 /// vertex colours are stored correctly; read back as `RGBA8`.
 const TARGET_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 
+/// Depth buffer format used by the shape pipeline and by
+/// [`Renderer::encode_document`] for the target / filter source depth
+/// textures. 32-bit float gives ample precision over the wide orthographic
+/// depth range svg3 uses (±[`ORTHO_Z_RANGE`](crate::camera)) so the depth
+/// test correctly resolves 2D-3D occlusion at practical authoring sizes
+/// per [SPEC.md](../../SPEC.md) §7.3.
+///
+/// Exposed so windowed callers driving [`Renderer::draw`] directly can
+/// allocate a matching depth texture for the render pass they construct.
+pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+
 /// Largest one-sided kernel radius used by the GPU Gaussian blur pass.
 const MAX_BLUR_RADIUS: u32 = 64;
 
@@ -416,6 +427,17 @@ pub struct Renderer {
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     filter_bind_group_layout: wgpu::BindGroupLayout,
+    /// Composite-specific bind-group layout — extends the filter layout
+    /// with the source depth texture so the composite shader can write
+    /// per-pixel `gl_FragDepth` matching the source geometry's depth.
+    /// This is what lets a filtered subtree participate in 2D-3D
+    /// occlusion: subsequent 3D draws depth-test against the filter
+    /// result's depth.
+    composite_bind_group_layout: wgpu::BindGroupLayout,
+    /// Comparison-free depth sampler used by the composite shader. Only
+    /// the depth value is read — no comparison test happens at sample
+    /// time.
+    composite_depth_sampler: wgpu::Sampler,
     image_bind_group_layout: wgpu::BindGroupLayout,
     blur_pipeline: wgpu::RenderPipeline,
     composite_pipeline: wgpu::RenderPipeline,
@@ -465,7 +487,14 @@ impl Renderer {
         let pipeline = build_pipeline(&device, format);
         let bind_group_layout = pipeline.get_bind_group_layout(0);
         let filter_bind_group_layout = build_filter_bind_group_layout(&device);
+        let composite_bind_group_layout = build_composite_bind_group_layout(&device);
         let image_bind_group_layout = build_image_bind_group_layout(&device);
+        // Every filter pipeline except the composite writes to an offscreen
+        // texture that has no depth attachment, so `depth_stencil: None`.
+        // The composite writes to the final target, which IS depth-attached
+        // — it uses `LessEqual` + depth-write and writes per-pixel
+        // `frag_depth` sampled from the filter source so subsequent 3D
+        // draws can spatially occlude / be occluded by the filter result.
         let blur_pipeline = build_filter_pipeline(
             &device,
             format,
@@ -473,14 +502,16 @@ impl Renderer {
             "svg3 Gaussian blur pipeline",
             "fs_blur",
             None,
+            None,
         );
         let composite_pipeline = build_filter_pipeline(
             &device,
             format,
-            &filter_bind_group_layout,
+            &composite_bind_group_layout,
             "svg3 filter composite pipeline",
             "fs_composite",
             Some(premultiplied_alpha_blend()),
+            Some(target_filter_depth_stencil()),
         );
         let image_pipeline = build_image_pipeline(&device, format, &image_bind_group_layout);
         let color_matrix_pipeline = build_filter_pipeline(
@@ -490,6 +521,7 @@ impl Renderer {
             "svg3 feColorMatrix pipeline",
             "fs_color_matrix",
             None,
+            None,
         );
         let turbulence_pipeline = build_filter_pipeline(
             &device,
@@ -497,6 +529,7 @@ impl Renderer {
             &filter_bind_group_layout,
             "svg3 feTurbulence pipeline",
             "fs_turbulence",
+            None,
             None,
         );
         let lighting_pipeline = build_filter_pipeline(
@@ -506,6 +539,7 @@ impl Renderer {
             "svg3 feLighting pipeline",
             "fs_lighting",
             None,
+            None,
         );
         let morphology_pipeline = build_filter_pipeline(
             &device,
@@ -513,6 +547,7 @@ impl Renderer {
             &filter_bind_group_layout,
             "svg3 feMorphology pipeline",
             "fs_morphology",
+            None,
             None,
         );
         let flood_pipeline = build_filter_pipeline(
@@ -522,6 +557,7 @@ impl Renderer {
             "svg3 feFlood pipeline",
             "fs_flood",
             None,
+            None,
         );
         let drop_shadow_alpha_pipeline = build_filter_pipeline(
             &device,
@@ -529,6 +565,7 @@ impl Renderer {
             &filter_bind_group_layout,
             "svg3 feDropShadow alpha pipeline",
             "fs_drop_shadow_alpha",
+            None,
             None,
         );
         let drop_shadow_composite_pipeline = build_filter_pipeline(
@@ -538,6 +575,7 @@ impl Renderer {
             "svg3 feDropShadow composite pipeline",
             "fs_drop_shadow_composite",
             None,
+            None,
         );
         let displacement_pipeline = build_filter_pipeline(
             &device,
@@ -545,6 +583,7 @@ impl Renderer {
             &filter_bind_group_layout,
             "svg3 feDisplacementMap pipeline",
             "fs_displacement",
+            None,
             None,
         );
         let convolve_pipeline = build_filter_pipeline(
@@ -554,6 +593,7 @@ impl Renderer {
             "svg3 feConvolveMatrix pipeline",
             "fs_convolve",
             None,
+            None,
         );
         let component_transfer_pipeline = build_filter_pipeline(
             &device,
@@ -561,6 +601,7 @@ impl Renderer {
             &filter_bind_group_layout,
             "svg3 feComponentTransfer pipeline",
             "fs_component_transfer",
+            None,
             None,
         );
         // Filter passes need bilinear sampling for fractional displacements
@@ -587,12 +628,28 @@ impl Renderer {
             mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
+        let composite_depth_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("svg3 composite depth sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            // The composite samples depth at integer-pixel UV positions
+            // (a fullscreen 1:1 copy), so nearest filtering suffices and
+            // works on backends that don't support filtering depth
+            // textures.
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
         Self {
             device,
             queue,
             pipeline,
             bind_group_layout,
             filter_bind_group_layout,
+            composite_bind_group_layout,
+            composite_depth_sampler,
             image_bind_group_layout,
             blur_pipeline,
             composite_pipeline,
@@ -695,6 +752,16 @@ impl Renderer {
     /// The caller owns the render pass — its target, load/store ops and clear
     /// colour — so one renderer drives both the headless image pass and a
     /// windowed surface pass.
+    ///
+    /// # Render pass requirements
+    ///
+    /// As of the depth-aware 2D ↔ 3D rendering work, the shape pipeline
+    /// has a [`DEPTH_FORMAT`] depth-stencil attachment, so `pass` MUST
+    /// be created with a `depth_stencil_attachment` whose view targets a
+    /// `Depth32Float` texture sized to the colour target. Callers that
+    /// don't manage their own depth buffer should use
+    /// [`Renderer::encode_document`] instead — it owns the depth texture
+    /// lifecycle internally.
     pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>, scene: &GpuScene) {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &scene.transform_bind_group, &[]);
@@ -837,18 +904,33 @@ impl Renderer {
         target_extent: wgpu::Extent3d,
         encoder: &mut wgpu::CommandEncoder,
     ) {
+        // Allocate a fresh depth buffer for this encode. 2D content gets a
+        // per-shape forward Z bias in `scene::build_render_plan`, so it
+        // resolves painter's order via the depth test without z-fighting;
+        // 3D primitives ride spatial Z. Cleared once up front so every
+        // pass that follows can `LoadOp::Load`.
+        let depth = self.create_depth_texture(target_extent, "svg3 target depth");
+        clear_depth(encoder, &depth.view, "svg3 target depth clear");
+
         let plan = build_render_plan(document, viewport);
         for op in &plan {
             match op {
                 RenderOp::Mesh(mesh) => {
                     if let Some(scene) = self.create_scene(mesh, view_projection) {
-                        self.encode_scene_draw(encoder, target, &scene, "svg3 shape pass");
+                        self.encode_scene_draw(
+                            encoder,
+                            target,
+                            &depth.view,
+                            &scene,
+                            "svg3 shape pass",
+                        );
                     }
                 }
                 RenderOp::Filter { mesh, primitives } => {
                     self.encode_filter_chain(
                         encoder,
                         target,
+                        &depth.view,
                         mesh,
                         primitives,
                         viewport,
@@ -864,6 +946,7 @@ impl Renderer {
         &self,
         encoder: &mut wgpu::CommandEncoder,
         target: &wgpu::TextureView,
+        depth: &wgpu::TextureView,
         scene: &GpuScene,
         label: &str,
     ) {
@@ -878,6 +961,14 @@ impl Renderer {
                     store: wgpu::StoreOp::Store,
                 },
             })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: depth,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
             ..Default::default()
         });
         self.draw(&mut pass, scene);
@@ -888,6 +979,7 @@ impl Renderer {
         &self,
         encoder: &mut wgpu::CommandEncoder,
         target: &wgpu::TextureView,
+        target_depth: &wgpu::TextureView,
         mesh: &Mesh,
         primitives: &[FilterPrimitive],
         viewport: Viewport,
@@ -904,6 +996,16 @@ impl Renderer {
         // recovers the linear-chain behaviour for documents that don't use
         // `result`.
         let source = self.create_filter_texture(extent, "svg3 filter source");
+        // The shape pipeline is depth-tested, so the filter source pass
+        // needs its own depth attachment to resolve any 3D occlusion
+        // inside the filtered subtree. The composite later samples this
+        // texture to forward source depth into the target depth buffer.
+        let source_depth = self.create_depth_texture(extent, "svg3 filter source depth");
+        clear_depth(
+            encoder,
+            &source_depth.view,
+            "svg3 filter source depth clear",
+        );
 
         if let Some(scene) = self.create_scene(mesh, view_projection) {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -917,6 +1019,14 @@ impl Renderer {
                         store: wgpu::StoreOp::Store,
                     },
                 })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &source_depth.view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
                 ..Default::default()
             });
             self.draw(&mut pass, &scene);
@@ -1000,7 +1110,15 @@ impl Renderer {
             Some(i) => &outputs[i].view,
             None => &source.view,
         };
-        self.encode_composite_pass(encoder, final_view, &source.view, target, extent);
+        self.encode_composite_pass(
+            encoder,
+            final_view,
+            &source.view,
+            &source_depth.view,
+            target,
+            target_depth,
+            extent,
+        );
     }
 
     /// Encode one primitive's GPU pass(es). Reads `in1` / `in2`, writes to
@@ -1365,18 +1483,22 @@ impl Renderer {
         pass.draw(0..3, 0..1);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn encode_composite_pass(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         chain_output: &wgpu::TextureView,
         source_view: &wgpu::TextureView,
+        source_depth: &wgpu::TextureView,
         destination: &wgpu::TextureView,
+        destination_depth: &wgpu::TextureView,
         extent: wgpu::Extent3d,
     ) {
         let uniform = FilterUniform::composite(extent.width, extent.height);
-        let bind_group = self.create_filter_bind_group(
+        let bind_group = self.create_composite_bind_group(
             chain_output,
             source_view,
+            source_depth,
             &uniform,
             "svg3 filter composite bind group",
         );
@@ -1391,11 +1513,70 @@ impl Renderer {
                     store: wgpu::StoreOp::Store,
                 },
             })],
+            // `LessEqual` + depth-write: the composite's per-pixel
+            // `frag_depth` (sampled from the source depth texture) updates
+            // the target depth buffer so subsequent 3D draws depth-test
+            // against the filter source's spatial Z.
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: destination_depth,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
             ..Default::default()
         });
         pass.set_pipeline(&self.composite_pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
         pass.draw(0..3, 0..1);
+    }
+
+    fn create_composite_bind_group(
+        &self,
+        source: &wgpu::TextureView,
+        source2: &wgpu::TextureView,
+        source_depth: &wgpu::TextureView,
+        uniform: &FilterUniform,
+        label: &str,
+    ) -> wgpu::BindGroup {
+        let uniform_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("svg3 filter composite uniform"),
+                contents: bytemuck::bytes_of(uniform),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some(label),
+            layout: &self.composite_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(source),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.filter_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(source2),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(source_depth),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::Sampler(&self.composite_depth_sampler),
+                },
+            ],
+        })
     }
 
     fn encode_image_draw(
@@ -1587,6 +1768,37 @@ impl Renderer {
             view,
         }
     }
+
+    /// Allocate a depth texture sized to `extent` and return a view into
+    /// it. The first render pass that attaches it should clear depth to
+    /// 1.0 (the far plane) so the depth test starts from a known state.
+    ///
+    /// `TEXTURE_BINDING` is included alongside `RENDER_ATTACHMENT` so the
+    /// filter composite shader can sample the filter source's depth and
+    /// forward it as `frag_depth`.
+    fn create_depth_texture(&self, extent: wgpu::Extent3d, label: &str) -> DepthTexture {
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: DEPTH_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        DepthTexture {
+            _texture: texture,
+            view,
+        }
+    }
+}
+
+/// An offscreen depth texture allocated per encode (target or filter source).
+struct DepthTexture {
+    _texture: wgpu::Texture,
+    view: wgpu::TextureView,
 }
 
 /// Execute a single render pass that clears `target` to `color`. Used by both
@@ -1610,6 +1822,26 @@ pub fn clear_target(
                 store: wgpu::StoreOp::Store,
             },
         })],
+        ..Default::default()
+    });
+}
+
+/// Clear a depth attachment to `1.0` (the far plane). Used by
+/// [`Renderer::encode_document`] once per encode for the target depth
+/// buffer, and per filter chain for the offscreen filter source depth
+/// buffer.
+fn clear_depth(encoder: &mut wgpu::CommandEncoder, depth: &wgpu::TextureView, label: &str) {
+    let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some(label),
+        color_attachments: &[],
+        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+            view: depth,
+            depth_ops: Some(wgpu::Operations {
+                load: wgpu::LoadOp::Clear(1.0),
+                store: wgpu::StoreOp::Store,
+            }),
+            stencil_ops: None,
+        }),
         ..Default::default()
     });
 }
@@ -1641,7 +1873,16 @@ fn acquire_gpu() -> Result<(wgpu::Device, wgpu::Queue), RenderError> {
     })
 }
 
-/// Build the 2D shape render pipeline targeting `format`.
+/// Build the unified shape render pipeline targeting `format`.
+///
+/// Depth testing is `LessEqual` with depth writes enabled. 2D content at
+/// `z = 0` would otherwise z-fight against itself under perspective
+/// (coplanar triangles produce slightly different NDC depths through
+/// interpolation precision); [`crate::scene::build_render_plan`] instead
+/// hands each 2D shape a small per-shape forward Z bias so painter's
+/// order resolves through the depth test, while leaving 3D content's
+/// world Z untouched for spatial occlusion per
+/// [SPEC.md](../../SPEC.md) §7.3.
 fn build_pipeline(device: &wgpu::Device, format: wgpu::TextureFormat) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -1658,7 +1899,13 @@ fn build_pipeline(device: &wgpu::Device, format: wgpu::TextureFormat) -> wgpu::R
             }],
         },
         primitive: wgpu::PrimitiveState::default(),
-        depth_stencil: None,
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::LessEqual),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
         multisample: wgpu::MultisampleState::default(),
         fragment: Some(wgpu::FragmentState {
             module: &shader,
@@ -1760,6 +2007,7 @@ fn build_filter_pipeline(
     label: &str,
     fragment_entry_point: &str,
     blend: Option<wgpu::BlendState>,
+    depth_stencil: Option<wgpu::DepthStencilState>,
 ) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::include_wgsl!("filter.wgsl"));
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -1777,7 +2025,7 @@ fn build_filter_pipeline(
             buffers: &[],
         },
         primitive: wgpu::PrimitiveState::default(),
-        depth_stencil: None,
+        depth_stencil,
         multisample: wgpu::MultisampleState::default(),
         fragment: Some(wgpu::FragmentState {
             module: &shader,
@@ -1791,6 +2039,92 @@ fn build_filter_pipeline(
         }),
         multiview_mask: None,
         cache: None,
+    })
+}
+
+/// Depth-stencil state for the composite pass that writes a filter
+/// result into the final target.
+///
+/// `LessEqual` + depth-write so the filter result participates in spatial
+/// 2D-3D occlusion: the composite fragment shader writes per-pixel
+/// `frag_depth` sampled from the filter source's depth texture, so
+/// subsequent 3D draws depth-test against the source geometry's actual
+/// NDC depth — a cube in front of the filter's geometry will paint over
+/// it, and the filter will occlude a cube behind it (per
+/// [SPEC.md](../../SPEC.md) §7.3).
+fn target_filter_depth_stencil() -> wgpu::DepthStencilState {
+    wgpu::DepthStencilState {
+        format: DEPTH_FORMAT,
+        depth_write_enabled: Some(true),
+        depth_compare: Some(wgpu::CompareFunction::LessEqual),
+        stencil: wgpu::StencilState::default(),
+        bias: wgpu::DepthBiasState::default(),
+    }
+}
+
+/// Bind-group layout for the filter composite pipeline. Extends the
+/// regular filter layout with one extra texture binding for the filter
+/// source's depth texture plus a non-filtering depth sampler — the
+/// composite samples per-pixel source depth and writes it as
+/// `frag_depth` so subsequent 3D draws can depth-test against the
+/// filter's spatial Z.
+fn build_composite_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("svg3 filter composite bind group layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 4,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Depth,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 5,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                count: None,
+            },
+        ],
     })
 }
 
@@ -2555,6 +2889,209 @@ mod tests {
         assert!(
             centre[2] > 200 && centre[0] < 60 && centre[1] < 60,
             "camera centre pixel not blue: {centre:?}"
+        );
+    }
+
+    #[test]
+    fn render_to_image_draws_cube_orthographic() {
+        // Through the default orthographic projection a `<cube>` collapses
+        // to its axis-aligned bounding rectangle — the same pixels a
+        // same-sized `<rect>` would cover.
+        let document = svg3_dom::parse(
+            r#"<svg width="64" height="64"><cube cx="32" cy="32" cz="0" size="32" fill="blue"/></svg>"#,
+        )
+        .unwrap();
+        let config = RenderConfig {
+            width: 64,
+            height: 64,
+            ..RenderConfig::default()
+        };
+        let Some(renderer) = skip_or_renderer("render_to_image_draws_cube_orthographic") else {
+            return;
+        };
+        let image = renderer
+            .render_to_image(&document, config)
+            .expect("headless render failed");
+        let centre = image.pixel(32, 32);
+        assert!(
+            centre[2] > 200 && centre[0] < 60 && centre[1] < 60,
+            "cube centre pixel not blue: {centre:?}"
+        );
+        assert_eq!(image.pixel(2, 2)[3], 0, "background should be transparent");
+    }
+
+    #[test]
+    fn render_to_image_draws_cube_through_camera() {
+        // Through the perspective camera the 3D cube still hits its centre
+        // pixel — geometry reaches the framebuffer via the WGSL
+        // view-projection uniform, not the orthographic fallback.
+        let document = svg3_dom::parse(
+            r#"<svg width="64" height="64"><cube cx="32" cy="32" cz="0" size="20" fill="blue"/></svg>"#,
+        )
+        .unwrap();
+        let config = RenderConfig {
+            width: 64,
+            height: 64,
+            camera: Some(Camera::facing(64, 64)),
+            ..RenderConfig::default()
+        };
+        let Some(renderer) = skip_or_renderer("render_to_image_draws_cube_through_camera") else {
+            return;
+        };
+        let image = renderer
+            .render_to_image(&document, config)
+            .expect("headless render failed");
+        let centre = image.pixel(32, 32);
+        assert!(
+            centre[2] > 200 && centre[0] < 60 && centre[1] < 60,
+            "cube centre pixel not blue: {centre:?}"
+        );
+    }
+
+    #[test]
+    fn render_to_image_skips_degenerate_cube() {
+        // SPEC §5.2: zero depth disables rendering.
+        let document = svg3_dom::parse(
+            r#"<svg width="64" height="64"><cube cx="32" cy="32" size="32" depth="0" fill="blue"/></svg>"#,
+        )
+        .unwrap();
+        let config = RenderConfig {
+            width: 64,
+            height: 64,
+            ..RenderConfig::default()
+        };
+        let Some(renderer) = skip_or_renderer("render_to_image_skips_degenerate_cube") else {
+            return;
+        };
+        let image = renderer
+            .render_to_image(&document, config)
+            .expect("headless render failed");
+        assert_eq!(image.pixel(32, 32)[3], 0);
+    }
+
+    #[test]
+    fn render_to_image_2d_rect_occludes_cube_behind_z0() {
+        // SPEC §7.3: a 2D `<rect>` at z=0 (declared first) occludes any
+        // cube surface at z < 0 and must paint over it; cube surfaces at
+        // z > 0 are in front and paint over the rect.
+        let document = svg3_dom::parse(
+            r#"<svg width="64" height="64"><rect x="32" y="16" width="32" height="32" fill="red"/><cube cx="32" cy="32" cz="0" size="30" fill="blue"/></svg>"#,
+        )
+        .unwrap();
+        let config = RenderConfig {
+            width: 64,
+            height: 64,
+            ..RenderConfig::default()
+        };
+        let Some(renderer) = skip_or_renderer("render_to_image_2d_rect_occludes_cube_behind_z0")
+        else {
+            return;
+        };
+        let image = renderer
+            .render_to_image(&document, config)
+            .expect("headless render failed");
+        // Pixel inside cube but LEFT of the rect: only cube here → blue.
+        let left = image.pixel(20, 32);
+        assert!(
+            left[2] > 200 && left[0] < 60,
+            "left-of-rect should be cube blue: {left:?}"
+        );
+        // Overlap: cube front-half (z>0) in front of rect → blue wins.
+        let overlap = image.pixel(40, 32);
+        assert!(
+            overlap[2] > 200 && overlap[0] < 60,
+            "overlap: cube front-half should occlude rect: {overlap:?}"
+        );
+        // Pixel inside rect, OUTSIDE cube: only rect → red.
+        let right = image.pixel(60, 20);
+        assert!(
+            right[0] > 200 && right[2] < 60,
+            "right-of-cube should be rect red: {right:?}"
+        );
+    }
+
+    #[test]
+    fn render_to_image_2d_rect_fully_occludes_cube_fully_behind_z0() {
+        // Cube entirely behind z=0 → fully hidden by a coplanar 2D rect.
+        let document = svg3_dom::parse(
+            r#"<svg width="64" height="64"><rect x="16" y="16" width="32" height="32" fill="red"/><cube cx="32" cy="32" cz="-15" size="20" fill="blue"/></svg>"#,
+        )
+        .unwrap();
+        let config = RenderConfig {
+            width: 64,
+            height: 64,
+            ..RenderConfig::default()
+        };
+        let Some(renderer) =
+            skip_or_renderer("render_to_image_2d_rect_fully_occludes_cube_fully_behind_z0")
+        else {
+            return;
+        };
+        let image = renderer
+            .render_to_image(&document, config)
+            .expect("headless render failed");
+        let centre = image.pixel(32, 32);
+        assert!(
+            centre[0] > 200 && centre[2] < 60,
+            "2D rect at z=0 should occlude cube fully behind z=0: {centre:?}"
+        );
+    }
+
+    #[test]
+    fn render_to_image_cube_in_front_occludes_later_2d_rect() {
+        // Cube declared FIRST is in front of z=0 (cz=20). A 2D rect
+        // declared after must NOT paint over the spatially-closer cube.
+        let document = svg3_dom::parse(
+            r#"<svg width="64" height="64"><cube cx="32" cy="32" cz="20" size="20" fill="blue"/><rect x="16" y="16" width="32" height="32" fill="red"/></svg>"#,
+        )
+        .unwrap();
+        let config = RenderConfig {
+            width: 64,
+            height: 64,
+            ..RenderConfig::default()
+        };
+        let Some(renderer) =
+            skip_or_renderer("render_to_image_cube_in_front_occludes_later_2d_rect")
+        else {
+            return;
+        };
+        let image = renderer
+            .render_to_image(&document, config)
+            .expect("headless render failed");
+        let centre = image.pixel(32, 32);
+        assert!(
+            centre[2] > 200 && centre[0] < 60,
+            "earlier cube in front of z=0 should occlude a later 2D rect: {centre:?}"
+        );
+    }
+
+    #[test]
+    fn render_to_image_filtered_rect_occludes_cube_behind_z0() {
+        // Review P1.2: a filtered 2D rect at z=0 occludes a cube fully
+        // behind z=0 declared after. The composite samples the source's
+        // per-pixel depth and writes it as `frag_depth`, so the cube
+        // fails LessEqual at the overlap.
+        let document = svg3_dom::parse(
+            r##"<svg width="64" height="64"><filter id="soft"><feGaussianBlur stdDeviation="2"/></filter><rect x="16" y="16" width="32" height="32" fill="red" filter="url(#soft)"/><cube cx="32" cy="32" cz="-15" size="20" fill="blue"/></svg>"##,
+        )
+        .unwrap();
+        let config = RenderConfig {
+            width: 64,
+            height: 64,
+            ..RenderConfig::default()
+        };
+        let Some(renderer) =
+            skip_or_renderer("render_to_image_filtered_rect_occludes_cube_behind_z0")
+        else {
+            return;
+        };
+        let image = renderer
+            .render_to_image(&document, config)
+            .expect("headless render failed");
+        let centre = image.pixel(32, 32);
+        assert!(
+            centre[0] > 100 && centre[2] < 80,
+            "filtered rect at z=0 should occlude a cube fully behind: {centre:?}"
         );
     }
 

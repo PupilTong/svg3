@@ -8,6 +8,16 @@
 
 use glam::{Mat4, Vec3};
 
+/// Half-depth, in user units, of the default orthographic projection.
+///
+/// 2D content lies in the plane `z = 0`, so any value safely above 1 leaves
+/// the existing flat rendering unchanged; the headroom is what lets svg3 3D
+/// primitives (`<cube>`, `<ellipsoid>`) extend into ±Z without being clipped
+/// against the near/far planes at practical sizes. `100_000` matches the far
+/// plane of the perspective [`Camera::view_proj`] so the two defaults agree
+/// on the addressable depth range.
+const ORTHO_Z_RANGE: f32 = 100_000.0;
+
 /// Target-surface configuration for a render pass.
 #[derive(Debug, Clone, Copy)]
 pub struct RenderConfig {
@@ -44,18 +54,32 @@ impl RenderConfig {
     /// at least 1, matching the render target, so the matrix stays valid
     /// (finite) for a zero-sized config.
     ///
+    /// The orthographic depth range is wide enough to accommodate svg3's 3D
+    /// primitives (`<cube>`, `<ellipsoid>`) without clipping at practical
+    /// authoring sizes: 2D content in the plane `z = 0` maps to the middle
+    /// of the NDC depth range, with ±[`ORTHO_Z_RANGE`] user units of head-
+    /// room on either side. The choice of default viewing transformation
+    /// for Z is implementation-defined per [SPEC.md](../../SPEC.md) §7.1.
+    ///
     /// Assumes 1 user unit = 1 device pixel. The outer `<svg>`'s
     /// `width`/`height` drive the document viewport used for percentage
     /// lengths, but this target projection stays tied to output pixels;
     /// `viewBox` and `preserveAspectRatio` are not consulted yet.
     pub fn projection(&self) -> Mat4 {
+        // svg3's `+Z` is *toward the viewer* (SPEC §3.1). Glam's
+        // `Mat4::orthographic_rh` produces an NDC depth of
+        // `(z + near) / (near - far)`, so passing `near = -ORTHO_Z_RANGE,
+        // far = +ORTHO_Z_RANGE` makes greater world Z (closer to the
+        // viewer) map to *smaller* NDC depth — the near plane in wgpu's
+        // `[0, 1]` depth convention. World `z = 0` lands at the middle of
+        // the range, so 2D content depth-tests against 3D consistently.
         Mat4::orthographic_rh(
             0.0,
             self.width.max(1) as f32,
             self.height.max(1) as f32,
             0.0,
-            -1.0,
-            1.0,
+            -ORTHO_Z_RANGE,
+            ORTHO_Z_RANGE,
         )
     }
 
@@ -223,6 +247,39 @@ mod tests {
         assert!((tl.x + 1.0).abs() < 1e-5 && (tl.y - 1.0).abs() < 1e-5);
         assert!((br.x - 1.0).abs() < 1e-5 && (br.y + 1.0).abs() < 1e-5);
         assert!(mid.x.abs() < 1e-5 && mid.y.abs() < 1e-5);
+    }
+
+    #[test]
+    fn projection_maps_positive_z_to_near_plane() {
+        // svg3 SPEC §3.1: +Z points toward the viewer. The orthographic
+        // projection must map larger Z to *smaller* NDC depth (closer to
+        // the camera in wgpu's [0, 1] depth range), so 3D content's depth
+        // test resolves with the SPEC's handedness.
+        let config = RenderConfig {
+            width: 64,
+            height: 64,
+            ..RenderConfig::default()
+        };
+        let proj = config.projection();
+        let at = |z: f32| proj.project_point3(Vec3::new(32.0, 32.0, z)).z;
+        let z0 = at(0.0);
+        let z_pos = at(10.0);
+        let z_neg = at(-10.0);
+        // World z=0 sits at the middle of the orthographic depth range.
+        assert!(
+            (z0 - 0.5).abs() < 1e-3,
+            "world z=0 should map near NDC z=0.5: {z0}"
+        );
+        // +Z is closer to the viewer → smaller NDC z (near plane).
+        assert!(
+            z_pos < z0,
+            "world z=+10 should map below z=0 (closer): {z_pos} vs {z0}"
+        );
+        // -Z is behind the viewer → larger NDC z (far plane).
+        assert!(
+            z_neg > z0,
+            "world z=-10 should map above z=0 (farther): {z_neg} vs {z0}"
+        );
     }
 
     #[test]

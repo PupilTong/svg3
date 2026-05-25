@@ -1,9 +1,10 @@
-//! End-to-end snapshot tests for basic-shape rendering.
+//! End-to-end snapshot tests for shape rendering.
 //!
 //! Each case parses an svg3 document — the SVG WPT `shapes/rect-*`,
 //! `shapes/circle-*`, `shapes/ellipse-*`, and `shapes/polygon-*` reference
-//! tests, plus polyline fill, stroked shapes, line, path, markers, Gaussian
-//! blur and image filters, mixed-shape, and canonical SVG samples — renders
+//! tests, plus polyline fill, stroked shapes, line, path, markers, the svg3
+//! 3D `<cube>` primitive, Gaussian blur and image filters, mixed-shape, and
+//! canonical SVG samples — renders
 //! it headlessly with
 //! [`Renderer::render_to_image`], and compares the result against a committed
 //! golden PNG in `tests/snapshots/`. Those
@@ -694,6 +695,63 @@ fn cases() -> Vec<Case> {
         Case::square("camera-pan", CAMERA_SCENE).with_camera(pan),
         Case::square("camera-angled", CAMERA_SCENE).with_camera(angled),
         Case::square("camera-dolly", CAMERA_SCENE).with_camera(dolly),
+        // svg3's 3D `<cube>` primitive (SPEC §5.2). Through the default
+        // orthographic projection the cube collapses to its axis-aligned
+        // bounding rectangle: same coverage as a same-sized `<rect>`.
+        Case::square(
+            "cube-orthographic",
+            r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><cube cx="50" cy="50" cz="0" size="50" fill="#f2c14e"/></svg>"##,
+        ),
+        // A non-cubic cuboid: explicit `width`/`height`/`depth` produce a
+        // rectangular box. Through the orthographic default it projects to
+        // its width-by-height rectangle.
+        Case::square(
+            "cube-non-cubic",
+            r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><cube cx="50" cy="50" cz="0" width="70" height="30" depth="20" fill="#c14b2b"/></svg>"##,
+        ),
+        // Through the camera the cube's depth dimension is visible. The
+        // background `<rect>` sits at world `z = 0` and (per SPEC §7.3)
+        // occludes any cube surface behind it; the cube here is centred on
+        // `z = 0` so only the front half (`z > 0`) of its hexagonal
+        // silhouette survives the depth test.
+        Case::square(
+            "cube-camera-angled",
+            r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><cube cx="50" cy="50" cz="0" size="40" fill="#f2c14e"/></svg>"##,
+        )
+        .with_camera({
+            // The same `angled` framing as the 2D camera snapshots, so the
+            // cube's silhouette is comparable to the 2D scene at the same eye.
+            let mut c = Camera::facing(100, 100);
+            c.eye.x += 60.0;
+            c
+        }),
+        // SPEC §7.3: spatial Z occlusion between 2D and 3D content. The 2D
+        // `<rect>` (in the plane `z = 0`) hides the cube where the cube is
+        // behind it (cz = -20, size = 30 → cube z in [-35, -5], entirely
+        // behind the rect plane). Without depth-aware rendering the cube
+        // would paint over the rect per document order; with it, the rect
+        // wins at every overlap pixel.
+        Case::square(
+            "cube-occluded-by-2d-rect",
+            r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><rect x="30" y="30" width="40" height="40" fill="#c14b2b"/><cube cx="50" cy="50" cz="-20" size="30" fill="#f2c14e"/></svg>"##,
+        ),
+        // The converse: a cube fully in *front* of `z = 0` (cz = +20)
+        // paints over a coplanar 2D rect declared earlier as the
+        // background — closer-to-viewer Z wins.
+        Case::square(
+            "cube-in-front-of-2d-rect",
+            r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><rect x="30" y="30" width="40" height="40" fill="#c14b2b"/><cube cx="50" cy="50" cz="20" size="30" fill="#f2c14e"/></svg>"##,
+        ),
+        // 2D-3D depth resolution survives a filter chain. The filtered
+        // rect sits at `z = 0`; a cube declared after it that lies fully
+        // behind `z = 0` (cz = -20) is occluded by the filter result. The
+        // composite shader writes the source's per-pixel NDC depth as
+        // `frag_depth`, so subsequent 3D draws depth-test against the
+        // filter's spatial Z — addressing review P1.2.
+        Case::square(
+            "cube-occluded-by-filtered-rect",
+            r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><filter id="soft"><feGaussianBlur stdDeviation="3"/></filter><rect x="30" y="30" width="40" height="40" fill="#c14b2b" filter="url(#soft)"/><cube cx="50" cy="50" cz="-20" size="30" fill="#f2c14e"/></svg>"##,
+        ),
     ]
 }
 
