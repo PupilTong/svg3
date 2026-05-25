@@ -5,10 +5,15 @@
 //! SPEC §4.3) is still a roadmap item, but its parser can reuse this
 //! module unchanged when it lands.
 //!
-//! Supported functions in v0: `translate`, `translate3d`, `translateZ`,
-//! `rotate`, `rotateX`, `rotateY`, `rotateZ`. Any other function name
-//! (or any malformed token) causes the parse to fail; per SPEC §2.4 the
-//! whole attribute is then in error and the caller MUST ignore it.
+//! Supported functions:
+//!   * SVG 1.1 §7.6: `translate`, `scale`, `rotate(angle [, cx, cy])`,
+//!     `skewX`, `skewY`, `matrix`.
+//!   * SPEC §4.2: `translate3d`, `translateZ`, `scale3d`, `scaleZ`,
+//!     `rotateX`, `rotateY`, `rotateZ`, `rotate3d`, `matrix3d`.
+//!
+//! Any other function name (or any malformed token) causes the parse
+//! to fail; per SPEC §2.4 the whole attribute is then in error and
+//! the caller MUST ignore it.
 
 use std::f32::consts::PI;
 
@@ -57,6 +62,76 @@ impl Mat4 {
         m.0[0] = [c, s, 0.0, 0.0];
         m.0[1] = [-s, c, 0.0, 0.0];
         m
+    }
+
+    fn scaling(sx: f32, sy: f32, sz: f32) -> Self {
+        let mut m = [[0.0_f32; 4]; 4];
+        m[0][0] = sx;
+        m[1][1] = sy;
+        m[2][2] = sz;
+        m[3][3] = 1.0;
+        Self(m)
+    }
+
+    /// SVG 1.1 §7.6 2D affine `matrix(a b c d e f)`. Sends
+    /// `(x, y)` to `(a·x + c·y + e, b·x + d·y + f)`; `z` is preserved.
+    fn matrix_2d(a: f32, b: f32, c: f32, d: f32, e: f32, f: f32) -> Self {
+        Self([
+            [a, b, 0.0, 0.0],
+            [c, d, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [e, f, 0.0, 1.0],
+        ])
+    }
+
+    /// Build directly from 16 column-major entries, matching SPEC
+    /// §4.2.9's `matrix3d(m11 m12 … m44)` convention.
+    fn from_column_major(vals: &[f32; 16]) -> Self {
+        Self([
+            [vals[0], vals[1], vals[2], vals[3]],
+            [vals[4], vals[5], vals[6], vals[7]],
+            [vals[8], vals[9], vals[10], vals[11]],
+            [vals[12], vals[13], vals[14], vals[15]],
+        ])
+    }
+
+    /// `skewX(angle)` from SVG 1.1 §7.6 — shears `x` by `tan(angle)·y`.
+    fn skew_x(angle: f32) -> Self {
+        let mut m = Self::identity();
+        m.0[1][0] = angle.tan();
+        m
+    }
+
+    /// `skewY(angle)` from SVG 1.1 §7.6 — shears `y` by `tan(angle)·x`.
+    fn skew_y(angle: f32) -> Self {
+        let mut m = Self::identity();
+        m.0[0][1] = angle.tan();
+        m
+    }
+
+    /// SPEC §4.2.8 `rotate3d(x, y, z, angle)`. Returns `None` if the
+    /// axis is the zero vector (SPEC §4.2.8: "the function is in
+    /// error and the entire `'transform'` value is ignored").
+    fn rotation_3d(x: f32, y: f32, z: f32, angle: f32) -> Option<Self> {
+        let len = (x * x + y * y + z * z).sqrt();
+        if !(len > 1e-10 && len.is_finite()) {
+            return None;
+        }
+        let x = x / len;
+        let y = y / len;
+        let z = z / len;
+        let (s, c) = angle.sin_cos();
+        let t = 1.0 - c;
+        Some(Self([
+            // col 0 — coefficients applied to the input x.
+            [t * x * x + c, t * x * y + s * z, t * x * z - s * y, 0.0],
+            // col 1 — coefficients applied to the input y.
+            [t * x * y - s * z, t * y * y + c, t * y * z + s * x, 0.0],
+            // col 2 — coefficients applied to the input z.
+            [t * x * z + s * y, t * y * z - s * x, t * z * z + c, 0.0],
+            // col 3 — translation (none for a rotation).
+            [0.0, 0.0, 0.0, 1.0],
+        ]))
     }
 
     /// Matrix product `self · other`, i.e. apply `other` first then `self`
@@ -135,9 +210,22 @@ pub(crate) fn parse_transform(value: &str) -> Option<Mat4> {
                 Mat4::translation(0.0, 0.0, tz)
             }
             "rotate" => {
+                // SVG 1.1 §7.6: `rotate(angle [, cx, cy])`. With a
+                // centre, equivalent to `translate(cx, cy) rotateZ(a)
+                // translate(-cx, -cy)`.
                 let a = c.read_angle()?;
                 c.skip_ws();
-                Mat4::rotation_z(a)
+                if c.peek() == Some(b')') {
+                    Mat4::rotation_z(a)
+                } else {
+                    let cx = c.read_number()?;
+                    c.skip_ws();
+                    let cy = c.read_number()?;
+                    c.skip_ws();
+                    Mat4::translation(cx, cy, 0.0)
+                        .mul(&Mat4::rotation_z(a))
+                        .mul(&Mat4::translation(-cx, -cy, 0.0))
+                }
             }
             "rotateX" => {
                 let a = c.read_angle()?;
@@ -153,6 +241,78 @@ pub(crate) fn parse_transform(value: &str) -> Option<Mat4> {
                 let a = c.read_angle()?;
                 c.skip_ws();
                 Mat4::rotation_z(a)
+            }
+            "rotate3d" => {
+                let x = c.read_number()?;
+                c.skip_ws();
+                let y = c.read_number()?;
+                c.skip_ws();
+                let z = c.read_number()?;
+                c.skip_ws();
+                let a = c.read_angle()?;
+                c.skip_ws();
+                Mat4::rotation_3d(x, y, z, a)?
+            }
+            "scale" => {
+                // SVG 1.1 §7.6: `scale(sx [, sy])`. With one arg,
+                // `sy` defaults to `sx`.
+                let sx = c.read_number()?;
+                c.skip_ws();
+                let sy = if c.peek() == Some(b')') {
+                    sx
+                } else {
+                    let v = c.read_number()?;
+                    c.skip_ws();
+                    v
+                };
+                Mat4::scaling(sx, sy, 1.0)
+            }
+            "scale3d" => {
+                let sx = c.read_number()?;
+                c.skip_ws();
+                let sy = c.read_number()?;
+                c.skip_ws();
+                let sz = c.read_number()?;
+                c.skip_ws();
+                Mat4::scaling(sx, sy, sz)
+            }
+            "scaleZ" => {
+                let sz = c.read_number()?;
+                c.skip_ws();
+                Mat4::scaling(1.0, 1.0, sz)
+            }
+            "skewX" => {
+                let a = c.read_angle()?;
+                c.skip_ws();
+                Mat4::skew_x(a)
+            }
+            "skewY" => {
+                let a = c.read_angle()?;
+                c.skip_ws();
+                Mat4::skew_y(a)
+            }
+            "matrix" => {
+                let a = c.read_number()?;
+                c.skip_ws();
+                let b = c.read_number()?;
+                c.skip_ws();
+                let cc = c.read_number()?;
+                c.skip_ws();
+                let d = c.read_number()?;
+                c.skip_ws();
+                let e = c.read_number()?;
+                c.skip_ws();
+                let f = c.read_number()?;
+                c.skip_ws();
+                Mat4::matrix_2d(a, b, cc, d, e, f)
+            }
+            "matrix3d" => {
+                let mut vals = [0.0_f32; 16];
+                for slot in &mut vals {
+                    *slot = c.read_number()?;
+                    c.skip_ws();
+                }
+                Mat4::from_column_major(&vals)
             }
             _ => return None,
         };
@@ -378,10 +538,101 @@ mod tests {
     }
 
     #[test]
+    fn scale_uniform_scales_xy_only() {
+        let m = parse_transform("scale(2)").unwrap();
+        let p = m.transform_point([1.0, 2.0, 3.0]);
+        assert!(approx(p, [2.0, 4.0, 3.0]));
+    }
+
+    #[test]
+    fn scale_xy_independent() {
+        let m = parse_transform("scale(2, 3)").unwrap();
+        let p = m.transform_point([1.0, 1.0, 1.0]);
+        assert!(approx(p, [2.0, 3.0, 1.0]));
+    }
+
+    #[test]
+    fn scale_3d_scales_z_too() {
+        let m = parse_transform("scale3d(2, 3, 4)").unwrap();
+        let p = m.transform_point([1.0, 1.0, 1.0]);
+        assert!(approx(p, [2.0, 3.0, 4.0]));
+    }
+
+    #[test]
+    fn scale_z_only_scales_z() {
+        let m = parse_transform("scaleZ(5)").unwrap();
+        let p = m.transform_point([2.0, 3.0, 4.0]);
+        assert!(approx(p, [2.0, 3.0, 20.0]));
+    }
+
+    #[test]
+    fn matrix_2d_translates_origin() {
+        // matrix(1, 0, 0, 1, 10, 20) is a pure translation by (10, 20).
+        let m = parse_transform("matrix(1, 0, 0, 1, 10, 20)").unwrap();
+        let p = m.transform_point([0.0, 0.0, 0.0]);
+        assert!(approx(p, [10.0, 20.0, 0.0]));
+    }
+
+    #[test]
+    fn matrix3d_identity_is_noop() {
+        let m = parse_transform("matrix3d(1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1)").unwrap();
+        let p = m.transform_point([7.0, -3.0, 11.0]);
+        assert!(approx(p, [7.0, -3.0, 11.0]));
+    }
+
+    #[test]
+    fn skew_x_shears_x_by_y() {
+        // skewX(45°) sends (0, 1, 0) → (1, 1, 0).
+        let m = parse_transform("skewX(45deg)").unwrap();
+        let p = m.transform_point([0.0, 1.0, 0.0]);
+        assert!(approx(p, [1.0, 1.0, 0.0]));
+    }
+
+    #[test]
+    fn skew_y_shears_y_by_x() {
+        let m = parse_transform("skewY(45deg)").unwrap();
+        let p = m.transform_point([1.0, 0.0, 0.0]);
+        assert!(approx(p, [1.0, 1.0, 0.0]));
+    }
+
+    #[test]
+    fn rotate3d_about_y_axis_matches_rotate_y() {
+        // `rotate3d(0, 1, 0, 90deg)` should match `rotateY(90deg)`.
+        let r3d = parse_transform("rotate3d(0, 1, 0, 90deg)").unwrap();
+        let ry = parse_transform("rotateY(90deg)").unwrap();
+        for &p in &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]] {
+            assert!(approx(r3d.transform_point(p), ry.transform_point(p)));
+        }
+    }
+
+    #[test]
+    fn rotate3d_zero_axis_rejects() {
+        // SPEC §4.2.8: the zero vector is in error.
+        assert!(parse_transform("rotate3d(0, 0, 0, 90deg)").is_none());
+    }
+
+    #[test]
+    fn rotate_with_centre_pivots_about_point() {
+        // rotate(180, 10, 10) about (10, 10) sends (0, 0) → (20, 20).
+        let m = parse_transform("rotate(180, 10, 10)").unwrap();
+        let p = m.transform_point([0.0, 0.0, 0.0]);
+        assert!(approx(p, [20.0, 20.0, 0.0]));
+    }
+
+    #[test]
+    fn mixed_svg11_and_svg3_transforms_compose() {
+        // SPEC §4.1: SVG 1.1 and svg3 transforms may appear together.
+        let m = parse_transform("scale(2) translateZ(5)").unwrap();
+        // Left-to-right: scale applied last (to the result of translateZ).
+        let p = m.transform_point([1.0, 1.0, 0.0]);
+        assert!(approx(p, [2.0, 2.0, 5.0]));
+    }
+
+    #[test]
     fn unrecognised_function_rejects_whole_attribute() {
-        assert!(parse_transform("matrix3d(1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1)").is_none());
-        assert!(parse_transform("scale(2)").is_none());
-        assert!(parse_transform("translateZ(5) skewX(10)").is_none());
+        // None of these names are in the supported set.
+        assert!(parse_transform("perspective(500)").is_none());
+        assert!(parse_transform("translateZ(5) bogus(10)").is_none());
     }
 
     #[test]
@@ -389,5 +640,6 @@ mod tests {
         assert!(parse_transform("translate3d(1,2)").is_none()); // missing arg
         assert!(parse_transform("translateZ(").is_none()); // missing closing paren
         assert!(parse_transform("rotateX(90xx)").is_none()); // bad angle unit
+        assert!(parse_transform("matrix(1,2,3)").is_none()); // matrix needs 6 args
     }
 }

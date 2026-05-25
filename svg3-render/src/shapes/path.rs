@@ -96,6 +96,25 @@ pub(crate) fn parse_path(data: &str) -> Option<Path> {
     saw_segment.then(|| builder.build())
 }
 
+/// Strict variant of [`parse_path`] used by `<surface>`'s child path
+/// parsing. Unlike the SVG 1.1 default of "render the valid prefix and
+/// stop at the first error" used for ordinary `<path>` elements,
+/// `<surface>` per SPEC §5.4 requires its referenced child paths to
+/// parse cleanly — any malformed token or unsupported segment makes
+/// the whole surface in error.
+pub(crate) fn parse_path_strict(data: &str) -> Option<Path> {
+    let mut builder = Path::builder().with_svg();
+    let mut saw_segment = false;
+
+    for segment in PathParser::from(data) {
+        let segment = segment.ok()?;
+        apply_segment(segment, &mut builder)?;
+        saw_segment = true;
+    }
+
+    saw_segment.then(|| builder.build())
+}
+
 fn apply_segment(segment: PathSegment, builder: &mut impl SvgPathBuilder) -> Option<()> {
     match segment {
         PathSegment::MoveTo { abs, x, y } => {

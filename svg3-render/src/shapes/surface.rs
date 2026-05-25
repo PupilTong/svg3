@@ -35,7 +35,7 @@ use lyon_tessellation::path::iterator::PathIterator;
 use lyon_tessellation::path::{Path, PathEvent};
 use svg3_dom::{Document, Element, ElementKind, NodeId};
 
-use super::path::parse_path;
+use super::path::parse_path_strict;
 use super::stroke::FLATTENING_TOLERANCE;
 use super::{Viewport, KIND_SOLID};
 use crate::transform::parse_transform;
@@ -206,7 +206,7 @@ fn build_sweep_grid(
     for &idx in &referenced {
         let child = path_children[idx as usize];
         let d = child.attributes.get("d")?;
-        let path = parse_path(d)?;
+        let path = parse_path_strict(d)?;
         let (mut points, closed) = flatten_polyline(&path)?;
         if points.len() < 2 {
             return None;
@@ -875,6 +875,19 @@ mod tests {
                 &[("d", "M 0 0 L 10 0")],   // open
                 &[("d", "M 0 0 L 10 0 Z")], // closed (Lyon adds a closing vertex)
             ],
+        );
+        assert!(resolve_surface(&doc, id, vp()).is_none());
+    }
+
+    #[test]
+    fn resolve_rejects_malformed_child_d() {
+        // SPEC §5.4 — a referenced child whose `d` does not parse
+        // cleanly invalidates the whole surface. The standalone
+        // `<path>` parser would accept the valid prefix and stop at
+        // "BAD"; `<surface>` must reject the parent outright.
+        let (doc, id) = build_doc(
+            &[("d", "M 0 L 1")],
+            &[&[("d", "M 0 0 L 10 0")], &[("d", "M 0 0 L 10 0 BAD")]],
         );
         assert!(resolve_surface(&doc, id, vp()).is_none());
     }
