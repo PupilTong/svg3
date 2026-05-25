@@ -3080,6 +3080,68 @@ mod tests {
     }
 
     #[test]
+    fn render_to_image_2d_rect_with_explicit_z_occludes_cube_behind_it() {
+        // svg3 extension beyond SPEC §3.1: a 2D `<rect>` with `z = 20`
+        // sits 20 user units in front of the `z = 0` plane and must
+        // occlude a cube centred at `cz = 0` that extends only to z = +5
+        // (size = 10). The rect is declared FIRST so without spatial Z
+        // it would be painter-overdrawn by the cube; depth-aware
+        // rendering plus the new Z attribute lets it win.
+        let document = svg3_dom::parse(
+            r#"<svg width="64" height="64"><rect x="16" y="16" width="32" height="32" z="20" fill="red"/><cube cx="32" cy="32" cz="0" size="10" fill="blue"/></svg>"#,
+        )
+        .unwrap();
+        let config = RenderConfig {
+            width: 64,
+            height: 64,
+            ..RenderConfig::default()
+        };
+        let Some(renderer) =
+            skip_or_renderer("render_to_image_2d_rect_with_explicit_z_occludes_cube_behind_it")
+        else {
+            return;
+        };
+        let image = renderer
+            .render_to_image(&document, config)
+            .expect("headless render failed");
+        // The cube sits entirely behind the rect plane (z ∈ [-5, 5] < 20),
+        // so at the overlap the rect's red wins everywhere.
+        let centre = image.pixel(32, 32);
+        assert!(
+            centre[0] > 200 && centre[2] < 60,
+            "rect with z=20 should occlude a cube at cz=0: {centre:?}"
+        );
+    }
+
+    #[test]
+    fn render_to_image_cube_in_front_of_2d_circle_with_explicit_cz() {
+        // Converse: a `<circle>` with `cz = -20` sits behind the `z = 0`
+        // plane; a cube at `cz = 0` is in front and paints over it.
+        let document = svg3_dom::parse(
+            r#"<svg width="64" height="64"><circle cx="32" cy="32" r="20" cz="-20" fill="red"/><cube cx="32" cy="32" cz="0" size="20" fill="blue"/></svg>"#,
+        )
+        .unwrap();
+        let config = RenderConfig {
+            width: 64,
+            height: 64,
+            ..RenderConfig::default()
+        };
+        let Some(renderer) =
+            skip_or_renderer("render_to_image_cube_in_front_of_2d_circle_with_explicit_cz")
+        else {
+            return;
+        };
+        let image = renderer
+            .render_to_image(&document, config)
+            .expect("headless render failed");
+        let centre = image.pixel(32, 32);
+        assert!(
+            centre[2] > 200 && centre[0] < 60,
+            "cube at cz=0 should occlude a circle at cz=-20: {centre:?}"
+        );
+    }
+
+    #[test]
     fn render_to_image_2d_rect_occludes_cube_behind_z0() {
         // SPEC §7.3: a 2D `<rect>` at z=0 (declared first) occludes any
         // cube surface at z < 0 and must paint over it; cube surfaces at

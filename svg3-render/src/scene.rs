@@ -219,13 +219,27 @@ fn append_subtree_mesh(
     }
 }
 
-/// Wraps [`append_element_mesh`] with the per-2D-shape painter-order Z
-/// bias. Snapshots the mesh's vertex count, delegates to the tessellator,
-/// then shifts the newly-appended vertices forward in Z if the element is
-/// 2D — fill, stroke, and marker geometry all share the same bias slot so
-/// the element composites cleanly internally. 3D elements (`<cube>`) keep
-/// their authored world Z so spatial occlusion against the 2D plane and
-/// other 3D content works per [SPEC.md](../../SPEC.md) §7.3.
+/// Wraps [`append_element_mesh`] with the per-2D-shape Z post-processing.
+/// Snapshots the mesh's vertex count, delegates to the tessellator, then —
+/// for 2D elements only — shifts the newly-appended vertices forward in Z
+/// by the sum of:
+///
+/// * the **painter-order bias** `index * `[`Z_PAINTER_STRIDE`], which
+///   resolves painter's order through the unified `LessEqual` depth test
+///   without coplanar z-fighting under perspective; and
+/// * the **explicit Z attribute** ([`resolve_explicit_z`]) — an svg3
+///   extension that lets a 2D element opt into spatial 2D-3D occlusion
+///   directly (e.g. `<rect z="20">` to place the rect 20 user units in
+///   front of the `z = 0` plane). SVG 1.1 leaves these attributes
+///   unrecognised, and SPEC.md §3.1 currently keeps 2D content in
+///   `z = 0`; svg3's depth-aware shape pipeline lets us honour an
+///   explicit Z without further changes per shape.
+///
+/// Fill, stroke, and marker geometry for one element all share the same
+/// bias + Z slot, so the element composites cleanly internally. 3D
+/// elements (`<cube>`, `<ellipsoid>`) keep their authored world Z so
+/// spatial occlusion against the 2D plane and other 3D content works per
+/// [SPEC.md](../../SPEC.md) §7.3.
 fn append_element_mesh_biased(
     document: &Document,
     element: &Element,
@@ -240,9 +254,38 @@ fn append_element_mesh_biased(
     }
     if ElementDimension::of(&element.kind) == ElementDimension::TwoD {
         let index = context.twod_index.get();
-        apply_painter_bias(mesh, start, (index as f32) * Z_PAINTER_STRIDE);
+        let painter = (index as f32) * Z_PAINTER_STRIDE;
+        let explicit = resolve_explicit_z(element, context.viewport);
+        apply_painter_bias(mesh, start, painter + explicit);
         context.twod_index.set(index + 1);
     }
+}
+
+/// Resolve a 2D element's explicit Z-offset attribute, in svg3 user units.
+///
+/// Maps each 2D element kind to the Z-axis attribute that parallels its
+/// existing position attributes:
+///
+/// | Element | Z attribute |
+/// |---|---|
+/// | `<rect>`, `<line>`, `<polygon>`, `<polyline>`, `<path>` | `z` |
+/// | `<circle>`, `<ellipse>` | `cz` |
+///
+/// Percentages resolve against `viewport.diagonal()` — the isotropic
+/// basis SVG 1.1 uses for lengths that are neither horizontal nor
+/// vertical, and the same basis svg3's 3D primitives use for their `cz`
+/// and `depth` / `rz` attributes. An absent or unparseable value is `0`
+/// so the element stays in the `z = 0` plane, matching SPEC.md §3.1's
+/// default.
+///
+/// This attribute is an svg3 extension beyond SPEC.md §3.1 (which keeps
+/// 2D content in `z = 0`); SVG 1.1 implementations will ignore it.
+fn resolve_explicit_z(element: &Element, viewport: Viewport) -> f32 {
+    let attr = match element.kind {
+        ElementKind::Circle | ElementKind::Ellipse => "cz",
+        _ => "z",
+    };
+    shapes::resolve_length(element, attr, viewport.diagonal()).unwrap_or(0.0)
 }
 
 fn append_element_mesh(
@@ -1061,6 +1104,100 @@ mod tests {
                 (r2 - 1.0).abs() < 1e-4,
                 "vertex {v:?} off the surface (r² = {r2})"
             );
+        }
+    }
+
+    #[test]
+    fn build_scene_offsets_2d_rect_by_explicit_z() {
+        // svg3 extension beyond SPEC §3.1: a `z` attribute on a 2D element
+        // shifts its vertices forward in svg3 world Z. The painter-order
+        // bias adds on top, so the first 2D shape's Z equals the explicit
+        // `z` exactly (index = 0, bias = 0).
+        let document =
+            svg3_dom::parse(r#"<svg><rect x="10" y="10" width="20" height="20" z="15"/></svg>"#)
+                .unwrap();
+        let mesh = build_scene(&document, vp());
+        assert_eq!(mesh.vertices.len(), 4);
+        for v in &mesh.vertices {
+            assert!(
+                (v.position[2] - 15.0).abs() < 1e-4,
+                "got z={}",
+                v.position[2]
+            );
+        }
+    }
+
+    #[test]
+    fn build_scene_offsets_2d_circle_by_explicit_cz() {
+        // `<circle>` and `<ellipse>` use `cz` to match their `cx`/`cy`
+        // attribute pattern. The SDF disc still tessellates to its 4
+        // bounding-quad vertices, all shifted to `z = cz`.
+        let document =
+            svg3_dom::parse(r#"<svg><circle cx="50" cy="50" r="15" cz="-25"/></svg>"#).unwrap();
+        let mesh = build_scene(&document, vp());
+        assert_eq!(mesh.vertices.len(), 4);
+        for v in &mesh.vertices {
+            assert!(
+                (v.position[2] - -25.0).abs() < 1e-4,
+                "got z={}",
+                v.position[2]
+            );
+        }
+    }
+
+    #[test]
+    fn build_scene_combines_explicit_z_with_painter_bias() {
+        // The two 2D shapes get successive painter-bias slots, AND the
+        // second one is also shifted by its explicit `z`. The two
+        // contributions add — letting an author opt into spatial Z
+        // without losing painter ordering for coplanar 2D content.
+        let document = svg3_dom::parse(
+            r#"<svg><rect x="10" y="10" width="10" height="10"/><rect x="30" y="10" width="10" height="10" z="50"/></svg>"#,
+        )
+        .unwrap();
+        let mesh = build_scene(&document, vp());
+        assert_eq!(mesh.vertices.len(), 8);
+        // First rect: painter slot 0 (z=0), no explicit z → z=0.
+        for v in &mesh.vertices[..4] {
+            assert!(v.position[2].abs() < 1e-6);
+        }
+        // Second rect: painter slot 1 (z=STRIDE) + explicit 50.
+        for v in &mesh.vertices[4..] {
+            assert!((v.position[2] - (Z_PAINTER_STRIDE + 50.0)).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn build_scene_resolves_z_percentage_against_viewport_diagonal() {
+        // Percentage `z` resolves against the same isotropic basis svg3
+        // uses for `<circle>`'s `r` and `<cube>`'s `cz` — the viewport
+        // diagonal — since the Z axis is neither horizontal nor vertical.
+        let document =
+            svg3_dom::parse(r#"<svg><rect x="10" y="10" width="10" height="10" z="50%"/></svg>"#)
+                .unwrap();
+        let viewport = Viewport {
+            width: 200.0,
+            height: 100.0,
+        };
+        let mesh = build_scene(&document, viewport);
+        let expected = viewport.diagonal() * 0.5;
+        for v in &mesh.vertices {
+            assert!((v.position[2] - expected).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn build_scene_skips_z_attribute_on_3d_primitives() {
+        // 3D primitives already carry a `cz` attribute as part of their
+        // SPEC §5 geometry; the 2D-extension Z post-processing must not
+        // also shift them or they'd double-bias. A `<cube cz="10">` lives
+        // at world Z = 10, not 10 + extension offset.
+        let document =
+            svg3_dom::parse(r#"<svg><cube cx="50" cy="50" cz="10" size="20"/></svg>"#).unwrap();
+        let mesh = build_scene(&document, vp());
+        // Cube vertices: x in cx±10, y in cy±10, z in cz±10 (no extra bias).
+        for v in &mesh.vertices {
+            assert!(v.position[2] >= 0.0 - 1e-4 && v.position[2] <= 20.0 + 1e-4);
         }
     }
 

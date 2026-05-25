@@ -790,6 +790,17 @@ fn cases() -> Vec<Case> {
             "ellipsoid-in-front-of-2d-rect",
             r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><rect x="30" y="30" width="40" height="40" fill="#c14b2b"/><ellipsoid cx="50" cy="50" cz="25" r="20" fill="#f2c14e"/></svg>"##,
         ),
+        // svg3 extension: 2D elements accept `z` (or `cz` for `<circle>`
+        // / `<ellipse>`) to opt into spatial Z directly. Here a `<rect>`
+        // at `z = 25` sits in front of a `<cube>` at `cz = 0`, so depth
+        // wins over document order — the rect (declared FIRST) still
+        // occludes the cube at the overlap. A `<circle>` at `cz = -25`
+        // sits behind the cube, so the cube paints over its disc; the
+        // circle's edge still shows where the cube isn't.
+        Case::square(
+            "twod-z-attributes-interleave-with-cube",
+            r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><rect x="40" y="40" width="40" height="40" z="25" fill="#c14b2b"/><circle cx="40" cy="40" r="20" cz="-25" fill="#10b981"/><cube cx="50" cy="50" cz="0" size="30" fill="#f2c14e"/></svg>"##,
+        ),
     ]
 }
 
