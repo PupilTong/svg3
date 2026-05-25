@@ -24,8 +24,9 @@
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
-use base64::engine::general_purpose;
-use base64::Engine as _;
+mod common;
+
+use common::{png_data_uri, quadrant_png_data_uri, solid_png_data_uri};
 use svg3_dom::parse;
 use svg3_render::{Camera, Image, RenderConfig, RenderError, Renderer};
 
@@ -86,47 +87,6 @@ impl Case {
     }
 }
 
-fn png_data_uri(width: u32, height: u32, rgba: &[u8]) -> String {
-    let mut bytes = Vec::new();
-    {
-        let mut encoder = png::Encoder::new(&mut bytes, width, height);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        let mut writer = encoder.write_header().expect("PNG header should encode");
-        writer
-            .write_image_data(rgba)
-            .expect("PNG pixels should encode");
-    }
-    format!(
-        "data:image/png;base64,{}",
-        general_purpose::STANDARD.encode(bytes)
-    )
-}
-
-fn solid_png_data_uri(width: u32, height: u32, color: [u8; 4]) -> String {
-    let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
-    for _ in 0..width * height {
-        rgba.extend_from_slice(&color);
-    }
-    png_data_uri(width, height, &rgba)
-}
-
-fn quadrant_png_data_uri() -> String {
-    let mut rgba = Vec::with_capacity(4 * 4 * 4);
-    for y in 0..4 {
-        for x in 0..4 {
-            let color = match (x >= 2, y >= 2) {
-                (false, false) => [242, 193, 78, 255],
-                (true, false) => [37, 99, 235, 255],
-                (false, true) => [17, 170, 85, 255],
-                (true, true) => [193, 75, 43, 255],
-            };
-            rgba.extend_from_slice(&color);
-        }
-    }
-    png_data_uri(4, 4, &rgba)
-}
-
 fn alpha_cross_png_data_uri() -> String {
     let mut rgba = Vec::with_capacity(16 * 16 * 4);
     for y in 0..16 {
@@ -161,7 +121,12 @@ fn cases() -> Vec<Case> {
     let mut dolly = Camera::facing(100, 100);
     dolly.eye.z *= 0.6;
 
-    let quadrants = quadrant_png_data_uri();
+    let quadrants = quadrant_png_data_uri([
+        [242, 193, 78, 255],
+        [37, 99, 235, 255],
+        [17, 170, 85, 255],
+        [193, 75, 43, 255],
+    ]);
     let alpha_cross = alpha_cross_png_data_uri();
     let red = solid_png_data_uri(1, 1, [193, 75, 43, 255]);
     let green = solid_png_data_uri(1, 1, [17, 170, 85, 255]);
@@ -460,7 +425,7 @@ fn cases() -> Vec<Case> {
         ),
         Case::square(
             "wpt-filter-comptran-01",
-            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="t"><feComponentTransfer><feFuncR type="table" tableValues="0 0"/><feFuncG type="identity"/><feFuncB type="identity"/></feComponentTransfer></filter><filter id="l"><feComponentTransfer><feFuncB type="linear" slope="0" intercept="1"/></feComponentTransfer></filter><filter id="g"><feComponentTransfer><feFuncR type="gamma" amplitude="1" exponent="2" offset="0"/></feComponentTransfer></filter><rect x="12" y="22" width="22" height="56" fill="white" filter="url(#t)"/><rect x="40" y="22" width="22" height="56" fill="black" filter="url(#l)"/><rect x="68" y="22" width="22" height="56" fill="#808080" filter="url(#g)"/></svg>"##,
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="t"><feComponentTransfer><feFuncR type="table" tableValues="0 0"/><feFuncG type="identity"/><feFuncB type="identity"/></feComponentTransfer></filter><filter id="d"><feComponentTransfer><feFuncG type="discrete" tableValues="0 1"/></feComponentTransfer></filter><filter id="l"><feComponentTransfer><feFuncB type="linear" slope="0" intercept="1"/></feComponentTransfer></filter><filter id="g"><feComponentTransfer><feFuncR type="gamma" amplitude="1" exponent="2" offset="0"/></feComponentTransfer></filter><rect x="8" y="22" width="16" height="56" fill="white" filter="url(#t)"/><rect x="31" y="22" width="16" height="56" fill="#c0c0c0" filter="url(#d)"/><rect x="54" y="22" width="16" height="56" fill="black" filter="url(#l)"/><rect x="77" y="22" width="16" height="56" fill="#808080" filter="url(#g)"/></svg>"##,
         ),
         Case::square(
             "wpt-filter-conv-01",

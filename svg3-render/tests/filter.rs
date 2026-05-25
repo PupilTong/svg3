@@ -5,8 +5,9 @@
 //! GPU-backed and self-skip on hosts without an adapter, matching the snapshot
 //! suite's behavior.
 
-use base64::engine::general_purpose;
-use base64::Engine as _;
+mod common;
+
+use common::png_data_uri;
 use svg3_dom::parse;
 use svg3_render::{Image, RenderConfig, RenderError, Renderer};
 
@@ -35,23 +36,6 @@ fn render(renderer: &Renderer, svg: &str) -> Image {
             },
         )
         .expect("filter E2E render failed")
-}
-
-fn png_data_uri(width: u32, height: u32, rgba: &[u8]) -> String {
-    let mut bytes = Vec::new();
-    {
-        let mut encoder = png::Encoder::new(&mut bytes, width, height);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        let mut writer = encoder.write_header().expect("PNG header should encode");
-        writer
-            .write_image_data(rgba)
-            .expect("PNG pixels should encode");
-    }
-    format!(
-        "data:image/png;base64,{}",
-        general_purpose::STANDARD.encode(bytes)
-    )
 }
 
 fn assert_transparent(image: &Image, x: u32, y: u32) {

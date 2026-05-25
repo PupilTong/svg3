@@ -4,16 +4,33 @@
 //! the WPT behavior under test. WPT files whose core behavior still depends on
 //! unsupported renderer features are represented as ignored tests so the gap is
 //! visible in `cargo test -- --ignored`.
+//! The pixel probes intentionally overlap `filter.rs`: this binary preserves
+//! the WPT lineage and unsupported-file inventory for each migrated case.
 
-use base64::engine::general_purpose;
-use base64::Engine as _;
+use std::sync::{Mutex, MutexGuard, OnceLock};
+
+mod common;
+
+use common::{quadrant_png_data_uri, solid_png_data_uri};
 use svg3_dom::parse;
-use svg3_render::{Image, RenderConfig, Renderer};
+use svg3_render::{Image, RenderConfig, RenderError, Renderer};
 
 const CANVAS: u32 = 64;
 
-fn renderer() -> Renderer {
-    Renderer::headless().expect("WPT filter tests require a GPU adapter")
+static RENDERER: OnceLock<Option<Mutex<Renderer>>> = OnceLock::new();
+
+fn renderer() -> Option<MutexGuard<'static, Renderer>> {
+    RENDERER
+        .get_or_init(|| match Renderer::headless() {
+            Ok(renderer) => Some(Mutex::new(renderer)),
+            Err(RenderError::NoAdapter) => {
+                eprintln!("skipping WPT filter tests: no GPU adapter available");
+                None
+            }
+            Err(error) => panic!("renderer construction failed: {error}"),
+        })
+        .as_ref()
+        .map(|renderer| renderer.lock().expect("WPT filter renderer mutex poisoned"))
 }
 
 fn render(renderer: &Renderer, svg: &str) -> Image {
@@ -32,47 +49,6 @@ fn render_sized(renderer: &Renderer, svg: &str, width: u32, height: u32) -> Imag
             },
         )
         .expect("WPT-derived filter fixture should render")
-}
-
-fn png_data_uri(width: u32, height: u32, rgba: &[u8]) -> String {
-    let mut bytes = Vec::new();
-    {
-        let mut encoder = png::Encoder::new(&mut bytes, width, height);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        let mut writer = encoder.write_header().expect("PNG header should encode");
-        writer
-            .write_image_data(rgba)
-            .expect("PNG pixels should encode");
-    }
-    format!(
-        "data:image/png;base64,{}",
-        general_purpose::STANDARD.encode(bytes)
-    )
-}
-
-fn solid_png_data_uri(width: u32, height: u32, color: [u8; 4]) -> String {
-    let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
-    for _ in 0..width * height {
-        rgba.extend_from_slice(&color);
-    }
-    png_data_uri(width, height, &rgba)
-}
-
-fn quadrant_png_data_uri() -> String {
-    let mut rgba = Vec::with_capacity(4 * 4 * 4);
-    for y in 0..4 {
-        for x in 0..4 {
-            let color = match (x >= 2, y >= 2) {
-                (false, false) => [255, 0, 0, 255],
-                (true, false) => [0, 255, 0, 255],
-                (false, true) => [0, 0, 255, 255],
-                (true, true) => [255, 255, 0, 255],
-            };
-            rgba.extend_from_slice(&color);
-        }
-    }
-    png_data_uri(4, 4, &rgba)
 }
 
 fn assert_transparent(image: &Image, x: u32, y: u32) {
@@ -147,7 +123,9 @@ macro_rules! unsupported_wpt {
 
 #[test]
 fn wpt_svg_import_filters_gauss_01_b_manual_passes() {
-    let renderer = renderer();
+    let Some(renderer) = renderer() else {
+        return;
+    };
     let uniform = render(
         &renderer,
         r##"<svg><filter id="soft"><feGaussianBlur stdDeviation="4"/></filter><rect x="24" y="24" width="16" height="16" fill="blue" filter="url(#soft)"/></svg>"##,
@@ -164,7 +142,9 @@ fn wpt_svg_import_filters_gauss_01_b_manual_passes() {
 
 #[test]
 fn wpt_svg_import_filters_gauss_02_f_manual_passes() {
-    let renderer = renderer();
+    let Some(renderer) = renderer() else {
+        return;
+    };
     let vertical = render(
         &renderer,
         r##"<svg><filter id="v"><feGaussianBlur stdDeviation="0 6"/></filter><rect x="24" y="24" width="16" height="16" fill="blue" filter="url(#v)"/></svg>"##,
@@ -182,7 +162,9 @@ fn wpt_svg_import_filters_gauss_02_f_manual_passes() {
 
 #[test]
 fn wpt_svg_import_filters_gauss_03_f_manual_passes() {
-    let renderer = renderer();
+    let Some(renderer) = renderer() else {
+        return;
+    };
     let image = render(
         &renderer,
         r##"<svg><filter id="identity"><feGaussianBlur stdDeviation="0"/></filter><rect x="20" y="20" width="28" height="28" fill="lime" filter="url(#identity)"/></svg>"##,
@@ -193,7 +175,9 @@ fn wpt_svg_import_filters_gauss_03_f_manual_passes() {
 
 #[test]
 fn wpt_svg_import_filters_color_01_b_manual_passes() {
-    let renderer = renderer();
+    let Some(renderer) = renderer() else {
+        return;
+    };
     let matrix = render(
         &renderer,
         r##"<svg><filter id="m"><feColorMatrix type="matrix" values="0 0 0 0 0  0 1 0 0 0  0 0 0 0 0  0 0 0 1 0"/></filter><rect x="16" y="16" width="32" height="32" fill="white" filter="url(#m)"/></svg>"##,
@@ -235,7 +219,10 @@ fn wpt_svg_import_filters_color_01_b_manual_passes() {
 
 #[test]
 fn wpt_svg_import_filters_color_02_b_manual_passes() {
-    let renderer = renderer();
+    let Some(renderer) = renderer() else {
+        return;
+    };
+    // SVG 2 applies the last transfer function element for a repeated channel.
     let image = render(
         &renderer,
         r##"<svg><filter id="ct"><feComponentTransfer><feFuncR type="identity"/><feFuncR type="linear" slope="0" intercept="1"/><feFuncR type="linear" slope="0" intercept="0"/></feComponentTransfer></filter><rect x="16" y="16" width="32" height="32" fill="white" filter="url(#ct)"/></svg>"##,
@@ -249,7 +236,9 @@ fn wpt_svg_import_filters_color_02_b_manual_passes() {
 
 #[test]
 fn wpt_svg_import_filters_comptran_01_b_manual_passes() {
-    let renderer = renderer();
+    let Some(renderer) = renderer() else {
+        return;
+    };
     let table = render(
         &renderer,
         r##"<svg><filter id="t"><feComponentTransfer><feFuncR type="table" tableValues="0 0"/><feFuncG type="identity"/><feFuncB type="identity"/></feComponentTransfer></filter><rect x="16" y="16" width="32" height="32" fill="white" filter="url(#t)"/></svg>"##,
@@ -289,7 +278,9 @@ fn wpt_svg_import_filters_comptran_01_b_manual_passes() {
 
 #[test]
 fn wpt_svg_import_filters_conv_01_f_manual_passes() {
-    let renderer = renderer();
+    let Some(renderer) = renderer() else {
+        return;
+    };
     let image = render(
         &renderer,
         r##"<svg><filter id="sharp"><feConvolveMatrix kernelMatrix="0 -1 0 -1 5 -1 0 -1 0"/></filter><rect x="16" y="16" width="32" height="32" fill="#c14b2b" filter="url(#sharp)"/></svg>"##,
@@ -299,7 +290,9 @@ fn wpt_svg_import_filters_conv_01_f_manual_passes() {
 
 #[test]
 fn wpt_svg_import_filters_conv_02_f_manual_passes() {
-    let renderer = renderer();
+    let Some(renderer) = renderer() else {
+        return;
+    };
     let default_order = render(
         &renderer,
         r##"<svg><filter id="c"><feConvolveMatrix kernelMatrix="0 0 0 0 1 0 0 0 0" preserveAlpha="true"/></filter><rect x="16" y="16" width="32" height="32" fill="red" filter="url(#c)"/></svg>"##,
@@ -315,7 +308,9 @@ fn wpt_svg_import_filters_conv_02_f_manual_passes() {
 
 #[test]
 fn wpt_svg_import_filters_conv_03_f_manual_passes() {
-    let renderer = renderer();
+    let Some(renderer) = renderer() else {
+        return;
+    };
     let image = render(
         &renderer,
         r##"<svg><filter id="c"><feFlood flood-color="blue"/><feConvolveMatrix in="SourceGraphic" kernelMatrix="0 0 0 0 1 0 0 0 0"/></filter><rect x="16" y="16" width="32" height="32" fill="red" filter="url(#c)"/></svg>"##,
@@ -325,7 +320,9 @@ fn wpt_svg_import_filters_conv_03_f_manual_passes() {
 
 #[test]
 fn wpt_svg_import_filters_conv_04_f_manual_passes() {
-    let renderer = renderer();
+    let Some(renderer) = renderer() else {
+        return;
+    };
     let image = render(
         &renderer,
         r##"<svg><filter id="c"><feConvolveMatrix kernelMatrix="0 0 0 0 1 0 0 0 0" bias="0.5"/></filter><rect x="16" y="16" width="32" height="32" fill="black" filter="url(#c)"/></svg>"##,
@@ -342,7 +339,9 @@ fn wpt_svg_import_filters_conv_04_f_manual_passes() {
 
 #[test]
 fn wpt_svg_import_filters_diffuse_01_f_manual_passes() {
-    let renderer = renderer();
+    let Some(renderer) = renderer() else {
+        return;
+    };
     let image = render(
         &renderer,
         r##"<svg><filter id="light"><feDiffuseLighting surfaceScale="5" diffuseConstant="1" lighting-color="white"><feDistantLight azimuth="45" elevation="60"/></feDiffuseLighting></filter><circle cx="32" cy="32" r="20" fill="white" filter="url(#light)"/></svg>"##,
@@ -352,8 +351,15 @@ fn wpt_svg_import_filters_diffuse_01_f_manual_passes() {
 
 #[test]
 fn wpt_svg_import_filters_displace_01_f_manual_passes() {
-    let renderer = renderer();
-    let map = quadrant_png_data_uri();
+    let Some(renderer) = renderer() else {
+        return;
+    };
+    let map = quadrant_png_data_uri([
+        [255, 0, 0, 255],
+        [0, 255, 0, 255],
+        [0, 0, 255, 255],
+        [255, 255, 0, 255],
+    ]);
     let svg = format!(
         r##"<svg><filter id="warp"><feImage href="{map}" x="0" y="0" width="64" height="64" result="map"/><feDisplacementMap in="SourceGraphic" in2="map" scale="8" xChannelSelector="R" yChannelSelector="G"/></filter><rect x="20" y="20" width="24" height="24" fill="blue" filter="url(#warp)"/></svg>"##
     );
@@ -367,7 +373,9 @@ fn wpt_svg_import_filters_displace_01_f_manual_passes() {
 
 #[test]
 fn wpt_svg_import_filters_displace_02_f_manual_passes() {
-    let renderer = renderer();
+    let Some(renderer) = renderer() else {
+        return;
+    };
     let image = render(
         &renderer,
         r##"<svg><filter id="warp"><feDisplacementMap in="SourceGraphic" in2="SourceAlpha" scale="0"/></filter><rect x="16" y="16" width="32" height="32" fill="blue" filter="url(#warp)"/></svg>"##,
@@ -377,7 +385,9 @@ fn wpt_svg_import_filters_displace_02_f_manual_passes() {
 
 #[test]
 fn wpt_svg_import_filters_image_01_b_manual_passes() {
-    let renderer = renderer();
+    let Some(renderer) = renderer() else {
+        return;
+    };
     let href = solid_png_data_uri(1, 1, [255, 0, 0, 255]);
     let svg = format!(
         r##"<svg><filter id="tex"><feImage href="{href}" x="20" y="18" width="24" height="22"/></filter><rect width="64" height="64" filter="url(#tex)"/></svg>"##
@@ -389,7 +399,9 @@ fn wpt_svg_import_filters_image_01_b_manual_passes() {
 
 #[test]
 fn wpt_svg_import_filters_image_03_f_manual_passes() {
-    let renderer = renderer();
+    let Some(renderer) = renderer() else {
+        return;
+    };
     let href = solid_png_data_uri(1, 1, [0, 255, 0, 255]);
     let svg = format!(
         r##"<svg width="200" height="100"><filter id="tex"><feImage href="{href}" x="20%" y="25%" width="30%" height="40%"/></filter><rect width="200" height="100" filter="url(#tex)"/></svg>"##
@@ -401,7 +413,9 @@ fn wpt_svg_import_filters_image_03_f_manual_passes() {
 
 #[test]
 fn wpt_svg_import_filters_image_04_f_manual_passes() {
-    let renderer = renderer();
+    let Some(renderer) = renderer() else {
+        return;
+    };
     let href = solid_png_data_uri(10, 6, [0, 0, 255, 255]);
     let svg = format!(
         r##"<svg><filter id="tex"><feImage href="{href}" x="30" y="22" width="20" height="18"/></filter><rect width="64" height="64" filter="url(#tex)"/></svg>"##
@@ -413,7 +427,9 @@ fn wpt_svg_import_filters_image_04_f_manual_passes() {
 
 #[test]
 fn wpt_svg_import_filters_light_01_f_manual_passes() {
-    let renderer = renderer();
+    let Some(renderer) = renderer() else {
+        return;
+    };
     let distant = render(
         &renderer,
         r##"<svg><filter id="l"><feDiffuseLighting surfaceScale="5" diffuseConstant="1"><feDistantLight azimuth="45" elevation="60"/></feDiffuseLighting></filter><circle cx="32" cy="32" r="20" fill="white" filter="url(#l)"/></svg>"##,
@@ -433,7 +449,9 @@ fn wpt_svg_import_filters_light_01_f_manual_passes() {
 
 #[test]
 fn wpt_svg_import_filters_light_02_f_manual_passes() {
-    let renderer = renderer();
+    let Some(renderer) = renderer() else {
+        return;
+    };
     let image = render(
         &renderer,
         r##"<svg><filter id="spec"><feSpecularLighting surfaceScale="5" specularConstant="1" specularExponent="8"><feDistantLight azimuth="135" elevation="45"/></feSpecularLighting></filter><circle cx="32" cy="32" r="20" fill="white" filter="url(#spec)"/></svg>"##,
@@ -443,7 +461,9 @@ fn wpt_svg_import_filters_light_02_f_manual_passes() {
 
 #[test]
 fn wpt_svg_import_filters_light_03_f_manual_passes() {
-    let renderer = renderer();
+    let Some(renderer) = renderer() else {
+        return;
+    };
     let image = render(
         &renderer,
         r##"<svg><filter id="spec"><feSpecularLighting surfaceScale="5" specularConstant="1" specularExponent="8"><fePointLight x="32" y="32" z="40"/></feSpecularLighting></filter><circle cx="32" cy="32" r="20" fill="white" filter="url(#spec)"/></svg>"##,
@@ -453,7 +473,9 @@ fn wpt_svg_import_filters_light_03_f_manual_passes() {
 
 #[test]
 fn wpt_svg_import_filters_light_04_f_manual_passes() {
-    let renderer = renderer();
+    let Some(renderer) = renderer() else {
+        return;
+    };
     let image = render(
         &renderer,
         r##"<svg><filter id="spot"><feDiffuseLighting surfaceScale="5" diffuseConstant="1"><feSpotLight x="32" y="32" z="40" pointsAtX="32" pointsAtY="32" pointsAtZ="0" limitingConeAngle="35"/></feDiffuseLighting></filter><circle cx="32" cy="32" r="20" fill="white" filter="url(#spot)"/></svg>"##,
@@ -463,7 +485,9 @@ fn wpt_svg_import_filters_light_04_f_manual_passes() {
 
 #[test]
 fn wpt_svg_import_filters_morph_01_f_manual_passes() {
-    let renderer = renderer();
+    let Some(renderer) = renderer() else {
+        return;
+    };
     let dilate = render(
         &renderer,
         r##"<svg><filter id="grow"><feMorphology operator="dilate" radius="4"/></filter><rect x="28" y="28" width="8" height="8" fill="lime" filter="url(#grow)"/></svg>"##,
@@ -480,7 +504,9 @@ fn wpt_svg_import_filters_morph_01_f_manual_passes() {
 
 #[test]
 fn wpt_svg_import_filters_specular_01_f_manual_passes() {
-    let renderer = renderer();
+    let Some(renderer) = renderer() else {
+        return;
+    };
     let image = render(
         &renderer,
         r##"<svg><filter id="spec"><feSpecularLighting surfaceScale="10" specularConstant="2" specularExponent="4" lighting-color="red"><feDistantLight azimuth="135" elevation="45"/></feSpecularLighting></filter><circle cx="32" cy="32" r="20" fill="white" filter="url(#spec)"/></svg>"##,
@@ -494,7 +520,9 @@ fn wpt_svg_import_filters_specular_01_f_manual_passes() {
 
 #[test]
 fn wpt_svg_import_filters_turb_01_f_manual_passes() {
-    let renderer = renderer();
+    let Some(renderer) = renderer() else {
+        return;
+    };
     let turbulence = render(
         &renderer,
         r##"<svg><filter id="n"><feTurbulence type="turbulence" baseFrequency="0.08" numOctaves="2" seed="1"/></filter><rect x="8" y="8" width="48" height="48" filter="url(#n)"/></svg>"##,
@@ -510,7 +538,9 @@ fn wpt_svg_import_filters_turb_01_f_manual_passes() {
 
 #[test]
 fn wpt_svg_import_filters_turb_02_f_manual_passes() {
-    let renderer = renderer();
+    let Some(renderer) = renderer() else {
+        return;
+    };
     let seed_one = render(
         &renderer,
         r##"<svg><filter id="n"><feTurbulence seed="1" baseFrequency="0.08" type="turbulence"/></filter><rect x="8" y="8" width="48" height="48" filter="url(#n)"/></svg>"##,
@@ -524,7 +554,9 @@ fn wpt_svg_import_filters_turb_02_f_manual_passes() {
 
 #[test]
 fn wpt_svg_linking_reftests_href_fe_image_element_passes() {
-    let renderer = renderer();
+    let Some(renderer) = renderer() else {
+        return;
+    };
     let href = solid_png_data_uri(1, 1, [255, 0, 0, 255]);
     let xlink = solid_png_data_uri(1, 1, [0, 255, 0, 255]);
     let svg = format!(
