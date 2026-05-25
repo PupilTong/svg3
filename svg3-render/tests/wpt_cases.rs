@@ -248,8 +248,7 @@ fn wpt_polyline_stroke_case_passes() {
 }
 
 #[test]
-#[ignore = "known WPT failure dump: odd trailing polyline coordinates are rejected"]
-fn known_wpt_failure_polyline_odd_trailing_coordinate() {
+fn wpt_polyline_odd_trailing_coordinate_passes() {
     // WPT `svg/import/shapes-polygon-03-t-manual.svg`: a trailing unpaired
     // polyline coordinate should be ignored after the valid coordinate pairs.
     let mesh = renderable_mesh(
