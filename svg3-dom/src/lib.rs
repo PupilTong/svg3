@@ -89,6 +89,10 @@ pub enum ElementKind {
     Cube,
     /// Ellipsoid primitive.
     Ellipsoid,
+    /// Data-driven 3D surface: a sequence of `<path>` children linked by
+    /// Bezier patches described by the surface's own `d` attribute. See
+    /// [SPEC.md](../SPEC.md) §5.4.
+    Surface,
     /// An element not recognised yet (tag name kept verbatim).
     Unknown(String),
 }
@@ -134,6 +138,7 @@ impl ElementKind {
             "marker" => Self::Marker,
             "cube" => Self::Cube,
             "ellipsoid" => Self::Ellipsoid,
+            "surface" => Self::Surface,
             other => Self::Unknown(other.to_owned()),
         }
     }
@@ -174,6 +179,7 @@ impl ElementKind {
             Self::Marker => "marker",
             Self::Cube => "cube",
             Self::Ellipsoid => "ellipsoid",
+            Self::Surface => "surface",
             Self::Unknown(t) => t.as_str(),
         }
     }
@@ -494,6 +500,8 @@ mod tests {
         );
         assert_eq!(ElementKind::from_tag("cube"), ElementKind::Cube);
         assert_eq!(ElementKind::from_tag("ellipsoid"), ElementKind::Ellipsoid);
+        assert_eq!(ElementKind::from_tag("surface"), ElementKind::Surface);
+        assert_eq!(ElementKind::Surface.as_tag(), "surface");
         // `as_tag` round-trips a recognised kind back to its source name.
         assert_eq!(ElementKind::Rect.as_tag(), "rect");
         assert_eq!(ElementKind::Ellipse.as_tag(), "ellipse");

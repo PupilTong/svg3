@@ -79,7 +79,7 @@ pub(crate) fn tessellate_path_stroke(geo: &PathGeometry, color: [f32; 4]) -> Mes
     stroke::tessellate_stroke_path(&geo.path, &geo.stroke, color)
 }
 
-fn parse_path(data: &str) -> Option<Path> {
+pub(crate) fn parse_path(data: &str) -> Option<Path> {
     let mut builder = Path::builder().with_svg();
     let mut saw_segment = false;
 
@@ -90,6 +90,25 @@ fn parse_path(data: &str) -> Option<Path> {
         if apply_segment(segment, &mut builder).is_none() {
             break;
         }
+        saw_segment = true;
+    }
+
+    saw_segment.then(|| builder.build())
+}
+
+/// Strict variant of [`parse_path`] used by `<surface>`'s child path
+/// parsing. Unlike the SVG 1.1 default of "render the valid prefix and
+/// stop at the first error" used for ordinary `<path>` elements,
+/// `<surface>` per SPEC §5.4 requires its referenced child paths to
+/// parse cleanly — any malformed token or unsupported segment makes
+/// the whole surface in error.
+pub(crate) fn parse_path_strict(data: &str) -> Option<Path> {
+    let mut builder = Path::builder().with_svg();
+    let mut saw_segment = false;
+
+    for segment in PathParser::from(data) {
+        let segment = segment.ok()?;
+        apply_segment(segment, &mut builder)?;
         saw_segment = true;
     }
 

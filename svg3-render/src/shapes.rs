@@ -25,6 +25,7 @@ pub(crate) mod polygon;
 pub(crate) mod polyline;
 pub(crate) mod rect;
 pub(crate) mod stroke;
+pub(crate) mod surface;
 
 mod triangulate;
 

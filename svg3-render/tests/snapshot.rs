@@ -790,6 +790,95 @@ fn cases() -> Vec<Case> {
             "ellipsoid-in-front-of-2d-rect",
             r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><rect x="30" y="30" width="40" height="40" fill="#c14b2b"/><ellipsoid cx="50" cy="50" cz="25" r="20" fill="#f2c14e"/></svg>"##,
         ),
+        // SPEC §5.4 `<surface>` — degree-1 Bezier between two parallel
+        // child paths produces a ruled quad strip. Sweeping a horizontal
+        // line at y=30 to one at y=70 fills a rectangle in the
+        // orthographic projection, confirming that the new dispatch
+        // integrates with the depth pipeline.
+        Case::square(
+            "surface-ruled-flat",
+            r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><surface d="M 0 L 1" fill="#f2c14e"><path d="M 20 30 L 80 30"/><path d="M 20 30 L 80 30" transform="translate(0, 40)"/></surface></svg>"##,
+        ),
+        // SPEC §5.4 — degree-3 Bezier surface through 4 child paths,
+        // viewed through the angled-perspective camera. Paths 1 and 2
+        // are control rows (not on the surface). Mirrors
+        // `ellipsoid-camera-angled` framing for visual consistency.
+        Case::square(
+            "surface-cubic-camera-angled",
+            r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><surface d="M 0 C 1 2 3" fill="#f2c14e"><path d="M 30 30 L 70 30 L 70 70 L 30 70"/><path d="M 30 30 L 70 30 L 70 70 L 30 70" transform="translate3d(15, 0, 20)"/><path d="M 30 30 L 70 30 L 70 70 L 30 70" transform="translate3d(-15, 0, 40)"/><path d="M 30 30 L 70 30 L 70 70 L 30 70" transform="translateZ(60)"/></surface></svg>"##,
+        )
+        .with_camera({
+            let mut c = Camera::facing(100, 100);
+            c.eye.x += 60.0;
+            c
+        }),
+        // SPEC §5.4 — chained C+L patches with a shared boundary row.
+        // 4 cubic-control paths plus a final linear extension to a 5th
+        // path; the join at path 3 has C0 continuity.
+        Case::square(
+            "surface-chained-patches",
+            r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><surface d="M 0 C 1 2 3 L 4" fill="#c14b2b"><path d="M 30 30 L 70 30 L 70 70 L 30 70"/><path d="M 30 30 L 70 30 L 70 70 L 30 70" transform="translate3d(10, -10, 15)"/><path d="M 30 30 L 70 30 L 70 70 L 30 70" transform="translate3d(-10, -10, 30)"/><path d="M 30 30 L 70 30 L 70 70 L 30 70" transform="translateZ(45)"/><path d="M 30 30 L 70 30 L 70 70 L 30 70" transform="translate3d(0, 20, 70)"/></surface></svg>"##,
+        )
+        .with_camera({
+            let mut c = Camera::facing(100, 100);
+            c.eye.x += 60.0;
+            c
+        }),
+        // SPEC §5.4 — `Z` closes the sweep direction. Four parallel
+        // cross-section paths placed at the four box corners form a
+        // closed prism (a box around the y-axis, with the linear-
+        // patch chain wrapping back to path 0).
+        Case::square(
+            "surface-closed-prism",
+            r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><surface d="M 0 L 1 L 2 L 3 Z" fill="#f2c14e"><path d="M 35 35 L 65 35"/><path d="M 35 35 L 65 35" transform="translateZ(30)"/><path d="M 35 35 L 65 35" transform="translate3d(0, 30, 30)"/><path d="M 35 35 L 65 35" transform="translate3d(0, 30, 0)"/></surface></svg>"##,
+        )
+        .with_camera({
+            let mut c = Camera::facing(100, 100);
+            c.eye.x += 60.0;
+            c
+        }),
+        // SPEC §5.4 — a surface whose `d` references a non-existent
+        // path index is in error and is not rendered. The sibling
+        // cube must still appear, confirming an in-error surface
+        // doesn't poison the rest of the scene.
+        Case::square(
+            "surface-degenerate-out-of-range",
+            r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><surface d="M 0 L 5" fill="#c14b2b"><path d="M 20 20 L 80 20"/><path d="M 20 20 L 80 20" transform="translateZ(40)"/></surface><cube cx="50" cy="50" cz="0" size="40" fill="#f2c14e"/></svg>"##,
+        ),
+        // SPEC §5.4 — a torus (donut) tiled by EIGHT bicubic Coons
+        // patches: 4 quarter-arcs of the major ring × 2 half-arcs of
+        // the tube cross-section. Each patch is bounded by 4 cubic
+        // Bezier curves declared as child `<path>` elements:
+        // - paths 0–3: outer-ring quarter-arcs (radius R+r = 33) in
+        //   the z = 0 plane, with kappa-tangent control offsets
+        //   κ·(R+r) ≈ 18.225 for the 4-cubic-arc circle approximation;
+        // - paths 4–7: inner-ring quarter-arcs (radius R-r = 17),
+        //   κ·(R-r) ≈ 9.389;
+        // - paths 8–15: tube-cross-section half-arcs (radius r = 8)
+        //   at the four θ values {0, 90°, 180°, 270°} × {front, back}
+        //   of the tube, with cubic half-circle controls at offset
+        //   4r/3 ≈ 10.667. Each tube-arc path is drawn in its
+        //   2D-local frame and lifted into 3D by `rotateZ(θ)
+        //   rotateX(90)` then `translate3d`.
+        // The surface `d` lists 8 `P top right bottom left` commands
+        // selecting the 4 boundary paths per tile. Adjacent tiles
+        // share boundary paths (e.g., front-half tiles at θ ∈
+        // [0,90°] and θ ∈ [90°,180°] share path 10 as the right and
+        // left edges respectively), so the 8-tile surface uses only
+        // 16 unique boundary curves. Coons blending fills each tile's
+        // interior with C0 (positional) continuity across the shared
+        // edges. Viewed through a slightly angled perspective camera
+        // so the 3D ring depth is visible alongside the annulus.
+        Case::square(
+            "surface-donut",
+            r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><surface fill="#f2c14e" d="P 0 10 4 8 P 1 12 5 10 P 2 14 6 12 P 3 8 7 14 P 4 11 0 9 P 5 13 1 11 P 6 15 2 13 P 7 9 3 15"><path d="M 83 50 C 83 68.225 68.225 83 50 83"/><path d="M 50 83 C 31.775 83 17 68.225 17 50"/><path d="M 17 50 C 17 31.775 31.775 17 50 17"/><path d="M 50 17 C 68.225 17 83 31.775 83 50"/><path d="M 67 50 C 67 59.389 59.389 67 50 67"/><path d="M 50 67 C 40.611 67 33 59.389 33 50"/><path d="M 33 50 C 33 40.611 40.611 33 50 33"/><path d="M 50 33 C 59.389 33 67 40.611 67 50"/><path d="M 8 0 C 8 10.667 -8 10.667 -8 0" transform="translate3d(75, 50, 0) rotateX(90)"/><path d="M -8 0 C -8 -10.667 8 -10.667 8 0" transform="translate3d(75, 50, 0) rotateX(90)"/><path d="M 8 0 C 8 10.667 -8 10.667 -8 0" transform="translate3d(50, 75, 0) rotateZ(90) rotateX(90)"/><path d="M -8 0 C -8 -10.667 8 -10.667 8 0" transform="translate3d(50, 75, 0) rotateZ(90) rotateX(90)"/><path d="M 8 0 C 8 10.667 -8 10.667 -8 0" transform="translate3d(25, 50, 0) rotateZ(180) rotateX(90)"/><path d="M -8 0 C -8 -10.667 8 -10.667 8 0" transform="translate3d(25, 50, 0) rotateZ(180) rotateX(90)"/><path d="M 8 0 C 8 10.667 -8 10.667 -8 0" transform="translate3d(50, 25, 0) rotateZ(270) rotateX(90)"/><path d="M -8 0 C -8 -10.667 8 -10.667 8 0" transform="translate3d(50, 25, 0) rotateZ(270) rotateX(90)"/></surface></svg>"##,
+        )
+        .with_camera({
+            let mut c = Camera::facing(100, 100);
+            c.eye.x += 30.0;
+            c.eye.y -= 30.0;
+            c
+        }),
     ]
 }
 
