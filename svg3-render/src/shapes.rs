@@ -2,9 +2,10 @@
 //! share.
 //!
 //! Each submodule — [`rect`], [`circle`], [`ellipse`], [`polygon`],
-//! [`polyline`], [`line`], and [`path`] — resolves one SVG 1.1 shape's
-//! attributes into geometry and tessellates it into a [`Mesh`]. They share
-//! paint resolution and the mesh [`Vertex`] constructors — and, for the
+//! [`polyline`], [`line`], and [`path`] for SVG 1.1 basic shapes, plus
+//! [`cube`] for svg3's 3D primitive — resolves one element's attributes
+//! into geometry and tessellates it into a [`Mesh`]. They share paint
+//! resolution and the mesh [`Vertex`] constructors — and, for the
 //! `<length>`-based shapes, the SVG length grammar — collected here so a
 //! new shape reuses the SVG 1.1 attribute rules instead of reimplementing
 //! them. The `<polygon>` and `<polyline>` fills further share the
@@ -15,6 +16,7 @@
 //! yet — see the crate roadmap.
 
 pub(crate) mod circle;
+pub(crate) mod cube;
 pub(crate) mod ellipse;
 pub(crate) mod line;
 pub(crate) mod path;

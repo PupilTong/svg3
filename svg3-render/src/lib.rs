@@ -54,6 +54,6 @@ mod shapes;
 
 pub use camera::{Camera, RenderConfig};
 pub use mesh::{Mesh, Vertex};
-pub use renderer::{clear_target, GpuScene, Image, RenderError, Renderer};
+pub use renderer::{clear_target, GpuScene, Image, RenderError, Renderer, DEPTH_FORMAT};
 pub use scene::{build_scene, document_viewport};
 pub use shapes::Viewport;
