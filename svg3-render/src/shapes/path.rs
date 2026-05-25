@@ -79,7 +79,7 @@ pub(crate) fn tessellate_path_stroke(geo: &PathGeometry, color: [f32; 4]) -> Mes
     stroke::tessellate_stroke_path(&geo.path, &geo.stroke, color)
 }
 
-fn parse_path(data: &str) -> Option<Path> {
+pub(crate) fn parse_path(data: &str) -> Option<Path> {
     let mut builder = Path::builder().with_svg();
     let mut saw_segment = false;
 

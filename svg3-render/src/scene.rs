@@ -66,7 +66,7 @@ enum ElementDimension {
 impl ElementDimension {
     fn of(kind: &ElementKind) -> Self {
         match kind {
-            ElementKind::Cube | ElementKind::Ellipsoid => Self::ThreeD,
+            ElementKind::Cube | ElementKind::Ellipsoid | ElementKind::Surface => Self::ThreeD,
             _ => Self::TwoD,
         }
     }
@@ -193,7 +193,10 @@ fn append_render_ops(
         return;
     }
 
-    append_element_mesh_biased(document, &node.element, context, true, pending_mesh);
+    append_element_mesh_biased(document, id, context, true, pending_mesh);
+    if owns_children(&node.element.kind) {
+        return;
+    }
     for child in node.children.iter().copied() {
         append_render_ops(document, child, filters, context, pending_mesh, plan);
     }
@@ -210,7 +213,10 @@ fn append_subtree_mesh(
     if is_definition_container(&node.element.kind) {
         return;
     }
-    append_element_mesh_biased(document, &node.element, context, include_markers, mesh);
+    append_element_mesh_biased(document, id, context, include_markers, mesh);
+    if owns_children(&node.element.kind) {
+        return;
+    }
     for child in node.children.iter().copied() {
         // TODO: Nested filters need their own render plan and offscreen pass.
         // This first filter milestone treats a filtered subtree as raw source
@@ -228,13 +234,14 @@ fn append_subtree_mesh(
 /// other 3D content works per [SPEC.md](../../SPEC.md) §7.3.
 fn append_element_mesh_biased(
     document: &Document,
-    element: &Element,
+    id: NodeId,
     context: &SceneContext<'_>,
     include_markers: bool,
     mesh: &mut Mesh,
 ) {
     let start = mesh.vertices.len();
-    append_element_mesh(document, element, context, include_markers, mesh);
+    let element = &document.node(id).element;
+    append_element_mesh(document, id, context, include_markers, mesh);
     if mesh.vertices.len() == start {
         return;
     }
@@ -247,13 +254,14 @@ fn append_element_mesh_biased(
 
 fn append_element_mesh(
     document: &Document,
-    element: &Element,
+    id: NodeId,
     context: &SceneContext<'_>,
     include_markers: bool,
     mesh: &mut Mesh,
 ) {
     let viewport = context.viewport;
     let markers = context.markers;
+    let element = &document.node(id).element;
     let features = element_features(element, include_markers);
     match &element.kind {
         ElementKind::Rect => {
@@ -503,6 +511,14 @@ fn append_element_mesh(
                 shapes::resolve_fill_with_opacity(element, features.has_opacity_attrs),
             ) {
                 mesh.append(shapes::ellipsoid::tessellate_ellipsoid(&geo, color));
+            }
+        }
+        ElementKind::Surface => {
+            if let (Some(geo), Some(color)) = (
+                shapes::surface::resolve_surface(document, id, viewport),
+                shapes::resolve_fill_with_opacity(element, features.has_opacity_attrs),
+            ) {
+                mesh.append(shapes::surface::tessellate_surface(&geo, color));
             }
         }
         _ => {}
@@ -874,6 +890,15 @@ fn is_definition_container(kind: &ElementKind) -> bool {
         kind,
         ElementKind::Defs | ElementKind::Filter | ElementKind::Marker
     )
+}
+
+/// Whether an element owns its children directly (consumes them as
+/// geometric inputs rather than as nested scene content). `<surface>`
+/// reads its `<path>` children to build a Bezier-patch surface; the
+/// generic scene walker must not also dispatch those children as
+/// standalone shapes, or they'd double-render at `z = 0`.
+fn owns_children(kind: &ElementKind) -> bool {
+    matches!(kind, ElementKind::Surface)
 }
 
 fn flush_mesh(mesh: &mut Mesh, plan: &mut Vec<RenderOp>) {

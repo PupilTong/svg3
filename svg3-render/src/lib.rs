@@ -56,6 +56,7 @@ mod mesh;
 mod renderer;
 mod scene;
 mod shapes;
+mod transform;
 
 pub use camera::{Camera, RenderConfig};
 pub use mesh::{Mesh, Vertex};

@@ -30,9 +30,9 @@ graphics. An `svg3` document is a well-formed XML document with an
 elements and attribute values defined in this specification.
 Specifically, `svg3` adds:
 
-- A set of *three-dimensional graphics elements* (§5), namely
-  `'cube'` and `'ellipsoid'`, which describe geometry that extends
-  along all three coordinate axes.
+- A set of *three-dimensional graphics elements* (§5) — `'cube'`,
+  `'ellipsoid'`, and `'surface'` — which describe geometry that
+  extends along all three coordinate axes.
 - A set of *additional transform functions* (§4) — `translate3d`,
   `translateZ`, `scale3d`, `scaleZ`, `rotateX`, `rotateY`,
   `rotateZ`, `rotate3d`, and `matrix3d` — that may appear in the
@@ -434,6 +434,116 @@ The `'ellipsoid'` element does not replace SVG 1.1's `'ellipse'`
 element ([SVG11], §9.4); two-dimensional ellipses in the plane
 `z = 0` are authored with the SVG 1.1 `'ellipse'` element, and the
 two are processed independently.
+
+### 5.4 The `'surface'` element
+
+The `'surface'` element defines a three-dimensional surface by
+linking a sequence of `'path'` child elements with Bezier patches.
+The composition of those patches is described by a `'d'` attribute
+on the `'surface'` element itself; the attribute reuses SVG 1.1's
+path-data mini-language ([SVG11], §8.3) but with integer indices
+into the child `'path'` list in place of `(x, y)` coordinates.
+
+The `'surface'` element is a *graphics element* in the sense of
+[SVG11], §1.3. Each child of a `'surface'` that is itself a `'path'`
+element ([SVG11], §8) contributes one *cross-section curve* to the
+surface; the k-th `'path'` child has index k (zero-based). Children
+that are not `'path'` elements do not increment the index and do not
+contribute to the surface.
+
+**Attributes:**
+
+| Attribute | Type | Default | Description |
+|---|---|---|---|
+| `d` | `<surface-path-data>` (see below) | (none) | The patch chain that composes the surface. |
+
+In addition, a `'surface'` element accepts the common attribute
+groups defined in §5.1 (core, conditional processing, style,
+`'transform'`, and the presentation attributes corresponding to the
+properties in §6).
+
+#### 5.4.1 The `'d'` attribute grammar
+
+The value of the `'d'` attribute is a sequence of *commands*. Each
+command consists of a single ASCII letter followed by zero or more
+integer arguments. Whitespace and commas are separators; the rules
+for the path-data whitespace policy of [SVG11], §8.3 apply unchanged.
+
+This edition defines six commands organised into two families. The
+*sweep* family (`M`/`L`/`Q`/`C`/`Z`) builds a chain of patches where
+each patch is a Bezier blend across a sequence of cross-section
+curves. The *Coons* family (`P`) builds an independent bicubic Coons
+patch from four boundary cubic Bezier curves. The two families MAY
+coexist in the same `'d'` attribute.
+
+| Command | Args | Family | Effect |
+|---|---|---|---|
+| `M i` | one path index | sweep | Start a chain at the i-th child `'path'`. That path becomes the *current row*. |
+| `L j` | one path index | sweep | Append a *degree-1* (ruled) patch from the current row to the j-th child `'path'`. The j-th path becomes the new current row. |
+| `Q i j` | two path indices | sweep | Append a *degree-2* (quadratic Bezier) patch with the i-th path as control row and the j-th path as endpoint. |
+| `C i j k` | three path indices | sweep | Append a *degree-3* (cubic Bezier) patch with the i-th and j-th paths as control rows and the k-th path as endpoint. |
+| `Z` | none | sweep | Append a degree-1 patch from the current row back to the chain's starting (`M`) path, closing the chain along the sweep direction. |
+| `P t r b l` | four path indices | Coons | Add a bicubic Coons patch bounded by the t-, r-, b-, l-th child `'path'` elements (top, right, bottom, left). Each boundary MUST be a single cubic Bezier (`M` followed by exactly one `C` command). Adjacent boundaries MUST share corner points within tolerance; otherwise the patch is in error and is not rendered. |
+
+A sweep chain MUST begin with an `M`; a second `M` in the same `'d'`
+is in error in this edition (multi-chain surfaces are reserved for a
+future edition). The `P` command is independent of the sweep chain
+and does not advance the *current row*.
+
+The lowercase (relative) variants `m`/`l`/`q`/`c`/`p` and SVG 1.1's
+shorthand commands `S`, `T`, `A`, `H`, `V` are reserved for future
+use; an unrecognised command makes the `'d'` value in error.
+
+#### 5.4.2 Surface construction
+
+For each non-`Z` command, a *patch* is constructed as a tensor-
+product Bezier in two parameters `(u, v)`:
+
+- The *u* parameter ranges over the polyline samples of each
+  referenced child `'path'` (flattened in its own local coordinate
+  system, lifted into the user coordinate system by the child's own
+  `'transform'` attribute, §4). The cross-section curve at the i-th
+  sample is the column index `i`.
+- The *v* parameter ranges across the patch's control rows. For a
+  degree-N patch (N ∈ {1, 2, 3}), the surface point at parameter
+  values `(u, v)` is the standard degree-N Bezier through the
+  control rows, evaluated column-by-column.
+
+Adjacent patches in the chain share their boundary row (a `C i j k`
+patch followed by a `C l m n` patch has the k-th path as both the
+end of the first patch and the start of the second), giving the
+chain *C0 continuity* across joins. A trailing `Z` is the
+corresponding linear closure along the sweep direction.
+
+#### 5.4.3 Constraints and error rules
+
+The referenced child `'path'` elements MUST yield the same number of
+polyline samples M and MUST agree on open/closed state when
+flattened by an implementation-defined tolerance. The `'surface'`
+element MUST be rendered as if it had not been specified when any of
+the following holds:
+
+- The `'d'` attribute is absent, empty, or contains a malformed
+  token.
+- A command argument names a path index that is not a valid index
+  into the `'surface'`'s `'path'`-child sub-list.
+- The chain produces no patches (e.g., `'d'` contains only `M 0`).
+- Any referenced child `'path'` has a malformed `'d'` or
+  `'transform'` attribute.
+- The referenced children's flattened polylines disagree on length
+  or open/closed state.
+
+#### 5.4.4 Painting
+
+The `'surface'` element is painted using the §6.1 `'fill'` property
+modulated by §6.2 `'opacity'`, on the same terms as the other §5
+three-dimensional graphics elements. Per §6.3, `'stroke'` and the
+other listed properties are not defined for `'surface'`.
+
+The `'surface'` element does not replace SVG 1.1's `'path'` element
+([SVG11], §8); two-dimensional paths in the plane `z = 0` are
+authored with the SVG 1.1 `'path'` element, and the two are
+processed independently.
 
 ---
 
