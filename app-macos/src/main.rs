@@ -3,10 +3,10 @@
 //! Opens a Cocoa NSWindow via winit, accepts an SVG string through a macOS
 //! dialog, and draws the currently implemented 2D shape geometry — including
 //! referenced `<feGaussianBlur>` and PNG data-URL `<feImage>` filters — into
-//! a Metal-backed wgpu surface through [`Renderer::encode_document`], the
-//! same GPU path the headless renderer uses. The document is viewed through
-//! an orbit camera the user can move: drag or the arrow keys to orbit, scroll
-//! to zoom, `R` to reset.
+//! a Metal-backed wgpu surface through a cached
+//! [`svg3_render::GpuDocument`]. The document is viewed through an orbit camera
+//! the user can move: drag or the arrow keys to orbit, scroll to zoom, `R` to
+//! reset.
 
 mod camera;
 
@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use svg3_dom::Document;
-use svg3_render::{clear_target, document_viewport, RenderConfig, Renderer, Viewport};
+use svg3_render::{clear_target, document_viewport, GpuDocument, RenderConfig, Renderer, Viewport};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalSize};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -56,19 +56,27 @@ struct Gfx {
     window: Arc<Window>,
     surface: wgpu::Surface<'static>,
     /// Shared renderer: owns the wgpu device, queue and render pipelines.
-    /// Drives every frame through [`Renderer::encode_document`] — the same
-    /// GPU path the headless renderer uses.
+    /// Drives every frame through a prepared GPU document — the same shader /
+    /// filter path the headless renderer uses, without rebuilding geometry on
+    /// camera-only redraws.
     renderer: Renderer,
     config: wgpu::SurfaceConfiguration,
-    /// The parsed document paired with the document viewport for percentage
-    /// length resolution. `None` until the first successful parse.
-    document: Option<(Document, Viewport)>,
+    /// The parsed document plus its prepared GPU buffers. `None` until the
+    /// first successful parse.
+    document: Option<DocumentState>,
     svg_source: String,
     /// The orbit camera the document is viewed through.
     camera: OrbitCamera,
     /// Last status message, kept so the window title can be rebuilt whenever
     /// the camera moves.
     status: String,
+}
+
+#[derive(Debug)]
+struct DocumentState {
+    document: Document,
+    viewport: Viewport,
+    gpu: GpuDocument,
 }
 
 impl Gfx {
@@ -139,8 +147,8 @@ impl Gfx {
         self.config.height = height;
         self.surface.configure(self.renderer.device(), &self.config);
         // A resize changes the surface dimensions percentage lengths resolve
-        // against. The parsed document stays valid; only the viewport needs
-        // refreshing so the per-frame walk sees the new size.
+        // against. The parsed document stays valid; the viewport and prepared
+        // GPU buffers need refreshing.
         self.refresh_viewport();
         self.window.request_redraw();
     }
@@ -174,11 +182,11 @@ impl Gfx {
                     label: Some("svg3 frame encoder"),
                 });
         clear_target(&mut encoder, &view, CLEAR_COLOR, "svg3 frame clear pass");
-        if let Some((document, viewport)) = &self.document {
-            self.renderer.encode_document(
-                document,
-                *viewport,
-                self.view_projection(*viewport),
+        if let Some(document) = &self.document {
+            self.renderer.encode_prepared_document(
+                &document.gpu,
+                document.viewport,
+                self.view_projection(document.viewport),
                 &view,
                 self.target_extent(),
                 &mut encoder,
@@ -197,7 +205,16 @@ impl Gfx {
                 let viewport = document_viewport(&document, self.target_viewport());
                 // A freshly loaded document gets a head-on framing.
                 self.camera.reset(viewport);
-                self.document = Some((document, viewport));
+                let gpu = self.renderer.create_document_scene(
+                    &document,
+                    viewport,
+                    self.view_projection(viewport),
+                );
+                self.document = Some(DocumentState {
+                    document,
+                    viewport,
+                    gpu,
+                });
                 self.set_status("rendered");
             }
             Err(e) => {
@@ -214,15 +231,29 @@ impl Gfx {
     /// Called when the surface resizes — the parsed document is unchanged
     /// but percentage lengths track the new viewport.
     fn refresh_viewport(&mut self) {
-        let Some((document, viewport)) = self.document.as_mut() else {
+        let target_viewport = Viewport {
+            width: self.config.width.max(1) as f32,
+            height: self.config.height.max(1) as f32,
+        };
+        let format = self.config.format;
+        let width = self.config.width.max(1);
+        let height = self.config.height.max(1);
+        let camera = self.camera;
+        let Some(document) = self.document.as_mut() else {
             return;
         };
-        *viewport = document_viewport(
-            document,
-            Viewport {
-                width: self.config.width.max(1) as f32,
-                height: self.config.height.max(1) as f32,
-            },
+        document.viewport = document_viewport(&document.document, target_viewport);
+        let view_projection = RenderConfig {
+            format,
+            width,
+            height,
+            camera: Some(camera.to_camera(document.viewport)),
+        }
+        .view_projection();
+        document.gpu = self.renderer.create_document_scene(
+            &document.document,
+            document.viewport,
+            view_projection,
         );
     }
 
@@ -236,7 +267,7 @@ impl Gfx {
     }
 
     /// The render target's wgpu extent, used to size offscreen filter
-    /// textures inside [`Renderer::encode_document`].
+    /// textures inside [`Renderer::encode_prepared_document`].
     fn target_extent(&self) -> wgpu::Extent3d {
         wgpu::Extent3d {
             width: self.config.width.max(1),
@@ -272,7 +303,7 @@ impl Gfx {
 
     /// Reframe the camera head-on for the current document.
     fn reset_camera(&mut self) {
-        let Some(viewport) = self.document.as_ref().map(|(_, viewport)| *viewport) else {
+        let Some(viewport) = self.document.as_ref().map(|document| document.viewport) else {
             return;
         };
         self.camera.reset(viewport);

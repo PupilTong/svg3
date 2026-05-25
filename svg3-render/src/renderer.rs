@@ -1,25 +1,24 @@
 //! The wgpu [`Renderer`] and its render paths.
 //!
 //! The [`Renderer`] owns and caches the wgpu device, queue, render pipelines
-//! and bind-group layouts. It exposes one unified document encoder,
-//! [`Renderer::encode_document`], which walks a parsed document, tessellates
-//! every supported 2D shape, applies referenced `<feImage>` and
-//! `<feGaussianBlur>` filters via offscreen GPU passes, and composites them
-//! into a caller-owned target view
-//! through a caller-owned command encoder. The two render entry points are
-//! built on top of it:
+//! and bind-group layouts. It exposes a one-shot document encoder,
+//! [`Renderer::encode_document`], plus a prepared-document path:
+//! [`Renderer::create_document_scene`] uploads geometry/filter plans once and
+//! [`Renderer::encode_prepared_document`] redraws them through updated camera
+//! uniforms, GPU culling, and indexed indirect draws.
 //!
 //! - [`Renderer::render_to_image`] drives the headless path — it owns the
 //!   offscreen sRGB texture, clears it, calls `encode_document`, then copies
 //!   the result back into an [`Image`].
 //! - A windowed caller (see `app-macos`) brings up its own
 //!   [`wgpu::Surface`] and per-frame encoder, clears the swap-chain texture
-//!   to its background colour, and calls `encode_document` to draw the
-//!   current document into that texture.
+//!   to its background colour, and calls `encode_prepared_document` to draw
+//!   the current cached document into that texture.
 //!
 //! [`Renderer::create_scene`] + [`Renderer::draw`] remain as a lower-level
 //! API for callers that pre-tessellate a [`Mesh`] outside the document walk;
-//! the high-level paths go through [`Renderer::encode_document`].
+//! the document paths go through [`Renderer::encode_document`] or
+//! [`Renderer::encode_prepared_document`].
 
 use std::collections::BTreeMap;
 use std::io::Cursor;
@@ -65,6 +64,29 @@ const MAX_BLUR_RADIUS: u32 = 64;
 struct TransformUniform {
     /// Column-major view-projection matrix, matching WGSL matrix layout.
     view_projection: [[f32; 4]; 4],
+    /// Column-major model matrix applied after vertex fetch and before camera
+    /// projection. This lets callers move whole prepared scenes without
+    /// rewriting vertex buffers.
+    model: [[f32; 4]; 4],
+}
+
+/// Scene-local axis-aligned bounds consumed by `cull.wgsl`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct BoundsUniform {
+    min_corner: [f32; 4],
+    max_corner: [f32; 4],
+}
+
+/// wgpu's indexed indirect draw argument layout.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct DrawIndexedIndirectArgs {
+    index_count: u32,
+    instance_count: u32,
+    first_index: u32,
+    base_vertex: i32,
+    first_instance: u32,
 }
 
 /// Uniform data consumed by `filter.wgsl`.
@@ -332,10 +354,58 @@ fn split_transfer_table(table: &[f32; 8]) -> ([f32; 4], [f32; 4]) {
 }
 
 impl TransformUniform {
-    fn new(view_projection: Mat4) -> Self {
+    fn new(view_projection: Mat4, model: Mat4) -> Self {
         Self {
             view_projection: view_projection.to_cols_array_2d(),
+            model: model.to_cols_array_2d(),
         }
+    }
+}
+
+impl DrawIndexedIndirectArgs {
+    fn indexed(index_count: u32) -> Self {
+        Self {
+            index_count,
+            instance_count: 1,
+            first_index: 0,
+            base_vertex: 0,
+            first_instance: 0,
+        }
+    }
+}
+
+fn mesh_bounds(mesh: &Mesh) -> BoundsUniform {
+    let mut min = [f32::INFINITY; 3];
+    let mut max = [f32::NEG_INFINITY; 3];
+    for vertex in &mesh.vertices {
+        for axis in 0..3 {
+            let value = vertex.position[axis];
+            min[axis] = min[axis].min(value);
+            max[axis] = max[axis].max(value);
+        }
+    }
+
+    if !min.iter().chain(max.iter()).all(|value| value.is_finite()) {
+        let conservative_extent = 1.0e9;
+        return BoundsUniform {
+            min_corner: [
+                -conservative_extent,
+                -conservative_extent,
+                -conservative_extent,
+                0.0,
+            ],
+            max_corner: [
+                conservative_extent,
+                conservative_extent,
+                conservative_extent,
+                0.0,
+            ],
+        };
+    }
+
+    BoundsUniform {
+        min_corner: [min[0], min[1], min[2], 0.0],
+        max_corner: [max[0], max[1], max[2], 0.0],
     }
 }
 
@@ -389,7 +459,32 @@ pub struct GpuScene {
     index_buffer: wgpu::Buffer,
     transform_buffer: wgpu::Buffer,
     transform_bind_group: wgpu::BindGroup,
+    _bounds_buffer: wgpu::Buffer,
+    indirect_buffer: wgpu::Buffer,
+    cull_bind_group: wgpu::BindGroup,
+    model: Mat4,
     index_count: u32,
+}
+
+/// GPU buffers for a parsed document's render plan.
+///
+/// Created by [`Renderer::create_document_scene`] when the SVG document or
+/// viewport changes, then redrawn through
+/// [`Renderer::encode_prepared_document`] as the camera moves. The geometry and
+/// filter definitions stay resident on the GPU; camera updates rewrite only
+/// each scene's transform uniform before the draw.
+#[derive(Debug)]
+pub struct GpuDocument {
+    ops: Vec<GpuRenderOp>,
+}
+
+#[derive(Debug)]
+enum GpuRenderOp {
+    Mesh(GpuScene),
+    Filter {
+        scene: Option<GpuScene>,
+        primitives: Vec<FilterPrimitive>,
+    },
 }
 
 /// One offscreen texture used by the GPU filter passes.
@@ -426,6 +521,8 @@ pub struct Renderer {
     queue: wgpu::Queue,
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
+    cull_pipeline: wgpu::ComputePipeline,
+    cull_bind_group_layout: wgpu::BindGroupLayout,
     filter_bind_group_layout: wgpu::BindGroupLayout,
     /// Composite-specific bind-group layout — extends the filter layout
     /// with the source depth texture so the composite shader can write
@@ -475,10 +572,12 @@ impl Renderer {
     ///
     /// For the windowed path: the caller brings up a surface-compatible device
     /// (so the adapter is chosen with `compatible_surface`) and hands it here
-    /// with the surface's texture `format`. Such a renderer is driven through
-    /// [`encode_document`](Renderer::encode_document) into the caller's own
-    /// surface texture and encoder. [`render_to_image`](Renderer::render_to_image)
-    /// additionally requires `format` to be sRGB `RGBA8`.
+    /// with the surface's texture `format`. Such a renderer can be driven
+    /// through [`encode_document`](Renderer::encode_document) or
+    /// [`encode_prepared_document`](Renderer::encode_prepared_document) into
+    /// the caller's own surface texture and encoder.
+    /// [`render_to_image`](Renderer::render_to_image) additionally requires
+    /// `format` to be sRGB `RGBA8`.
     pub fn with_device(
         device: wgpu::Device,
         queue: wgpu::Queue,
@@ -486,6 +585,8 @@ impl Renderer {
     ) -> Self {
         let pipeline = build_pipeline(&device, format);
         let bind_group_layout = pipeline.get_bind_group_layout(0);
+        let cull_bind_group_layout = build_cull_bind_group_layout(&device);
+        let cull_pipeline = build_cull_pipeline(&device, &cull_bind_group_layout);
         let filter_bind_group_layout = build_filter_bind_group_layout(&device);
         let composite_bind_group_layout = build_composite_bind_group_layout(&device);
         let image_bind_group_layout = build_image_bind_group_layout(&device);
@@ -647,6 +748,8 @@ impl Renderer {
             queue,
             pipeline,
             bind_group_layout,
+            cull_pipeline,
+            cull_bind_group_layout,
             filter_bind_group_layout,
             composite_bind_group_layout,
             composite_depth_sampler,
@@ -686,6 +789,48 @@ impl Renderer {
         &self.queue
     }
 
+    /// Build a reusable GPU render plan for `document`.
+    ///
+    /// Call this when the parsed document or the viewport used for percentage
+    /// lengths changes. Camera movement does not require rebuilding the
+    /// returned [`GpuDocument`]; redraw it with
+    /// [`encode_prepared_document`](Renderer::encode_prepared_document) and a
+    /// new `view_projection`.
+    pub fn create_document_scene(
+        &self,
+        document: &Document,
+        viewport: Viewport,
+        view_projection: Mat4,
+    ) -> GpuDocument {
+        let ops = build_render_plan(document, viewport)
+            .into_iter()
+            .filter_map(|op| match op {
+                RenderOp::Mesh(mesh) => self
+                    .create_scene(&mesh, view_projection)
+                    .map(GpuRenderOp::Mesh),
+                RenderOp::Filter { mesh, primitives } => Some(GpuRenderOp::Filter {
+                    scene: self.create_scene(&mesh, view_projection),
+                    primitives,
+                }),
+            })
+            .collect();
+        GpuDocument { ops }
+    }
+
+    /// Rewrite every scene transform in a prepared document for a new camera.
+    pub fn update_document_view_projection(&self, document: &GpuDocument, view_projection: Mat4) {
+        for op in &document.ops {
+            match op {
+                GpuRenderOp::Mesh(scene) => self.update_view_projection(scene, view_projection),
+                GpuRenderOp::Filter { scene, .. } => {
+                    if let Some(scene) = scene {
+                        self.update_view_projection(scene, view_projection);
+                    }
+                }
+            }
+        }
+    }
+
     /// Upload `mesh` and an initial `view_projection` into GPU buffers.
     ///
     /// Returns `None` for an empty mesh: a scene with no triangles draws
@@ -695,10 +840,25 @@ impl Renderer {
     /// [`update_view_projection`](Renderer::update_view_projection) can later
     /// rewrite.
     pub fn create_scene(&self, mesh: &Mesh, view_projection: Mat4) -> Option<GpuScene> {
+        self.create_scene_with_model(mesh, view_projection, Mat4::IDENTITY)
+    }
+
+    /// Upload `mesh` plus a model transform into GPU buffers.
+    ///
+    /// The mesh vertices remain in their local/object space. The shape shader
+    /// applies `view_projection * model * position` on the GPU, while the cull
+    /// compute pass uses the same matrices against the mesh bounds before
+    /// emitting an indexed indirect draw.
+    pub fn create_scene_with_model(
+        &self,
+        mesh: &Mesh,
+        view_projection: Mat4,
+        model: Mat4,
+    ) -> Option<GpuScene> {
         if mesh.is_empty() {
             return None;
         }
-        let uniform = TransformUniform::new(view_projection);
+        let uniform = TransformUniform::new(view_projection, model);
         let transform_buffer = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -713,6 +873,42 @@ impl Renderer {
                 binding: 0,
                 resource: transform_buffer.as_entire_binding(),
             }],
+        });
+        let bounds_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("svg3 scene bounds uniform"),
+                contents: bytemuck::bytes_of(&mesh_bounds(mesh)),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let indirect_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("svg3 indexed indirect draw"),
+                contents: bytemuck::bytes_of(&DrawIndexedIndirectArgs::indexed(
+                    mesh.indices.len() as u32
+                )),
+                usage: wgpu::BufferUsages::INDIRECT
+                    | wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_DST,
+            });
+        let cull_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("svg3 cull bind group"),
+            layout: &self.cull_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: transform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: bounds_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: indirect_buffer.as_entire_binding(),
+                },
+            ],
         });
         let vertex_buffer = self
             .device
@@ -733,18 +929,56 @@ impl Renderer {
             index_buffer,
             transform_buffer,
             transform_bind_group,
+            _bounds_buffer: bounds_buffer,
+            indirect_buffer,
+            cull_bind_group,
+            model,
             index_count: mesh.indices.len() as u32,
         })
     }
 
     /// Rewrite a scene's view-projection matrix.
     ///
-    /// Cheap enough to call on every camera move: it writes only the 64-byte
-    /// transform uniform, leaving the vertex and index buffers untouched.
+    /// Cheap enough to call on every camera move: it writes only the transform
+    /// uniform, leaving the vertex and index buffers untouched.
     pub fn update_view_projection(&self, scene: &GpuScene, view_projection: Mat4) {
-        let uniform = TransformUniform::new(view_projection);
+        let uniform = TransformUniform::new(view_projection, scene.model);
         self.queue
             .write_buffer(&scene.transform_buffer, 0, bytemuck::bytes_of(&uniform));
+    }
+
+    /// Rewrite a scene's model matrix while preserving the current camera.
+    ///
+    /// The caller must pass the active `view_projection` because the transform
+    /// uniform stores both matrices in one tightly packed block.
+    pub fn update_model_transform(&self, scene: &mut GpuScene, view_projection: Mat4, model: Mat4) {
+        scene.model = model;
+        let uniform = TransformUniform::new(view_projection, model);
+        self.queue
+            .write_buffer(&scene.transform_buffer, 0, bytemuck::bytes_of(&uniform));
+    }
+
+    /// Run the scene's GPU culling pass and update its indirect draw buffer.
+    pub fn encode_scene_cull(&self, encoder: &mut wgpu::CommandEncoder, scene: &GpuScene) {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("svg3 scene cull pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.cull_pipeline);
+        pass.set_bind_group(0, &scene.cull_bind_group, &[]);
+        pass.dispatch_workgroups(1, 1, 1);
+    }
+
+    /// Record an indexed indirect draw for `scene` into `pass`.
+    ///
+    /// Call [`Renderer::encode_scene_cull`] earlier in the same command encoder
+    /// to refresh the indirect buffer for the active camera/model transform.
+    pub fn draw_indirect(&self, pass: &mut wgpu::RenderPass<'_>, scene: &GpuScene) {
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &scene.transform_bind_group, &[]);
+        pass.set_vertex_buffer(0, scene.vertex_buffer.slice(..));
+        pass.set_index_buffer(scene.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+        pass.draw_indexed_indirect(&scene.indirect_buffer, 0);
     }
 
     /// Record the draw commands for `scene` into `pass`.
@@ -904,6 +1138,33 @@ impl Renderer {
         target_extent: wgpu::Extent3d,
         encoder: &mut wgpu::CommandEncoder,
     ) {
+        let document = self.create_document_scene(document, viewport, view_projection);
+        self.encode_prepared_document(
+            &document,
+            viewport,
+            view_projection,
+            target,
+            target_extent,
+            encoder,
+        );
+    }
+
+    /// Encode a prepared GPU document into `target`.
+    ///
+    /// Unlike [`encode_document`](Renderer::encode_document), this does not
+    /// re-walk the DOM, re-tessellate shapes, or upload vertex/index buffers.
+    /// It only refreshes the transform uniforms for `view_projection`, performs
+    /// GPU culling for each prepared scene, and records the draw/filter passes.
+    pub fn encode_prepared_document(
+        &self,
+        document: &GpuDocument,
+        viewport: Viewport,
+        view_projection: Mat4,
+        target: &wgpu::TextureView,
+        target_extent: wgpu::Extent3d,
+        encoder: &mut wgpu::CommandEncoder,
+    ) {
+        self.update_document_view_projection(document, view_projection);
         // Allocate a fresh depth buffer for this encode. 2D content gets a
         // per-shape forward Z bias in `scene::build_render_plan`, so it
         // resolves painter's order via the depth test without z-fighting;
@@ -912,26 +1173,17 @@ impl Renderer {
         let depth = self.create_depth_texture(target_extent, "svg3 target depth");
         clear_depth(encoder, &depth.view, "svg3 target depth clear");
 
-        let plan = build_render_plan(document, viewport);
-        for op in &plan {
+        for op in &document.ops {
             match op {
-                RenderOp::Mesh(mesh) => {
-                    if let Some(scene) = self.create_scene(mesh, view_projection) {
-                        self.encode_scene_draw(
-                            encoder,
-                            target,
-                            &depth.view,
-                            &scene,
-                            "svg3 shape pass",
-                        );
-                    }
+                GpuRenderOp::Mesh(scene) => {
+                    self.encode_scene_draw(encoder, target, &depth.view, scene, "svg3 shape pass");
                 }
-                RenderOp::Filter { mesh, primitives } => {
+                GpuRenderOp::Filter { scene, primitives } => {
                     self.encode_filter_chain(
                         encoder,
                         target,
                         &depth.view,
-                        mesh,
+                        scene.as_ref(),
                         primitives,
                         viewport,
                         view_projection,
@@ -950,6 +1202,7 @@ impl Renderer {
         scene: &GpuScene,
         label: &str,
     ) {
+        self.encode_scene_cull(encoder, scene);
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some(label),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -971,7 +1224,7 @@ impl Renderer {
             }),
             ..Default::default()
         });
-        self.draw(&mut pass, scene);
+        self.draw_indirect(&mut pass, scene);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -980,7 +1233,7 @@ impl Renderer {
         encoder: &mut wgpu::CommandEncoder,
         target: &wgpu::TextureView,
         target_depth: &wgpu::TextureView,
-        mesh: &Mesh,
+        scene: Option<&GpuScene>,
         primitives: &[FilterPrimitive],
         viewport: Viewport,
         view_projection: Mat4,
@@ -1007,7 +1260,8 @@ impl Renderer {
             "svg3 filter source depth clear",
         );
 
-        if let Some(scene) = self.create_scene(mesh, view_projection) {
+        if let Some(scene) = scene {
+            self.encode_scene_cull(encoder, scene);
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("svg3 filtered shape pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1029,7 +1283,7 @@ impl Renderer {
                 }),
                 ..Default::default()
             });
-            self.draw(&mut pass, &scene);
+            self.draw_indirect(&mut pass, scene);
         } else {
             // No geometry — leave the source texture transparent so that
             // generator primitives (feFlood, feTurbulence) still produce
@@ -1802,9 +2056,9 @@ struct DepthTexture {
 }
 
 /// Execute a single render pass that clears `target` to `color`. Used by both
-/// the headless and the windowed paths to prime their target before
-/// [`Renderer::encode_document`], which always loads (rather than clears) the
-/// existing target so it can composite filter results on top.
+/// the headless and the windowed paths to prime their target before a document
+/// encode, which always loads (rather than clears) the existing target so it can
+/// composite filter results on top.
 pub fn clear_target(
     encoder: &mut wgpu::CommandEncoder,
     target: &wgpu::TextureView,
@@ -1827,9 +2081,8 @@ pub fn clear_target(
 }
 
 /// Clear a depth attachment to `1.0` (the far plane). Used by
-/// [`Renderer::encode_document`] once per encode for the target depth
-/// buffer, and per filter chain for the offscreen filter source depth
-/// buffer.
+/// document encodes once per target depth buffer, and per filter chain for the
+/// offscreen filter source depth buffer.
 fn clear_depth(encoder: &mut wgpu::CommandEncoder, depth: &wgpu::TextureView, label: &str) {
     let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some(label),
@@ -1918,6 +2171,64 @@ fn build_pipeline(device: &wgpu::Device, format: wgpu::TextureFormat) -> wgpu::R
             })],
         }),
         multiview_mask: None,
+        cache: None,
+    })
+}
+
+fn build_cull_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("svg3 cull bind group layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ],
+    })
+}
+
+fn build_cull_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+) -> wgpu::ComputePipeline {
+    let shader = device.create_shader_module(wgpu::include_wgsl!("cull.wgsl"));
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("svg3 cull pipeline layout"),
+        bind_group_layouts: &[Some(layout)],
+        immediate_size: 0,
+    });
+    device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("svg3 cull pipeline"),
+        layout: Some(&pipeline_layout),
+        module: &shader,
+        entry_point: Some("cs_cull"),
+        compilation_options: wgpu::PipelineCompilationOptions::default(),
         cache: None,
     })
 }
@@ -2412,8 +2723,13 @@ mod tests {
     fn transform_uniform_matches_wgsl_matrix_size() {
         assert_eq!(
             std::mem::size_of::<TransformUniform>(),
-            16 * std::mem::size_of::<f32>()
+            32 * std::mem::size_of::<f32>()
         );
+    }
+
+    #[test]
+    fn indirect_draw_args_match_wgpu_layout() {
+        assert_eq!(std::mem::size_of::<DrawIndexedIndirectArgs>(), 20);
     }
 
     #[test]
