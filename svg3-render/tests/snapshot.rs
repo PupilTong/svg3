@@ -24,8 +24,9 @@
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
-use base64::engine::general_purpose;
-use base64::Engine as _;
+mod common;
+
+use common::{png_data_uri, quadrant_png_data_uri, solid_png_data_uri};
 use svg3_dom::parse;
 use svg3_render::{Camera, Image, RenderConfig, RenderError, Renderer};
 
@@ -86,47 +87,6 @@ impl Case {
     }
 }
 
-fn png_data_uri(width: u32, height: u32, rgba: &[u8]) -> String {
-    let mut bytes = Vec::new();
-    {
-        let mut encoder = png::Encoder::new(&mut bytes, width, height);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        let mut writer = encoder.write_header().expect("PNG header should encode");
-        writer
-            .write_image_data(rgba)
-            .expect("PNG pixels should encode");
-    }
-    format!(
-        "data:image/png;base64,{}",
-        general_purpose::STANDARD.encode(bytes)
-    )
-}
-
-fn solid_png_data_uri(width: u32, height: u32, color: [u8; 4]) -> String {
-    let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
-    for _ in 0..width * height {
-        rgba.extend_from_slice(&color);
-    }
-    png_data_uri(width, height, &rgba)
-}
-
-fn quadrant_png_data_uri() -> String {
-    let mut rgba = Vec::with_capacity(4 * 4 * 4);
-    for y in 0..4 {
-        for x in 0..4 {
-            let color = match (x >= 2, y >= 2) {
-                (false, false) => [242, 193, 78, 255],
-                (true, false) => [37, 99, 235, 255],
-                (false, true) => [17, 170, 85, 255],
-                (true, true) => [193, 75, 43, 255],
-            };
-            rgba.extend_from_slice(&color);
-        }
-    }
-    png_data_uri(4, 4, &rgba)
-}
-
 fn alpha_cross_png_data_uri() -> String {
     let mut rgba = Vec::with_capacity(16 * 16 * 4);
     for y in 0..16 {
@@ -161,7 +121,12 @@ fn cases() -> Vec<Case> {
     let mut dolly = Camera::facing(100, 100);
     dolly.eye.z *= 0.6;
 
-    let quadrants = quadrant_png_data_uri();
+    let quadrants = quadrant_png_data_uri([
+        [242, 193, 78, 255],
+        [37, 99, 235, 255],
+        [17, 170, 85, 255],
+        [193, 75, 43, 255],
+    ]);
     let alpha_cross = alpha_cross_png_data_uri();
     let red = solid_png_data_uri(1, 1, [193, 75, 43, 255]);
     let green = solid_png_data_uri(1, 1, [17, 170, 85, 255]);
@@ -434,6 +399,121 @@ fn cases() -> Vec<Case> {
         Case::square(
             "filter-blur-zero",
             r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="none"><feGaussianBlur stdDeviation="0"/></filter><rect x="26" y="26" width="48" height="48" fill="#f2c14e" filter="url(#none)"/></svg>"##,
+        ),
+        // WPT-derived SVG filter snapshots. These mirror the passing reduced
+        // fixtures in `tests/wpt_filter_cases.rs` so WPT migrations also have
+        // reviewable visual output.
+        Case::square(
+            "wpt-filter-gauss-01",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="soft"><feGaussianBlur stdDeviation="4"/></filter><filter id="flat"><feGaussianBlur stdDeviation="6 1"/></filter><rect x="16" y="24" width="18" height="18" fill="#2563eb" filter="url(#soft)"/><rect x="56" y="24" width="18" height="18" fill="#f2c14e" filter="url(#flat)"/></svg>"##,
+        ),
+        Case::square(
+            "wpt-filter-gauss-02",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="v"><feGaussianBlur stdDeviation="0 6"/></filter><filter id="h"><feGaussianBlur stdDeviation="6 0"/></filter><rect x="22" y="24" width="16" height="16" fill="#2563eb" filter="url(#v)"/><rect x="62" y="24" width="16" height="16" fill="#c14b2b" filter="url(#h)"/></svg>"##,
+        ),
+        Case::square(
+            "wpt-filter-gauss-03",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="identity"><feGaussianBlur stdDeviation="0"/></filter><rect x="26" y="26" width="48" height="48" fill="#11aa55" filter="url(#identity)"/></svg>"##,
+        ),
+        Case::square(
+            "wpt-filter-color-01",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="m"><feColorMatrix type="matrix" values="0 0 0 0 0  0 1 0 0 0  0 0 0 0 0  0 0 0 1 0"/></filter><filter id="s"><feColorMatrix type="saturate" values="0"/></filter><filter id="h"><feColorMatrix type="hueRotate" values="120"/></filter><filter id="l"><feColorMatrix type="luminanceToAlpha"/></filter><rect x="10" y="18" width="18" height="64" fill="white" filter="url(#m)"/><rect x="30" y="18" width="18" height="64" fill="red" filter="url(#s)"/><rect x="52" y="18" width="18" height="64" fill="red" filter="url(#h)"/><rect x="74" y="18" width="18" height="64" fill="white" filter="url(#l)"/></svg>"##,
+        ),
+        Case::square(
+            "wpt-filter-color-02",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="ct"><feComponentTransfer><feFuncR type="identity"/><feFuncR type="linear" slope="0" intercept="1"/><feFuncR type="linear" slope="0" intercept="0"/></feComponentTransfer></filter><rect x="20" y="20" width="60" height="60" fill="white" filter="url(#ct)"/></svg>"##,
+        ),
+        Case::square(
+            "wpt-filter-comptran-01",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="t"><feComponentTransfer><feFuncR type="table" tableValues="0 0"/><feFuncG type="identity"/><feFuncB type="identity"/></feComponentTransfer></filter><filter id="d"><feComponentTransfer><feFuncG type="discrete" tableValues="0 1"/></feComponentTransfer></filter><filter id="l"><feComponentTransfer><feFuncB type="linear" slope="0" intercept="1"/></feComponentTransfer></filter><filter id="g"><feComponentTransfer><feFuncR type="gamma" amplitude="1" exponent="2" offset="0"/></feComponentTransfer></filter><rect x="8" y="22" width="16" height="56" fill="white" filter="url(#t)"/><rect x="31" y="22" width="16" height="56" fill="#c0c0c0" filter="url(#d)"/><rect x="54" y="22" width="16" height="56" fill="black" filter="url(#l)"/><rect x="77" y="22" width="16" height="56" fill="#808080" filter="url(#g)"/></svg>"##,
+        ),
+        Case::square(
+            "wpt-filter-conv-01",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="sharp"><feConvolveMatrix kernelMatrix="0 -1 0 -1 5 -1 0 -1 0"/></filter><rect x="20" y="20" width="60" height="60" fill="#c14b2b" filter="url(#sharp)"/></svg>"##,
+        ),
+        Case::square(
+            "wpt-filter-conv-02",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="c"><feConvolveMatrix order="3 3" kernelMatrix="0 0 0 0 1 0 0 0 0" preserveAlpha="true"/></filter><rect x="20" y="20" width="60" height="60" fill="#c14b2b" filter="url(#c)"/></svg>"##,
+        ),
+        Case::square(
+            "wpt-filter-conv-03",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="c"><feFlood flood-color="#2563eb"/><feConvolveMatrix in="SourceGraphic" kernelMatrix="0 0 0 0 1 0 0 0 0"/></filter><rect x="20" y="20" width="60" height="60" fill="#c14b2b" filter="url(#c)"/></svg>"##,
+        ),
+        Case::square(
+            "wpt-filter-conv-04",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="c"><feConvolveMatrix kernelMatrix="0 0 0 0 1 0 0 0 0" bias="0.5"/></filter><rect x="20" y="20" width="60" height="60" fill="black" filter="url(#c)"/></svg>"##,
+        ),
+        Case::square(
+            "wpt-filter-diffuse-01",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="light"><feDiffuseLighting surfaceScale="5" diffuseConstant="1" lighting-color="white"><feDistantLight azimuth="45" elevation="60"/></feDiffuseLighting></filter><circle cx="50" cy="50" r="30" fill="white" filter="url(#light)"/></svg>"##,
+        ),
+        Case::square(
+            "wpt-filter-displace-01",
+            format!(
+                r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="warp"><feImage href="{quadrants}" x="0" y="0" width="100" height="100" result="map"/><feDisplacementMap in="SourceGraphic" in2="map" scale="8" xChannelSelector="R" yChannelSelector="G"/></filter><rect x="32" y="32" width="36" height="36" fill="#2563eb" filter="url(#warp)"/></svg>"##
+            ),
+        ),
+        Case::square(
+            "wpt-filter-displace-02",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="warp"><feDisplacementMap in="SourceGraphic" in2="SourceAlpha" scale="0"/></filter><rect x="20" y="20" width="60" height="60" fill="#2563eb" filter="url(#warp)"/></svg>"##,
+        ),
+        Case::square(
+            "wpt-filter-image-01",
+            format!(
+                r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="tex"><feImage href="{red}" x="24" y="22" width="52" height="48"/></filter><rect width="100" height="100" filter="url(#tex)"/></svg>"##
+            ),
+        ),
+        Case::sized(
+            "wpt-filter-image-03",
+            format!(
+                r##"<svg width="200" height="100"><rect width="100%" height="100%" fill="#13294b"/><filter id="tex"><feImage href="{green}" x="20%" y="25%" width="30%" height="40%"/></filter><rect width="200" height="100" filter="url(#tex)"/></svg>"##
+            ),
+            200,
+            100,
+        ),
+        Case::square(
+            "wpt-filter-image-04",
+            format!(
+                r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="tex"><feImage href="{blue}" x="30" y="22" width="40" height="36"/></filter><rect width="100" height="100" filter="url(#tex)"/></svg>"##
+            ),
+        ),
+        Case::square(
+            "wpt-filter-light-01",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="d"><feDiffuseLighting surfaceScale="5" diffuseConstant="1"><feDistantLight azimuth="45" elevation="60"/></feDiffuseLighting></filter><filter id="p"><feDiffuseLighting surfaceScale="5" diffuseConstant="1"><fePointLight x="50" y="50" z="40"/></feDiffuseLighting></filter><filter id="s"><feDiffuseLighting surfaceScale="5" diffuseConstant="1"><feSpotLight x="50" y="50" z="40" pointsAtX="50" pointsAtY="50" pointsAtZ="0" limitingConeAngle="35"/></feDiffuseLighting></filter><circle cx="25" cy="50" r="18" fill="white" filter="url(#d)"/><circle cx="50" cy="50" r="18" fill="white" filter="url(#p)"/><circle cx="75" cy="50" r="18" fill="white" filter="url(#s)"/></svg>"##,
+        ),
+        Case::square(
+            "wpt-filter-light-02",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="spec"><feSpecularLighting surfaceScale="5" specularConstant="1" specularExponent="8"><feDistantLight azimuth="135" elevation="45"/></feSpecularLighting></filter><circle cx="50" cy="50" r="30" fill="white" filter="url(#spec)"/></svg>"##,
+        ),
+        Case::square(
+            "wpt-filter-light-03",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="spec"><feSpecularLighting surfaceScale="5" specularConstant="1" specularExponent="8"><fePointLight x="50" y="50" z="40"/></feSpecularLighting></filter><circle cx="50" cy="50" r="30" fill="white" filter="url(#spec)"/></svg>"##,
+        ),
+        Case::square(
+            "wpt-filter-light-04",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="spot"><feDiffuseLighting surfaceScale="5" diffuseConstant="1"><feSpotLight x="50" y="50" z="40" pointsAtX="50" pointsAtY="50" pointsAtZ="0" limitingConeAngle="35"/></feDiffuseLighting></filter><circle cx="50" cy="50" r="30" fill="white" filter="url(#spot)"/></svg>"##,
+        ),
+        Case::square(
+            "wpt-filter-morph-01",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="grow"><feMorphology operator="dilate" radius="4"/></filter><filter id="shrink"><feMorphology operator="erode" radius="4"/></filter><rect x="22" y="36" width="18" height="18" fill="#11aa55" filter="url(#grow)"/><rect x="58" y="28" width="28" height="28" fill="#f2c14e" filter="url(#shrink)"/></svg>"##,
+        ),
+        Case::square(
+            "wpt-filter-specular-01",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="spec"><feSpecularLighting surfaceScale="10" specularConstant="2" specularExponent="4" lighting-color="red"><feDistantLight azimuth="135" elevation="45"/></feSpecularLighting></filter><circle cx="50" cy="50" r="30" fill="white" filter="url(#spec)"/></svg>"##,
+        ),
+        Case::square(
+            "wpt-filter-turb-01",
+            r##"<svg><filter id="n"><feTurbulence type="fractalNoise" baseFrequency="0.08" numOctaves="2" seed="1"/></filter><rect x="10" y="10" width="80" height="80" filter="url(#n)"/></svg>"##,
+        ),
+        Case::square(
+            "wpt-filter-turb-02",
+            r##"<svg><filter id="n"><feTurbulence seed="2" baseFrequency="0.08" type="turbulence"/></filter><rect x="10" y="10" width="80" height="80" filter="url(#n)"/></svg>"##,
+        ),
+        Case::square(
+            "wpt-linking-href-feimage",
+            format!(
+                r##"<svg xmlns:xlink="http://www.w3.org/1999/xlink"><rect width="100%" height="100%" fill="#13294b"/><filter id="tex"><feImage href="{red}" xlink:href="{green}" x="24" y="22" width="52" height="48"/></filter><rect width="100" height="100" filter="url(#tex)"/></svg>"##
+            ),
         ),
         // `feColorMatrix type="saturate" values="0"` desaturates the source —
         // the orange rect becomes a mid grey while everything else keeps its
