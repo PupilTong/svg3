@@ -133,6 +133,23 @@ fn cases() -> Vec<Case> {
     let blue = solid_png_data_uri(1, 1, [37, 99, 235, 255]);
     let yellow = solid_png_data_uri(20, 14, [242, 193, 78, 255]);
     let orange = solid_png_data_uri(1, 1, [255, 165, 0, 255]);
+    // 4:1 image used by the `preserveAspectRatio` cases. Half red and half
+    // blue along its long axis so the alignment / scaling behaviour is
+    // unambiguous in the rendered golden.
+    let wide_image = {
+        let mut rgba = Vec::with_capacity(16 * 4 * 4);
+        for _ in 0..4 {
+            for x in 0..16 {
+                let color = if x < 8 {
+                    [193, 75, 43, 255]
+                } else {
+                    [37, 99, 235, 255]
+                };
+                rgba.extend_from_slice(&color);
+            }
+        }
+        png_data_uri(16, 4, &rgba)
+    };
 
     vec![
         // WPT `shapes/rect-01`: a basic filled rectangle.
@@ -753,6 +770,148 @@ fn cases() -> Vec<Case> {
         Case::square(
             "filter-image-missing-href-fallback",
             r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="empty"><feImage x="20" y="20" width="60" height="60"/></filter><rect x="24" y="28" width="52" height="44" fill="#c14b2b" filter="url(#empty)"/></svg>"##,
+        ),
+        // feOffset: translate the source by (dx, dy). The blue square sits
+        // at its authored position; the offset shifts the filter output
+        // toward the bottom-right, leaving the original region transparent.
+        Case::square(
+            "filter-offset-basic",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="o"><feOffset dx="20" dy="14"/></filter><rect x="14" y="14" width="30" height="30" fill="#2563eb" filter="url(#o)"/></svg>"##,
+        ),
+        // The classic SVG drop-shadow recipe: feGaussianBlur(SourceAlpha) +
+        // feOffset + feMerge. The source rect stays visible above its own
+        // soft, offset shadow.
+        Case::square(
+            "filter-offset-merge-drop-shadow",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="ds"><feGaussianBlur in="SourceAlpha" stdDeviation="3" result="blur"/><feOffset in="blur" dx="6" dy="6" result="shadow"/><feMerge><feMergeNode in="shadow"/><feMergeNode in="SourceGraphic"/></feMerge></filter><rect x="28" y="22" width="32" height="32" fill="#f2c14e" filter="url(#ds)"/></svg>"##,
+        ),
+        // feMerge with three named layers stacked in painter order:
+        // bottom flood, middle offset alpha, top SourceGraphic.
+        Case::square(
+            "filter-merge-three-layers",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="m"><feFlood flood-color="#11aa55" result="bg"/><feOffset in="SourceAlpha" dx="-6" dy="-6" result="halo"/><feMerge><feMergeNode in="bg"/><feMergeNode in="halo"/><feMergeNode in="SourceGraphic"/></feMerge></filter><rect x="24" y="24" width="44" height="44" fill="#c14b2b" filter="url(#m)"/></svg>"##,
+        ),
+        // feBlend mode="multiply": top flood (orange) multiplied with the
+        // source's saturated red. Multiply darkens the overlap.
+        Case::square(
+            "filter-blend-multiply",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="b"><feFlood flood-color="#f2c14e" result="top"/><feBlend in="top" in2="SourceGraphic" mode="multiply"/></filter><rect x="20" y="20" width="60" height="60" fill="#c14b2b" filter="url(#b)"/></svg>"##,
+        ),
+        // feBlend mode="screen" lightens the overlap of two mid-grey
+        // sources.
+        Case::square(
+            "filter-blend-screen",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="b"><feFlood flood-color="#808080" result="top"/><feBlend in="top" in2="SourceGraphic" mode="screen"/></filter><rect x="20" y="20" width="60" height="60" fill="#808080" filter="url(#b)"/></svg>"##,
+        ),
+        // feComposite operator="in": keep the flood only where SourceAlpha
+        // has coverage — the rect's footprint, with the flood paint.
+        Case::square(
+            "filter-composite-in",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="c"><feFlood flood-color="#2563eb" result="flood"/><feComposite in="flood" in2="SourceAlpha" operator="in"/></filter><rect x="22" y="22" width="56" height="56" fill="white" filter="url(#c)"/></svg>"##,
+        ),
+        // feComposite operator="out": keep the flood outside SourceAlpha's
+        // footprint. The rect's interior is "subtracted" out of the flood.
+        Case::square(
+            "filter-composite-out",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="c"><feFlood flood-color="#c14b2b" result="flood"/><feComposite in="flood" in2="SourceAlpha" operator="out"/></filter><rect x="30" y="30" width="40" height="40" fill="white" filter="url(#c)"/></svg>"##,
+        ),
+        // feComposite arithmetic with k1=0, k2=1, k3=1, k4=0 adds the two
+        // grey inputs together (operates in linear-light, so the encoded
+        // pixel is brighter than either input alone).
+        Case::square(
+            "filter-composite-arithmetic-add",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="c"><feFlood flood-color="#404040" result="a"/><feFlood flood-color="#404040" result="b"/><feComposite in="a" in2="b" operator="arithmetic" k1="0" k2="1" k3="1" k4="0"/></filter><rect width="100%" height="100%" filter="url(#c)"/></svg>"##,
+        ),
+        // feTile spreads a small SourceGraphic across the entire filter
+        // region — the small blue rect becomes a uniform blue field
+        // expanded out to the filter region (= source bbox inflated 10%).
+        Case::square(
+            "filter-tile-spreads-source",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="t"><feTile/></filter><rect x="40" y="40" width="20" height="20" fill="#2563eb" filter="url(#t)"/></svg>"##,
+        ),
+        // SVG 1.1 §15.4: an empty `<filter>` renders the element as
+        // transparent black. Without the spec-correct fallback this rect
+        // would paint red into the navy background.
+        Case::square(
+            "filter-empty-transparent-black",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="empty"></filter><rect x="20" y="20" width="60" height="60" fill="#c14b2b" filter="url(#empty)"/></svg>"##,
+        ),
+        // feConvolveMatrix edgeMode="none": a normalised 3×3 box-blur of a
+        // canvas-filling white rect darkens at the canvas edges because
+        // out-of-bounds taps contribute zero.
+        Case::square(
+            "filter-convolve-edgemode-none",
+            r##"<svg><filter id="c"><feConvolveMatrix kernelMatrix="1 1 1 1 1 1 1 1 1" divisor="9" edgeMode="none"/></filter><rect width="100" height="100" fill="white" filter="url(#c)"/></svg>"##,
+        ),
+        // feConvolveMatrix edgeMode="wrap": out-of-bounds taps wrap to the
+        // opposite side, so a half-and-half source averages along the seam.
+        Case::square(
+            "filter-convolve-edgemode-wrap",
+            r##"<svg><filter id="c"><feConvolveMatrix kernelMatrix="1 1 1 1 1 1 1 1 1" divisor="9" edgeMode="wrap"/></filter><rect x="0" y="0" width="50" height="100" fill="#c14b2b" filter="url(#c)"/><rect x="50" y="0" width="50" height="100" fill="#2563eb" filter="url(#c)"/></svg>"##,
+        ),
+        // feImage preserveAspectRatio default (`xMidYMid meet`): a
+        // wide image source centred inside a square draw rect with
+        // transparent top/bottom margins.
+        Case::square(
+            "filter-image-aspect-default-meet",
+            format!(
+                r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="tex"><feImage href="{wide}" x="20" y="20" width="60" height="60"/></filter><rect width="100" height="100" filter="url(#tex)"/></svg>"##,
+                wide = wide_image,
+            ),
+        ),
+        // Same source + draw rect, but `preserveAspectRatio="none"` —
+        // image stretches to fully fill the rect.
+        Case::square(
+            "filter-image-aspect-none-stretch",
+            format!(
+                r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="tex"><feImage href="{wide}" x="20" y="20" width="60" height="60" preserveAspectRatio="none"/></filter><rect width="100" height="100" filter="url(#tex)"/></svg>"##,
+                wide = wide_image,
+            ),
+        ),
+        // `preserveAspectRatio="xMinYMax slice"`: the image covers the
+        // draw rect, anchored bottom-left. The unused content overflows
+        // into the (texture-clipped) right/top.
+        Case::square(
+            "filter-image-aspect-slice-bottom-left",
+            format!(
+                r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="tex"><feImage href="{wide}" x="20" y="20" width="60" height="60" preserveAspectRatio="xMinYMax slice"/></filter><rect width="100" height="100" filter="url(#tex)"/></svg>"##,
+                wide = wide_image,
+            ),
+        ),
+        // Filter `href` inheritance: `child` carries no primitives of its
+        // own, so it inherits `parent`'s colour-matrix and paints the rect
+        // red.
+        Case::square(
+            "filter-href-inheritance",
+            r##"<svg><filter id="parent"><feColorMatrix type="matrix" values="0 0 0 0 1  0 0 0 0 0  0 0 0 0 0  0 0 0 1 0"/></filter><filter id="child" href="#parent"/><rect width="100%" height="100%" fill="#13294b"/><rect x="20" y="20" width="60" height="60" fill="white" filter="url(#child)"/></svg>"##,
+        ),
+        // Circular filter `href`: `a → b → a`. Cycle detection returns
+        // transparent black; the navy background remains visible.
+        Case::square(
+            "filter-href-cycle-transparent",
+            r##"<svg><filter id="a" href="#b"/><filter id="b" href="#a"/><rect width="100%" height="100%" fill="#13294b"/><rect x="20" y="20" width="60" height="60" fill="white" filter="url(#a)"/></svg>"##,
+        ),
+        // `currentColor` on `flood-color`: the flood inherits `color="red"`
+        // from the filtered element, then `composite-in` against
+        // SourceAlpha keeps it where the rect is.
+        Case::square(
+            "filter-current-color-flood",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="f"><feFlood flood-color="currentColor" result="flood"/><feComposite in="flood" in2="SourceAlpha" operator="in"/></filter><rect color="#c14b2b" x="22" y="22" width="56" height="56" fill="white" filter="url(#f)"/></svg>"##,
+        ),
+        // Per-primitive subregion (SVG 1.1 §15.5): the `<feFlood>` carries
+        // its own `x/y/width/height`, so the flood is clipped to that rect
+        // and the rest of the filter region stays transparent.
+        Case::square(
+            "filter-primitive-subregion",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="f" x="0" y="0" width="100" height="100"><feFlood flood-color="#11aa55" x="30" y="30" width="40" height="40"/></filter><rect width="100" height="100" fill="white" filter="url(#f)"/></svg>"##,
+        ),
+        // SVG 2 render order: `clip-path` applies BEFORE the filter. The
+        // rect is clipped to the inner clip rect, then the color-matrix
+        // filter turns the surviving region red — outside the clip stays
+        // navy because the source was already discarded.
+        Case::square(
+            "filter-clip-path-before-filter",
+            r##"<svg><defs><clipPath id="c"><rect x="30" y="30" width="40" height="40"/></clipPath><filter id="f"><feColorMatrix type="matrix" values="0 0 0 0 1  0 0 0 0 0  0 0 0 0 0  0 0 0 1 0"/></filter></defs><rect width="100%" height="100%" fill="#13294b"/><rect x="10" y="10" width="80" height="80" fill="white" clip-path="url(#c)" filter="url(#f)"/></svg>"##,
         ),
         // The canonical SVG sample, rendered at its declared 300×200 size. The
         // `<rect width="100%">` exercises percentage lengths; the `<text>` is
