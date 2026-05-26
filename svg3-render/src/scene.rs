@@ -9,7 +9,10 @@ use std::collections::BTreeMap;
 use std::sync::OnceLock;
 use svg3_dom::{Document, Element, ElementKind, NodeId};
 
-use crate::filters::{FilterDefinitions, FilterInput, FilterPrimitive, FilterPrimitiveKind};
+use crate::filters::{
+    ClipPathDefinitions, FilterDefinitions, FilterInput, FilterPrimitive, FilterPrimitiveKind,
+    FilterResolution,
+};
 use crate::shapes::{self, stroke::MarkerKind};
 use crate::{Mesh, Viewport};
 
@@ -26,6 +29,10 @@ pub(crate) enum RenderOp {
         mesh: Mesh,
         /// Ordered list of primitive passes to apply.
         primitives: Vec<FilterPrimitive>,
+        /// Optional UV-space `[x, y, width, height]` clip applied to the
+        /// filter's source texture before primitives run (SVG 2 render
+        /// order: clip-path applies before filter). `None` means no clip.
+        clip_uv: Option<[f32; 4]>,
     },
 }
 
@@ -119,6 +126,7 @@ pub fn build_scene(document: &Document, viewport: Viewport) -> Mesh {
 /// isolating filtered subtrees into their own GPU post-process pass.
 pub(crate) fn build_render_plan(document: &Document, viewport: Viewport) -> Vec<RenderOp> {
     let filters = FilterDefinitions::collect(document);
+    let clips = ClipPathDefinitions::collect(document);
     let markers = MarkerDefinitions::default();
     let context = SceneContext {
         viewport,
@@ -132,6 +140,7 @@ pub(crate) fn build_render_plan(document: &Document, viewport: Viewport) -> Vec<
             document,
             child,
             &filters,
+            &clips,
             &context,
             &mut pending_mesh,
             &mut plan,
@@ -145,6 +154,7 @@ fn append_render_ops(
     document: &Document,
     id: svg3_dom::NodeId,
     filters: &FilterDefinitions,
+    clips: &ClipPathDefinitions,
     context: &SceneContext<'_>,
     pending_mesh: &mut Mesh,
     plan: &mut Vec<RenderOp>,
@@ -154,43 +164,70 @@ fn append_render_ops(
         return;
     }
 
-    if let Some(chain) = filters.resolve(&node.element) {
-        let mut filtered_mesh = Mesh::default();
-        append_subtree_mesh(document, id, context, true, &mut filtered_mesh);
-        // A primitive affects the chain output if either its parameters are
-        // non-identity OR its DAG wiring is non-default. The wiring matters
-        // because e.g. `<feGaussianBlur in="SourceAlpha" stdDeviation="0"/>`
-        // is parameter-wise a no-op blur but still has to run — it must
-        // replace the RGB with SourceAlpha's `(0, 0, 0, src.a)`. A primitive
-        // with a `result` attribute is also "live" since a later primitive
-        // might reference it.
-        let affects_output = |primitive: &FilterPrimitive| {
-            primitive.is_visible()
-                || !matches!(primitive.input, FilterInput::Default)
-                || !matches!(primitive.input2, FilterInput::Default)
-                || primitive.result.is_some()
-        };
-        let visible = chain.iter().any(affects_output);
-        let generator = chain.iter().any(|primitive| {
-            matches!(
-                primitive.kind,
-                FilterPrimitiveKind::Image(_)
-                    | FilterPrimitiveKind::Flood(_)
-                    | FilterPrimitiveKind::Turbulence(_)
-            )
-        });
-        if !filtered_mesh.is_empty() || generator {
-            if visible {
-                flush_mesh(pending_mesh, plan);
-                plan.push(RenderOp::Filter {
-                    mesh: filtered_mesh,
-                    primitives: chain.to_vec(),
-                });
-            } else {
-                pending_mesh.append(filtered_mesh);
+    // Resolve clip-path before filter (SVG 2 render order). When the
+    // element references a clip-path, the filter's source texture is
+    // clipped to the clip-path's UV rect before primitives run.
+    let clip_uv = clips
+        .resolve(&node.element)
+        .map(|shape| shape.to_uv(context.viewport));
+
+    match filters.resolve(&node.element) {
+        Some(FilterResolution::Chain(chain)) => {
+            let mut filtered_mesh = Mesh::default();
+            append_subtree_mesh(document, id, context, true, &mut filtered_mesh);
+            // A primitive affects the chain output if either its parameters
+            // are non-identity OR its DAG wiring is non-default. The wiring
+            // matters because e.g. `<feGaussianBlur in="SourceAlpha"
+            // stdDeviation="0"/>` is parameter-wise a no-op blur but still
+            // has to run — it must replace the RGB with SourceAlpha's
+            // `(0, 0, 0, src.a)`. A primitive with a `result` attribute is
+            // also "live" since a later primitive might reference it.
+            let affects_output = |primitive: &FilterPrimitive| {
+                primitive.is_visible()
+                    || !matches!(primitive.input, FilterInput::Default)
+                    || !matches!(primitive.input2, FilterInput::Default)
+                    || primitive.result.is_some()
+            };
+            let visible = chain.iter().any(affects_output);
+            let generator = chain.iter().any(|primitive| {
+                matches!(
+                    primitive.kind,
+                    FilterPrimitiveKind::Image(_)
+                        | FilterPrimitiveKind::Flood(_)
+                        | FilterPrimitiveKind::Turbulence(_)
+                )
+            });
+            if !filtered_mesh.is_empty() || generator {
+                if visible {
+                    flush_mesh(pending_mesh, plan);
+                    // SVG `currentColor`: resolve the filtered element's
+                    // `color` attribute and substitute it into any
+                    // `flood-color="currentColor"` / `lighting-color="currentColor"`
+                    // primitives in the chain.
+                    let current_color = resolve_current_color(&node.element);
+                    let mut owned_chain: Vec<FilterPrimitive> = chain.to_vec();
+                    for primitive in owned_chain.iter_mut() {
+                        primitive.substitute_current_color(current_color);
+                    }
+                    plan.push(RenderOp::Filter {
+                        mesh: filtered_mesh,
+                        primitives: owned_chain,
+                        clip_uv,
+                    });
+                } else {
+                    pending_mesh.append(filtered_mesh);
+                }
             }
+            return;
         }
-        return;
+        Some(FilterResolution::EmptyTransparent) => {
+            // SVG 1.1 §15.4: an unresolved or empty filter still applies a
+            // filter — the result is just transparent black. Drop the
+            // element's geometry on the floor; the filter "replaces" the
+            // source with nothing.
+            return;
+        }
+        None => {}
     }
 
     append_element_mesh_biased(document, id, context, true, pending_mesh);
@@ -198,8 +235,20 @@ fn append_render_ops(
         return;
     }
     for child in node.children.iter().copied() {
-        append_render_ops(document, child, filters, context, pending_mesh, plan);
+        append_render_ops(document, child, filters, clips, context, pending_mesh, plan);
     }
+}
+
+/// Resolve `currentColor` from an element's `color` attribute. Without a
+/// real style cascade (svg3-style is a skeleton) we look only at the
+/// filtered element itself; ancestor inheritance is deferred to when the
+/// cascade comes online. SVG 1.1: a missing `color` resolves to black.
+fn resolve_current_color(element: &Element) -> [f32; 4] {
+    element
+        .attributes
+        .get("color")
+        .and_then(|s| crate::shapes::parse_color_value(s))
+        .unwrap_or([0.0, 0.0, 0.0, 1.0])
 }
 
 fn append_subtree_mesh(
@@ -886,9 +935,20 @@ fn url_reference_id(value: &str) -> Option<&str> {
 }
 
 fn is_definition_container(kind: &ElementKind) -> bool {
+    // `<foreignObject>` is *not* a definition — it can carry siblings — but
+    // svg3 doesn't host HTML, so we treat its subtree the same way as the
+    // definition containers: skip without rendering.
     matches!(
         kind,
-        ElementKind::Defs | ElementKind::Filter | ElementKind::Marker
+        ElementKind::Defs
+            | ElementKind::Filter
+            | ElementKind::Marker
+            | ElementKind::ClipPath
+            | ElementKind::Mask
+            | ElementKind::LinearGradient
+            | ElementKind::RadialGradient
+            | ElementKind::Pattern
+            | ElementKind::ForeignObject
     )
 }
 
