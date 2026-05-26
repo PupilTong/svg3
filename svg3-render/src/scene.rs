@@ -175,18 +175,24 @@ fn append_render_ops(
         Some(FilterResolution::Chain(chain)) => {
             let mut filtered_mesh = Mesh::default();
             append_subtree_mesh(document, id, context, true, &mut filtered_mesh);
-            // A primitive affects the chain output if either its parameters
-            // are non-identity OR its DAG wiring is non-default. The wiring
-            // matters because e.g. `<feGaussianBlur in="SourceAlpha"
-            // stdDeviation="0"/>` is parameter-wise a no-op blur but still
-            // has to run — it must replace the RGB with SourceAlpha's
-            // `(0, 0, 0, src.a)`. A primitive with a `result` attribute is
-            // also "live" since a later primitive might reference it.
+            // A primitive affects the chain output if any of:
+            //  - its parameters are non-identity (`is_visible`)
+            //  - its DAG wiring is non-default — e.g. `<feGaussianBlur
+            //    in="SourceAlpha" stdDeviation="0"/>` is parameter-wise a
+            //    no-op blur but still has to run to replace the RGB with
+            //    SourceAlpha's `(0, 0, 0, src.a)`
+            //  - it carries a `result` attribute that a later primitive
+            //    might reference
+            //  - it carries a primitive subregion (SVG 1.1 §15.5): even a
+            //    parameter-wise no-op like `<feOffset dx="0" dy="0"
+            //    x="20" y="20" width="10" height="10"/>` must run so the
+            //    post-clip zeroes out pixels outside its rect.
             let affects_output = |primitive: &FilterPrimitive| {
                 primitive.is_visible()
                     || !matches!(primitive.input, FilterInput::Default)
                     || !matches!(primitive.input2, FilterInput::Default)
                     || primitive.result.is_some()
+                    || primitive.subregion.is_some()
             };
             let visible = chain.iter().any(affects_output);
             let generator = chain.iter().any(|primitive| {

@@ -633,6 +633,10 @@ fn blend_lighten(s: vec3<f32>, d: vec3<f32>) -> vec3<f32> {
 
 @fragment
 fn fs_blend(in: VertexOutput) -> @location(0) vec4<f32> {
+    // Filter targets are premultiplied; the blend math operates on straight
+    // RGB but the linear-mixing terms below need to keep the result
+    // premultiplied so downstream primitives and the final composite see a
+    // valid premultiplied texel.
     let src = sample_in1(in.uv);
     let dst = sample_in2(in.uv);
     let s = unpremultiply(src);
@@ -652,12 +656,15 @@ fn fs_blend(in: VertexOutput) -> @location(0) vec4<f32> {
         blended = blend_normal(s.rgb, d.rgb);
     }
 
-    // SVG 1.1 §15.7: `c_r = (1 - a_b) * c_a + (1 - a_a) * c_b + a_a * a_b * blend(c_a, c_b)`
-    // where (c_a, a_a) is source and (c_b, a_b) is destination.
-    let rgb = (1.0 - d.a) * s.rgb + (1.0 - s.a) * d.rgb + s.a * d.a * blended;
-    let a = s.a + d.a - s.a * d.a;
-    let result = vec4<f32>(rgb, a);
-    return clamp(vec4<f32>(result.rgb, result.a), vec4<f32>(0.0), vec4<f32>(1.0));
+    // SVG 1.1 §15.7, written on premultiplied colour so the output stays
+    // premultiplied:
+    //   Co = (1 - αb) * Ca + (1 - αa) * Cb + αa * αb * B(Ca/αa, Cb/αb)
+    //   αo = αa + αb - αa * αb
+    // The blend function `B` operates on straight RGB (`blended` above);
+    // the linear terms use `src.rgb` and `dst.rgb` (already premultiplied).
+    let rgb = (1.0 - dst.a) * src.rgb + (1.0 - src.a) * dst.rgb + src.a * dst.a * blended;
+    let a = src.a + dst.a - src.a * dst.a;
+    return clamp(vec4<f32>(rgb, a), vec4<f32>(0.0), vec4<f32>(1.0));
 }
 
 // ---- feComposite ----------------------------------------------------------

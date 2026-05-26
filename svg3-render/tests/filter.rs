@@ -1122,3 +1122,93 @@ fn tile_repeats_input_across_filter_region() {
         "tile should repeat across filter region, got {p1:?} and {p2:?}"
     );
 }
+
+// ---- Regressions: review feedback (P2 fixes) -------------------------------
+
+#[test]
+fn no_op_primitive_with_subregion_still_clips() {
+    // Review feedback (P2): the scene-level visibility gate used to ignore
+    // `primitive.subregion`, so a parameter-wise no-op like `feOffset
+    // dx="0" dy="0"` with an authored `x/y/width/height` would skip the
+    // entire filter pipeline and leak the unclipped source. The subregion
+    // is now part of `affects_output`, so the post-clip pass runs and
+    // zeroes out pixels outside the rect.
+    let Some(renderer) = skip_or_renderer("no_op_primitive_with_subregion_still_clips") else {
+        return;
+    };
+    let image = render(
+        &renderer,
+        r##"<svg><filter id="f" x="0" y="0" width="64" height="64"><feOffset dx="0" dy="0" x="20" y="20" width="10" height="10"/></filter><rect width="64" height="64" fill="white" filter="url(#f)"/></svg>"##,
+    );
+    // Inside the subregion: source still visible.
+    let inside = image.pixel(24, 24);
+    assert!(
+        inside[0] > 200 && inside[3] > 200,
+        "subregion interior should keep the source, got {inside:?}"
+    );
+    // Outside the subregion: clipped away.
+    assert_transparent(&image, 40, 40);
+}
+
+#[test]
+fn blend_normal_with_transparent_dst_stays_premultiplied() {
+    // Review feedback (P2): the original `fs_blend` body unpremultiplied
+    // both inputs and then summed with `(1 - dst.a) * s.rgb + …`, which
+    // produced *straight* RGB out of a premultiplied texture pipeline. For
+    // a 50%-alpha red source over a transparent destination the leaked RGB
+    // would be opaque red, so the next compositing pass painted a brighter
+    // colour than the input. The reformulated shader keeps the linear
+    // terms premultiplied; the centre pixel below shows the expected ~50%
+    // pre-multiplied red (R ≈ 128) rather than the broken ~255.
+    let Some(renderer) = skip_or_renderer("blend_normal_with_transparent_dst_stays_premultiplied")
+    else {
+        return;
+    };
+    // `feFlood` writes (0,0,0,0) — a transparent destination — and
+    // `feBlend mode="normal"` composites the half-alpha source over it.
+    let image = render(
+        &renderer,
+        r##"<svg><filter id="b"><feFlood flood-color="white" flood-opacity="0" result="empty"/><feBlend in="SourceGraphic" in2="empty" mode="normal"/></filter><rect x="20" y="20" width="24" height="24" fill="red" fill-opacity="0.5" filter="url(#b)"/></svg>"##,
+    );
+    let centre = image.pixel(32, 32);
+    // ~50% pre-multiplied red: alpha ~128, R well below 200 (the broken
+    // straight value would put R ≥ 230 at the source's authored colour).
+    assert!(
+        centre[3] > 100 && centre[3] < 180,
+        "blend output should keep ~50% alpha, got {centre:?}"
+    );
+    assert!(
+        centre[0] < 200,
+        "premultiplied blend output should not have full-strength RGB at half alpha, got {centre:?}"
+    );
+}
+
+#[test]
+fn tile_wraps_inside_input_primitive_subregion() {
+    // Review feedback (P2): `feTile` used to hardcode the source rect to
+    // the full texture `[0, 0, 1, 1]`, making it a passthrough when the
+    // upstream primitive's actual output occupied a smaller subregion. The
+    // renderer now resolves the input primitive's UV subregion and the
+    // tile shader wraps inside that rect — so a small flood with its own
+    // subregion gets repeated across the filter region rather than just
+    // returning the original flood patch.
+    let Some(renderer) = skip_or_renderer("tile_wraps_inside_input_primitive_subregion") else {
+        return;
+    };
+    // The flood paints into a 16×16 subregion in the centre of a 64×64
+    // canvas; `feTile` should replicate that patch across the whole filter
+    // region. Sampling at canvas corners (well outside the original
+    // 16×16 patch) must therefore see the tiled flood colour.
+    let image = render(
+        &renderer,
+        r##"<svg><filter id="t" x="0" y="0" width="64" height="64"><feFlood flood-color="#11aa55" x="24" y="24" width="16" height="16" result="patch"/><feTile in="patch"/></filter><rect width="64" height="64" fill="white" filter="url(#t)"/></svg>"##,
+    );
+    // Pixel well outside the original flood patch — should be the tiled
+    // green if the tile rect tracked the patch, transparent if the tile
+    // shader was treating the (mostly empty) texture as its source.
+    let corner = image.pixel(4, 4);
+    assert!(
+        corner[1] > 80 && corner[3] > 80,
+        "feTile should repeat the upstream subregion across the filter region, got {corner:?}"
+    );
+}

@@ -165,6 +165,37 @@ impl FilterUniform {
 /// `result`, or `Default` for the very first primitive — fall back to
 /// `SourceGraphic`, matching SVG's "if the value is unresolved, use
 /// SourceGraphic" behaviour.
+/// Resolve a primitive input reference to the UV-space subregion where the
+/// upstream paint actually lives. SVG pseudo-inputs (`SourceGraphic`,
+/// `SourceAlpha`, the background-image / paint approximations) span the
+/// full filter region; a named or default reference uses the upstream
+/// primitive's resolved output subregion. Unresolvable references fall back
+/// to the full filter region to keep the downstream primitive sampling
+/// against well-defined UVs.
+fn resolve_input_uv(
+    input: &FilterInput,
+    prev_index: Option<usize>,
+    named: &BTreeMap<&str, usize>,
+    output_uv: &[[f32; 4]],
+) -> [f32; 4] {
+    let pick = |i: usize| output_uv.get(i).copied().unwrap_or([0.0, 0.0, 1.0, 1.0]);
+    match input {
+        FilterInput::Default => prev_index.map_or([0.0, 0.0, 1.0, 1.0], pick),
+        FilterInput::Named(name) => named.get(name.as_str()).copied().map_or(
+            // Unknown named input falls back to SourceGraphic — same as
+            // `resolve_input` — so the UV match the texture choice.
+            [0.0, 0.0, 1.0, 1.0],
+            pick,
+        ),
+        FilterInput::SourceGraphic
+        | FilterInput::SourceAlpha
+        | FilterInput::BackgroundImage
+        | FilterInput::BackgroundAlpha
+        | FilterInput::FillPaint
+        | FilterInput::StrokePaint => [0.0, 0.0, 1.0, 1.0],
+    }
+}
+
 fn resolve_input<'a>(
     input: &FilterInput,
     prev_index: Option<usize>,
@@ -368,13 +399,12 @@ fn fe_composite_uniform(extent: wgpu::Extent3d, c: Composite) -> FilterUniform {
     uniform
 }
 
-fn tile_uniform(extent: wgpu::Extent3d) -> FilterUniform {
+fn tile_uniform(extent: wgpu::Extent3d, source_uv: [f32; 4]) -> FilterUniform {
     let mut uniform = FilterUniform::empty(extent.width, extent.height);
-    // For now the tile source rect is the full filter region (default when
-    // the upstream primitive's subregion equals the filter region). When
-    // primitive subregion clipping lands, the renderer can pass the source
-    // primitive's bounding rect in UV space.
-    uniform.extra = [0.0, 0.0, 1.0, 1.0];
+    // `source_uv = [x, y, w, h]` is the input primitive's subregion in UV
+    // space (full texture `[0, 0, 1, 1]` when the upstream primitive has no
+    // authored subregion). The fragment shader wraps UVs inside this rect.
+    uniform.extra = source_uv;
     uniform
 }
 
@@ -1220,6 +1250,11 @@ impl Renderer {
 
         let mut named: BTreeMap<&str, usize> = BTreeMap::new();
         let mut prev_index: Option<usize> = None;
+        // Resolved UV subregion of each primitive's *output*. `[0, 0, 1, 1]`
+        // (the full filter region) when the primitive has no authored
+        // `x/y/width/height`. Used by `feTile` to wrap inside the input
+        // primitive's actual paint rect rather than the whole texture.
+        let mut output_uv: Vec<[f32; 4]> = Vec::with_capacity(primitives.len());
         for (i, primitive) in primitives.iter().enumerate() {
             let output_view = &outputs[i].view;
             if let FilterPrimitiveKind::Merge(merge) = &primitive.kind {
@@ -1253,6 +1288,12 @@ impl Renderer {
                     &outputs,
                     &named,
                 );
+                // For `feTile` the source rect is the *input* primitive's
+                // resolved subregion, not the full texture. Default-input
+                // ties to the previous primitive; named-input ties to the
+                // matching `result`; pseudo-inputs (SourceGraphic, etc.)
+                // span the full filter region.
+                let input_uv = resolve_input_uv(&primitive.input, prev_index, &named, &output_uv);
                 self.encode_primitive(
                     encoder,
                     primitive,
@@ -1260,6 +1301,7 @@ impl Renderer {
                     in2_view,
                     output_view,
                     &scratch.view,
+                    input_uv,
                     viewport,
                     view_projection,
                     extent,
@@ -1269,7 +1311,8 @@ impl Renderer {
             // x/y/width/height subregion. Pixels outside are transparent
             // black. Skipped when the primitive has no subregion (the spec
             // default = the filter region).
-            if let Some(subregion) = primitive.subregion {
+            let primitive_uv = if let Some(subregion) = primitive.subregion {
+                let uv = subregion.to_uv(viewport);
                 self.encode_subregion_clip(
                     encoder,
                     output_view,
@@ -1278,7 +1321,11 @@ impl Renderer {
                     viewport,
                     extent,
                 );
-            }
+                uv
+            } else {
+                [0.0, 0.0, 1.0, 1.0]
+            };
+            output_uv.push(primitive_uv);
             if let Some(name) = primitive.result.as_deref() {
                 named.insert(name, i);
             }
@@ -1306,7 +1353,9 @@ impl Renderer {
 
     /// Encode one primitive's GPU pass(es). Reads `in1` / `in2`, writes to
     /// `output`, and may use `scratch` as an internal bounce buffer for
-    /// multi-pass primitives.
+    /// multi-pass primitives. `input_uv` is the resolved UV-space subregion
+    /// of the primitive's `in` reference — used by `feTile` to wrap inside
+    /// the upstream paint rect rather than the full texture.
     #[allow(clippy::too_many_arguments)]
     fn encode_primitive(
         &self,
@@ -1316,6 +1365,7 @@ impl Renderer {
         in2: &wgpu::TextureView,
         output: &wgpu::TextureView,
         scratch: &wgpu::TextureView,
+        input_uv: [f32; 4],
         viewport: Viewport,
         view_projection: Mat4,
         extent: wgpu::Extent3d,
@@ -1477,7 +1527,7 @@ impl Renderer {
                 );
             }
             FilterPrimitiveKind::Tile => {
-                let uniform = tile_uniform(extent);
+                let uniform = tile_uniform(extent, input_uv);
                 self.encode_filter_pass(
                     encoder,
                     &self.tile_pipeline,
