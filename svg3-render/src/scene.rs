@@ -347,16 +347,14 @@ fn append_element_mesh(
                     let stroke_style = shapes::stroke::resolve_stroke_style(element, viewport);
                     let stroke_mesh =
                         shapes::rect::tessellate_rect_stroke(&geo, &stroke_style, DUMMY_COLOR);
-                    if let Some(bounds) = PaintBounds::from_mesh(&stroke_mesh) {
-                        if let Some(paint) = context.paints.resolve_stroke(
-                            document,
-                            element,
-                            bounds,
-                            viewport,
-                            features.has_opacity_attrs,
-                        ) {
-                            append_painted_mesh(stroke_mesh, paint, mesh);
-                        }
+                    if let Some(paint) = context.paints.resolve_stroke(
+                        document,
+                        element,
+                        fill_bounds,
+                        viewport,
+                        features.has_opacity_attrs,
+                    ) {
+                        append_painted_mesh(stroke_mesh, paint, mesh);
                     }
                 }
             }
@@ -383,16 +381,14 @@ fn append_element_mesh(
                     let stroke_style = shapes::stroke::resolve_stroke_style(element, viewport);
                     let stroke_mesh =
                         shapes::circle::tessellate_circle_stroke(&geo, &stroke_style, DUMMY_COLOR);
-                    if let Some(bounds) = PaintBounds::from_mesh(&stroke_mesh) {
-                        if let Some(paint) = context.paints.resolve_stroke(
-                            document,
-                            element,
-                            bounds,
-                            viewport,
-                            features.has_opacity_attrs,
-                        ) {
-                            append_painted_mesh(stroke_mesh, paint, mesh);
-                        }
+                    if let Some(paint) = context.paints.resolve_stroke(
+                        document,
+                        element,
+                        fill_bounds,
+                        viewport,
+                        features.has_opacity_attrs,
+                    ) {
+                        append_painted_mesh(stroke_mesh, paint, mesh);
                     }
                 }
             }
@@ -422,16 +418,14 @@ fn append_element_mesh(
                         &stroke_style,
                         DUMMY_COLOR,
                     );
-                    if let Some(bounds) = PaintBounds::from_mesh(&stroke_mesh) {
-                        if let Some(paint) = context.paints.resolve_stroke(
-                            document,
-                            element,
-                            bounds,
-                            viewport,
-                            features.has_opacity_attrs,
-                        ) {
-                            append_painted_mesh(stroke_mesh, paint, mesh);
-                        }
+                    if let Some(paint) = context.paints.resolve_stroke(
+                        document,
+                        element,
+                        fill_bounds,
+                        viewport,
+                        features.has_opacity_attrs,
+                    ) {
+                        append_painted_mesh(stroke_mesh, paint, mesh);
                     }
                 }
             }
@@ -462,7 +456,7 @@ fn append_element_mesh(
                         &candidate_style,
                         DUMMY_COLOR,
                     );
-                    let paint = PaintBounds::from_mesh(&candidate_mesh).and_then(|bounds| {
+                    let paint = PaintBounds::from_points(&geo.points).and_then(|bounds| {
                         context.paints.resolve_stroke(
                             document,
                             element,
@@ -502,7 +496,10 @@ fn append_element_mesh(
         ElementKind::Polyline => {
             if let Some(geo) = shapes::polyline::resolve_polyline(element) {
                 let fill_mesh = shapes::polyline::tessellate_polyline(&geo, DUMMY_COLOR);
-                if let Some(bounds) = PaintBounds::from_mesh(&fill_mesh) {
+                if let Some(bounds) = (!fill_mesh.is_empty())
+                    .then(|| PaintBounds::from_points_iter(geo.points()))
+                    .flatten()
+                {
                     if let Some(paint) = context.paints.resolve_fill(
                         document,
                         element,
@@ -522,7 +519,7 @@ fn append_element_mesh(
                         &candidate_style,
                         DUMMY_COLOR,
                     );
-                    let paint = PaintBounds::from_mesh(&candidate_mesh).and_then(|bounds| {
+                    let paint = PaintBounds::from_points_iter(geo.points()).and_then(|bounds| {
                         context.paints.resolve_stroke(
                             document,
                             element,
@@ -571,7 +568,9 @@ fn append_element_mesh(
                 {
                     let stroke_mesh =
                         shapes::line::tessellate_segment(&geo, geo.stroke_width, DUMMY_COLOR);
-                    if let Some(bounds) = PaintBounds::from_mesh(&stroke_mesh) {
+                    if let Some(bounds) =
+                        PaintBounds::from_points(&[(geo.x1, geo.y1), (geo.x2, geo.y2)])
+                    {
                         if let Some(paint) = context
                             .paints
                             .resolve_stroke(document, element, bounds, viewport, false)
@@ -597,7 +596,9 @@ fn append_element_mesh(
                             .expect("stroke style should exist when stroke paint exists");
                         shapes::line::tessellate_line(&geo, stroke_style, DUMMY_COLOR)
                     };
-                    if let Some(bounds) = PaintBounds::from_mesh(&stroke_mesh) {
+                    if let Some(bounds) =
+                        PaintBounds::from_points(&[(geo.x1, geo.y1), (geo.x2, geo.y2)])
+                    {
                         if let Some(paint) = context.paints.resolve_stroke(
                             document,
                             element,
@@ -641,7 +642,7 @@ fn append_element_mesh(
                 }
                 if features.has_strokes {
                     let stroke_mesh = shapes::path::tessellate_path_stroke(&geo, DUMMY_COLOR);
-                    if let Some(bounds) = PaintBounds::from_mesh(&stroke_mesh) {
+                    if let Some(bounds) = PaintBounds::from_path(geo.path()) {
                         if let Some(paint) = context.paints.resolve_stroke(
                             document,
                             element,
@@ -1447,6 +1448,21 @@ mod tests {
                 .iter()
                 .all(|vertex| vertex.color == [1.0, 0.0, 0.0, 1.0]));
         }
+    }
+
+    #[test]
+    fn stroke_paint_object_bbox_uses_geometry_bounds() {
+        let document = svg3_dom::parse(
+            r##"<svg><defs><linearGradient id="g"><stop offset="0" stop-color="red"/><stop offset="1" stop-color="blue"/></linearGradient></defs><rect x="10" y="20" width="30" height="40" fill="none" stroke="url(#g)" stroke-width="10"/></svg>"##,
+        )
+        .unwrap();
+        let mesh = build_scene(&document, vp());
+
+        assert_eq!(mesh.paint_servers().len(), 1);
+        // The objectBoundingBox gradient resolves against the rect geometry
+        // bounds, excluding the 10px stroke expansion and any tessellation
+        // padding: x1/y1 at (10, 20), x2 at the right edge (40, 20).
+        assert_eq!(mesh.paint_servers()[0].geometry, [10.0, 20.0, 40.0, 20.0]);
     }
 
     #[test]

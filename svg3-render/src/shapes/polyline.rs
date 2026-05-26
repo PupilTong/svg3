@@ -31,6 +31,12 @@ pub(crate) struct PolylineGeometry {
     points: Vec<Point>,
 }
 
+impl PolylineGeometry {
+    pub(crate) fn points(&self) -> impl Iterator<Item = (f32, f32)> + '_ {
+        self.points.iter().map(|point| (point.x, point.y))
+    }
+}
+
 /// Resolve a `<polyline>`'s raw `points` attribute into a [`PolylineGeometry`].
 ///
 /// SVG 1.1 `points` coordinates are plain numbers, not lengths; units and

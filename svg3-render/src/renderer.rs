@@ -472,7 +472,6 @@ pub struct GpuScene {
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     transform_buffer: wgpu::Buffer,
-    _paint_buffer: wgpu::Buffer,
     transform_bind_group: wgpu::BindGroup,
     index_count: u32,
 }
@@ -901,7 +900,6 @@ impl Renderer {
             vertex_buffer,
             index_buffer,
             transform_buffer,
-            _paint_buffer: paint_buffer,
             transform_bind_group,
             index_count: mesh.indices.len() as u32,
         })

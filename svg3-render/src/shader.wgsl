@@ -223,6 +223,9 @@ fn evaluate_paint(in: VertexOutput) -> vec4<f32> {
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let paint_color = evaluate_paint(in);
+    // Fully transparent paint should not occupy the shared depth buffer.
+    // Otherwise an invisible 2D shape with `fill-opacity="0"` would still
+    // occlude later 3D content behind it.
     if (paint_color.a <= 0.0) {
         discard;
     }

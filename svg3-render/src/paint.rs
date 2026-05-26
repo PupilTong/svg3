@@ -4,17 +4,24 @@
 //! future Stylo cascade. This module covers the SVG paint values that need
 //! document-level definitions: `<linearGradient>`, `<radialGradient>`,
 //! `<pattern>`, and their `<stop>` children.
+//!
+//! Current scope intentionally omits `gradientTransform` / `patternTransform`,
+//! `href` inheritance, non-pad spread methods, and nested paint definitions
+//! inside another paint server's subtree.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
+use lyon_tessellation::path::iterator::PathIterator;
+use lyon_tessellation::path::{Path, PathEvent};
 use svg3_dom::{Document, Element, ElementKind, NodeId};
 
 use crate::mesh::{
     PaintServer, MAX_GRADIENT_STOPS, MAX_PATTERN_ITEMS, PAINT_LINEAR_GRADIENT, PAINT_PATTERN,
     PAINT_RADIAL_GRADIENT,
 };
-use crate::shapes::{self, rect, Length, Viewport};
+use crate::shapes::{self, rect, stroke::FLATTENING_TOLERANCE, Length, Viewport};
 use crate::Mesh;
 
 const DEFAULT_FILL: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
@@ -29,7 +36,7 @@ pub(crate) struct PaintBounds {
 
 impl PaintBounds {
     pub(crate) fn new(x: f32, y: f32, width: f32, height: f32) -> Option<Self> {
-        (width > 0.0 && height > 0.0).then_some(Self {
+        (width >= 0.0 && height >= 0.0 && (width > 0.0 || height > 0.0)).then_some(Self {
             x,
             y,
             width,
@@ -38,17 +45,40 @@ impl PaintBounds {
     }
 
     pub(crate) fn from_points(points: &[(f32, f32)]) -> Option<Self> {
-        let mut iter = points.iter();
-        let &(first_x, first_y) = iter.next()?;
+        Self::from_points_iter(points.iter().copied())
+    }
+
+    pub(crate) fn from_points_iter(points: impl IntoIterator<Item = (f32, f32)>) -> Option<Self> {
+        let mut iter = points.into_iter();
+        let (first_x, first_y) = iter.next()?;
         let (mut min_x, mut max_x) = (first_x, first_x);
         let (mut min_y, mut max_y) = (first_y, first_y);
-        for &(x, y) in iter {
+        for (x, y) in iter {
             min_x = min_x.min(x);
             max_x = max_x.max(x);
             min_y = min_y.min(y);
             max_y = max_y.max(y);
         }
         Self::new(min_x, min_y, max_x - min_x, max_y - min_y)
+    }
+
+    pub(crate) fn from_path(path: &Path) -> Option<Self> {
+        let mut points = Vec::new();
+        for event in path.iter().flattened(FLATTENING_TOLERANCE) {
+            match event {
+                PathEvent::Begin { at } => points.push((at.x, at.y)),
+                PathEvent::Line { from, to } => {
+                    points.push((from.x, from.y));
+                    points.push((to.x, to.y));
+                }
+                PathEvent::End { first, last, .. } => {
+                    points.push((first.x, first.y));
+                    points.push((last.x, last.y));
+                }
+                PathEvent::Quadratic { .. } | PathEvent::Cubic { .. } => unreachable!(),
+            }
+        }
+        Self::from_points_iter(points)
     }
 
     pub(crate) fn from_mesh(mesh: &Mesh) -> Option<Self> {
@@ -315,13 +345,11 @@ fn resolve_linear_gradient(
     let y1 = resolve_gradient_position(element, "y1", "0%", units, bounds, viewport, Axis::Y);
     let x2 = resolve_gradient_position(element, "x2", "100%", units, bounds, viewport, Axis::X);
     let y2 = resolve_gradient_position(element, "y2", "0%", units, bounds, viewport, Axis::Y);
-    let mut server = gradient_server(
+    gradient_server(
         PAINT_LINEAR_GRADIENT,
         [x1, y1, x2, y2],
         collect_stops(document, node_id, opacity),
-    );
-    server.meta[0] = PAINT_LINEAR_GRADIENT;
-    server
+    )
 }
 
 fn resolve_radial_gradient(
@@ -436,19 +464,19 @@ fn collect_stops(document: &Document, node_id: NodeId, opacity: f32) -> Vec<Grad
     stops
 }
 
-fn presentation_or_style(element: &Element, name: &str) -> Option<String> {
+fn presentation_or_style<'a>(element: &'a Element, name: &str) -> Option<Cow<'a, str>> {
     element
         .attributes
         .get(name)
-        .cloned()
-        .or_else(|| style_property(element, name))
+        .map(|value| Cow::Borrowed(value.as_str()))
+        .or_else(|| style_property(element, name).map(Cow::Borrowed))
 }
 
-fn style_property(element: &Element, name: &str) -> Option<String> {
+fn style_property<'a>(element: &'a Element, name: &str) -> Option<&'a str> {
     element.attributes.get("style").and_then(|style| {
         style.split(';').find_map(|declaration| {
             let (property, value) = declaration.split_once(':')?;
-            (property.trim() == name).then(|| value.trim().to_owned())
+            (property.trim() == name).then(|| value.trim())
         })
     })
 }
