@@ -33,9 +33,9 @@ use thiserror::Error;
 use wgpu::util::DeviceExt;
 
 use crate::filters::{
-    ColorMatrix, ComponentTransfer, ConvolveMatrix, DisplacementMap, DropShadow, FilterImage,
-    FilterInput, FilterPrimitive, FilterPrimitiveKind, Flood, GaussianBlur, ImageRect, LightSource,
-    Lighting, Morphology, Turbulence,
+    Blend, ColorMatrix, ComponentTransfer, Composite, ConvolveMatrix, DisplacementMap, DropShadow,
+    FilterImage, FilterInput, FilterPrimitive, FilterPrimitiveKind, Flood, GaussianBlur, ImageRect,
+    LightSource, Lighting, Merge, Morphology, Offset, PrimitiveSubregion, Turbulence,
 };
 use crate::mesh::VERTEX_ATTRIBUTES;
 use crate::scene::{build_render_plan, RenderOp};
@@ -165,6 +165,37 @@ impl FilterUniform {
 /// `result`, or `Default` for the very first primitive — fall back to
 /// `SourceGraphic`, matching SVG's "if the value is unresolved, use
 /// SourceGraphic" behaviour.
+/// Resolve a primitive input reference to the UV-space subregion where the
+/// upstream paint actually lives. SVG pseudo-inputs (`SourceGraphic`,
+/// `SourceAlpha`, the background-image / paint approximations) span the
+/// full filter region; a named or default reference uses the upstream
+/// primitive's resolved output subregion. Unresolvable references fall back
+/// to the full filter region to keep the downstream primitive sampling
+/// against well-defined UVs.
+fn resolve_input_uv(
+    input: &FilterInput,
+    prev_index: Option<usize>,
+    named: &BTreeMap<&str, usize>,
+    output_uv: &[[f32; 4]],
+) -> [f32; 4] {
+    let pick = |i: usize| output_uv.get(i).copied().unwrap_or([0.0, 0.0, 1.0, 1.0]);
+    match input {
+        FilterInput::Default => prev_index.map_or([0.0, 0.0, 1.0, 1.0], pick),
+        FilterInput::Named(name) => named.get(name.as_str()).copied().map_or(
+            // Unknown named input falls back to SourceGraphic — same as
+            // `resolve_input` — so the UV match the texture choice.
+            [0.0, 0.0, 1.0, 1.0],
+            pick,
+        ),
+        FilterInput::SourceGraphic
+        | FilterInput::SourceAlpha
+        | FilterInput::BackgroundImage
+        | FilterInput::BackgroundAlpha
+        | FilterInput::FillPaint
+        | FilterInput::StrokePaint => [0.0, 0.0, 1.0, 1.0],
+    }
+}
+
 fn resolve_input<'a>(
     input: &FilterInput,
     prev_index: Option<usize>,
@@ -180,6 +211,17 @@ fn resolve_input<'a>(
         },
         FilterInput::SourceGraphic => &source.view,
         FilterInput::SourceAlpha => &source_alpha.view,
+        // svg3 doesn't yet capture the destination surface for
+        // `BackgroundImage` (needs `enable-background="new"` semantics).
+        // Resolving to `SourceGraphic` keeps a chain using the pseudo-input
+        // running rather than no-op'ing, and is consistent with the spec's
+        // fallback ("undefined" -> implementation-defined).
+        FilterInput::BackgroundImage => &source.view,
+        FilterInput::BackgroundAlpha => &source_alpha.view,
+        // `FillPaint` / `StrokePaint` are paint-server pseudo-inputs.
+        // Without a gradient/pattern resolver, they fall back to
+        // `SourceGraphic` so the primitive still runs.
+        FilterInput::FillPaint | FilterInput::StrokePaint => &source.view,
         FilterInput::Named(name) => match named.get(name.as_str()) {
             Some(i) => &outputs[*i].view,
             None => &source.view,
@@ -287,6 +329,7 @@ fn convolve_uniform(extent: wgpu::Extent3d, c: ConvolveMatrix) -> FilterUniform 
     uniform.matrix_r2 = [c.kernel[2][0], c.kernel[2][1], c.kernel[2][2], 0.0];
     uniform.matrix_col4 = [c.divisor, c.bias, 0.0, 0.0];
     uniform.flags = if c.preserve_alpha { 1 } else { 0 };
+    uniform.mode = c.edge_mode;
     uniform
 }
 
@@ -329,6 +372,46 @@ fn split_transfer_table(table: &[f32; 8]) -> ([f32; 4], [f32; 4]) {
         [table[0], table[1], table[2], table[3]],
         [table[4], table[5], table[6], table[7]],
     )
+}
+
+fn offset_uniform(extent: wgpu::Extent3d, offset: Offset) -> FilterUniform {
+    let mut uniform = FilterUniform::empty(extent.width, extent.height);
+    // The shader subtracts `direction` from the sampling UV, so a positive
+    // `dx` translates the input to the right — same sign convention as the
+    // drop-shadow alpha pass.
+    uniform.direction = [
+        offset.dx * uniform.texel_size[0],
+        offset.dy * uniform.texel_size[1],
+    ];
+    uniform
+}
+
+fn blend_uniform(extent: wgpu::Extent3d, b: Blend) -> FilterUniform {
+    let mut uniform = FilterUniform::empty(extent.width, extent.height);
+    uniform.mode = b.mode;
+    uniform
+}
+
+fn fe_composite_uniform(extent: wgpu::Extent3d, c: Composite) -> FilterUniform {
+    let mut uniform = FilterUniform::empty(extent.width, extent.height);
+    uniform.mode = c.op;
+    uniform.extra = c.k;
+    uniform
+}
+
+fn tile_uniform(extent: wgpu::Extent3d, source_uv: [f32; 4]) -> FilterUniform {
+    let mut uniform = FilterUniform::empty(extent.width, extent.height);
+    // `source_uv = [x, y, w, h]` is the input primitive's subregion in UV
+    // space (full texture `[0, 0, 1, 1]` when the upstream primitive has no
+    // authored subregion). The fragment shader wraps UVs inside this rect.
+    uniform.extra = source_uv;
+    uniform
+}
+
+fn subregion_clip_uniform(extent: wgpu::Extent3d, uv: [f32; 4]) -> FilterUniform {
+    let mut uniform = FilterUniform::empty(extent.width, extent.height);
+    uniform.extra = uv;
+    uniform
 }
 
 impl TransformUniform {
@@ -452,6 +535,12 @@ pub struct Renderer {
     displacement_pipeline: wgpu::RenderPipeline,
     convolve_pipeline: wgpu::RenderPipeline,
     component_transfer_pipeline: wgpu::RenderPipeline,
+    offset_pipeline: wgpu::RenderPipeline,
+    blend_pipeline: wgpu::RenderPipeline,
+    fe_composite_pipeline: wgpu::RenderPipeline,
+    merge_step_pipeline: wgpu::RenderPipeline,
+    tile_pipeline: wgpu::RenderPipeline,
+    subregion_clip_pipeline: wgpu::RenderPipeline,
     filter_sampler: wgpu::Sampler,
     image_sampler: wgpu::Sampler,
     image_cache: Mutex<BTreeMap<String, Arc<GpuImage>>>,
@@ -604,6 +693,60 @@ impl Renderer {
             None,
             None,
         );
+        let offset_pipeline = build_filter_pipeline(
+            &device,
+            format,
+            &filter_bind_group_layout,
+            "svg3 feOffset pipeline",
+            "fs_offset",
+            None,
+            None,
+        );
+        let blend_pipeline = build_filter_pipeline(
+            &device,
+            format,
+            &filter_bind_group_layout,
+            "svg3 feBlend pipeline",
+            "fs_blend",
+            None,
+            None,
+        );
+        let fe_composite_pipeline = build_filter_pipeline(
+            &device,
+            format,
+            &filter_bind_group_layout,
+            "svg3 feComposite pipeline",
+            "fs_fe_composite",
+            None,
+            None,
+        );
+        let merge_step_pipeline = build_filter_pipeline(
+            &device,
+            format,
+            &filter_bind_group_layout,
+            "svg3 feMerge step pipeline",
+            "fs_merge_step",
+            None,
+            None,
+        );
+        let tile_pipeline = build_filter_pipeline(
+            &device,
+            format,
+            &filter_bind_group_layout,
+            "svg3 feTile pipeline",
+            "fs_tile",
+            None,
+            None,
+        );
+        let subregion_clip_pipeline = build_filter_pipeline(
+            &device,
+            format,
+            &filter_bind_group_layout,
+            "svg3 primitive subregion clip pipeline",
+            "fs_subregion_clip",
+            None,
+            None,
+        );
         // Filter passes need bilinear sampling for fractional displacements
         // (feDisplacementMap, feConvolveMatrix kernel taps); the blur kernel
         // is fine with either filter mode because it samples on the integer
@@ -664,6 +807,12 @@ impl Renderer {
             displacement_pipeline,
             convolve_pipeline,
             component_transfer_pipeline,
+            offset_pipeline,
+            blend_pipeline,
+            fe_composite_pipeline,
+            merge_step_pipeline,
+            tile_pipeline,
+            subregion_clip_pipeline,
             filter_sampler,
             image_sampler,
             image_cache: Mutex::new(BTreeMap::new()),
@@ -926,13 +1075,18 @@ impl Renderer {
                         );
                     }
                 }
-                RenderOp::Filter { mesh, primitives } => {
+                RenderOp::Filter {
+                    mesh,
+                    primitives,
+                    clip_uv,
+                } => {
                     self.encode_filter_chain(
                         encoder,
                         target,
                         &depth.view,
                         mesh,
                         primitives,
+                        *clip_uv,
                         viewport,
                         view_projection,
                         target_extent,
@@ -982,6 +1136,7 @@ impl Renderer {
         target_depth: &wgpu::TextureView,
         mesh: &Mesh,
         primitives: &[FilterPrimitive],
+        clip_uv: Option<[f32; 4]>,
         viewport: Viewport,
         view_projection: Mat4,
         extent: wgpu::Extent3d,
@@ -1043,6 +1198,34 @@ impl Renderer {
             );
         }
 
+        // SVG 2 render order: clip-path applies BEFORE filter, so we clip
+        // the source texture here, ahead of every primitive pass.
+        if let Some(uv) = clip_uv {
+            let clip_uniform = subregion_clip_uniform(extent, uv);
+            let clip_scratch = self.create_filter_texture(extent, "svg3 clip-path stage");
+            // Stage source into scratch.
+            let passthrough = FilterUniform::passthrough(extent.width, extent.height);
+            self.encode_filter_pass(
+                encoder,
+                &self.color_matrix_pipeline,
+                &source.view,
+                &source.view,
+                &clip_scratch.view,
+                &passthrough,
+                "svg3 clip-path source stage",
+            );
+            // Clip scratch back into source.
+            self.encode_filter_pass(
+                encoder,
+                &self.subregion_clip_pipeline,
+                &clip_scratch.view,
+                &clip_scratch.view,
+                &source.view,
+                &clip_uniform,
+                "svg3 clip-path apply",
+            );
+        }
+
         // SourceAlpha = (0, 0, 0, src.a). Derive it through the colour-matrix
         // pipeline once — primitives that don't reference SourceAlpha still
         // pay this one pass, but the cost is trivial and the code stays
@@ -1067,35 +1250,82 @@ impl Renderer {
 
         let mut named: BTreeMap<&str, usize> = BTreeMap::new();
         let mut prev_index: Option<usize> = None;
+        // Resolved UV subregion of each primitive's *output*. `[0, 0, 1, 1]`
+        // (the full filter region) when the primitive has no authored
+        // `x/y/width/height`. Used by `feTile` to wrap inside the input
+        // primitive's actual paint rect rather than the whole texture.
+        let mut output_uv: Vec<[f32; 4]> = Vec::with_capacity(primitives.len());
         for (i, primitive) in primitives.iter().enumerate() {
-            let in1_view = resolve_input(
-                &primitive.input,
-                prev_index,
-                &source,
-                &source_alpha,
-                &outputs,
-                &named,
-            );
-            let in2_view = resolve_input(
-                &primitive.input2,
-                prev_index,
-                &source,
-                &source_alpha,
-                &outputs,
-                &named,
-            );
             let output_view = &outputs[i].view;
-            self.encode_primitive(
-                encoder,
-                primitive,
-                in1_view,
-                in2_view,
-                output_view,
-                &scratch.view,
-                viewport,
-                view_projection,
-                extent,
-            );
+            if let FilterPrimitiveKind::Merge(merge) = &primitive.kind {
+                self.encode_merge(
+                    encoder,
+                    merge,
+                    primitive,
+                    prev_index,
+                    &source,
+                    &source_alpha,
+                    &outputs,
+                    &named,
+                    output_view,
+                    &scratch.view,
+                    extent,
+                );
+            } else {
+                let in1_view = resolve_input(
+                    &primitive.input,
+                    prev_index,
+                    &source,
+                    &source_alpha,
+                    &outputs,
+                    &named,
+                );
+                let in2_view = resolve_input(
+                    &primitive.input2,
+                    prev_index,
+                    &source,
+                    &source_alpha,
+                    &outputs,
+                    &named,
+                );
+                // For `feTile` the source rect is the *input* primitive's
+                // resolved subregion, not the full texture. Default-input
+                // ties to the previous primitive; named-input ties to the
+                // matching `result`; pseudo-inputs (SourceGraphic, etc.)
+                // span the full filter region.
+                let input_uv = resolve_input_uv(&primitive.input, prev_index, &named, &output_uv);
+                self.encode_primitive(
+                    encoder,
+                    primitive,
+                    in1_view,
+                    in2_view,
+                    output_view,
+                    &scratch.view,
+                    input_uv,
+                    viewport,
+                    view_projection,
+                    extent,
+                );
+            }
+            // SVG 1.1 §15.5: clip the primitive's output to its authored
+            // x/y/width/height subregion. Pixels outside are transparent
+            // black. Skipped when the primitive has no subregion (the spec
+            // default = the filter region).
+            let primitive_uv = if let Some(subregion) = primitive.subregion {
+                let uv = subregion.to_uv(viewport);
+                self.encode_subregion_clip(
+                    encoder,
+                    output_view,
+                    &scratch.view,
+                    subregion,
+                    viewport,
+                    extent,
+                );
+                uv
+            } else {
+                [0.0, 0.0, 1.0, 1.0]
+            };
+            output_uv.push(primitive_uv);
             if let Some(name) = primitive.result.as_deref() {
                 named.insert(name, i);
             }
@@ -1123,7 +1353,9 @@ impl Renderer {
 
     /// Encode one primitive's GPU pass(es). Reads `in1` / `in2`, writes to
     /// `output`, and may use `scratch` as an internal bounce buffer for
-    /// multi-pass primitives.
+    /// multi-pass primitives. `input_uv` is the resolved UV-space subregion
+    /// of the primitive's `in` reference — used by `feTile` to wrap inside
+    /// the upstream paint rect rather than the full texture.
     #[allow(clippy::too_many_arguments)]
     fn encode_primitive(
         &self,
@@ -1133,6 +1365,7 @@ impl Renderer {
         in2: &wgpu::TextureView,
         output: &wgpu::TextureView,
         scratch: &wgpu::TextureView,
+        input_uv: [f32; 4],
         viewport: Viewport,
         view_projection: Mat4,
         extent: wgpu::Extent3d,
@@ -1255,6 +1488,206 @@ impl Renderer {
                     "svg3 feComponentTransfer pass",
                 );
             }
+            FilterPrimitiveKind::Offset(o) => {
+                let uniform = offset_uniform(extent, *o);
+                self.encode_filter_pass(
+                    encoder,
+                    &self.offset_pipeline,
+                    in1,
+                    in2,
+                    output,
+                    &uniform,
+                    "svg3 feOffset pass",
+                );
+            }
+            FilterPrimitiveKind::Blend(b) => {
+                // SVG `feBlend`: in (top) over in2 (bottom). The shader uses
+                // in1=src, in2=dst so we pass the natural primitive bindings.
+                let uniform = blend_uniform(extent, *b);
+                self.encode_filter_pass(
+                    encoder,
+                    &self.blend_pipeline,
+                    in1,
+                    in2,
+                    output,
+                    &uniform,
+                    "svg3 feBlend pass",
+                );
+            }
+            FilterPrimitiveKind::Composite(c) => {
+                let uniform = fe_composite_uniform(extent, *c);
+                self.encode_filter_pass(
+                    encoder,
+                    &self.fe_composite_pipeline,
+                    in1,
+                    in2,
+                    output,
+                    &uniform,
+                    "svg3 feComposite pass",
+                );
+            }
+            FilterPrimitiveKind::Tile => {
+                let uniform = tile_uniform(extent, input_uv);
+                self.encode_filter_pass(
+                    encoder,
+                    &self.tile_pipeline,
+                    in1,
+                    in2,
+                    output,
+                    &uniform,
+                    "svg3 feTile pass",
+                );
+            }
+            FilterPrimitiveKind::Merge(_) => {
+                // `Merge` is dispatched at the chain level — see
+                // `encode_filter_chain` — because it needs to consume an
+                // arbitrary list of named inputs.
+                unreachable!("feMerge dispatched at chain level");
+            }
+        }
+    }
+
+    /// Clip a primitive's output to its authored subregion (SVG 1.1 §15.5).
+    /// Copies `output` into `scratch` via the passthrough pipeline, then
+    /// runs `fs_subregion_clip` from `scratch` back into `output`. Two
+    /// passes, but the helper is only invoked for primitives that actually
+    /// authored an `x/y/width/height`.
+    fn encode_subregion_clip(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        output: &wgpu::TextureView,
+        scratch: &wgpu::TextureView,
+        subregion: PrimitiveSubregion,
+        viewport: Viewport,
+        extent: wgpu::Extent3d,
+    ) {
+        // Stage the current `output` into `scratch` so the clip pass can
+        // sample it.
+        let passthrough = FilterUniform::passthrough(extent.width, extent.height);
+        self.encode_filter_pass(
+            encoder,
+            &self.color_matrix_pipeline,
+            output,
+            output,
+            scratch,
+            &passthrough,
+            "svg3 subregion clip stage",
+        );
+        let uniform = subregion_clip_uniform(extent, subregion.to_uv(viewport));
+        self.encode_filter_pass(
+            encoder,
+            &self.subregion_clip_pipeline,
+            scratch,
+            scratch,
+            output,
+            &uniform,
+            "svg3 subregion clip",
+        );
+    }
+
+    /// Composite the ordered `<feMergeNode>` inputs of an `<feMerge>` into
+    /// `output` in painter (source-over) order. SVG 1.1 §15.13: nodes are
+    /// painted in document order, each on top of the accumulated result.
+    ///
+    /// Algorithm: clear `output` to transparent, then for each merge node
+    /// pingpong between `output` and `scratch`, running the `fs_merge_step`
+    /// shader with `in1 = node`, `in2 = previous accumulator`.
+    #[allow(clippy::too_many_arguments)]
+    fn encode_merge(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        merge: &Merge,
+        primitive: &FilterPrimitive,
+        prev_index: Option<usize>,
+        source: &FilterTexture,
+        source_alpha: &FilterTexture,
+        outputs: &[FilterTexture],
+        named: &BTreeMap<&str, usize>,
+        output: &wgpu::TextureView,
+        scratch: &wgpu::TextureView,
+        extent: wgpu::Extent3d,
+    ) {
+        // SVG: a `<feMerge>` with no `<feMergeNode>` children is identity on
+        // the primitive's own `in`. The resolved primitive carries that
+        // input in `FilterPrimitive::input`.
+        let resolved_nodes: Vec<&wgpu::TextureView> = if merge.nodes.is_empty() {
+            vec![resolve_input(
+                &primitive.input,
+                prev_index,
+                source,
+                source_alpha,
+                outputs,
+                named,
+            )]
+        } else {
+            merge
+                .nodes
+                .iter()
+                .map(|input| resolve_input(input, prev_index, source, source_alpha, outputs, named))
+                .collect()
+        };
+
+        clear_target(
+            encoder,
+            output,
+            wgpu::Color::TRANSPARENT,
+            "svg3 feMerge clear",
+        );
+        // Painter order: node[0] is painted first (bottom), node[n-1] last
+        // (top). For each node we run `merge_step(in1=node, in2=accum)` →
+        // `dst = node + accum * (1 - node.a)`. That's source-over with the
+        // node ON TOP — but we want each *later* node on top, so accumulate
+        // with `in1 = node`, `in2 = accumulator`.
+        //
+        // We ping-pong: even nodes write into `scratch`, odd nodes into
+        // `output`, leaving the *last write* in `output` when the count is
+        // odd; an extra copy handles the even case.
+        let uniform = FilterUniform::composite(extent.width, extent.height);
+        let mut accum_in_output = false;
+        for (i, node_view) in resolved_nodes.iter().enumerate() {
+            let (dst_view, accum_view): (&wgpu::TextureView, &wgpu::TextureView) =
+                if accum_in_output {
+                    (scratch, output)
+                } else {
+                    (output, scratch)
+                };
+            // First iteration: accum is the cleared `output` (or, if we
+            // ping-pong below, we need to be sure scratch starts cleared
+            // too). Clear scratch before each "scratch is the accumulator"
+            // read so the very first step sees a transparent backdrop.
+            if i == 0 {
+                clear_target(
+                    encoder,
+                    scratch,
+                    wgpu::Color::TRANSPARENT,
+                    "svg3 feMerge scratch clear",
+                );
+            }
+            self.encode_filter_pass(
+                encoder,
+                &self.merge_step_pipeline,
+                node_view,
+                accum_view,
+                dst_view,
+                &uniform,
+                "svg3 feMerge step",
+            );
+            accum_in_output = !accum_in_output;
+        }
+        if !accum_in_output {
+            // The last write landed in `scratch`. Copy it into `output` via
+            // a passthrough so the caller's "output holds this primitive's
+            // result" invariant holds.
+            let passthrough = FilterUniform::passthrough(extent.width, extent.height);
+            self.encode_filter_pass(
+                encoder,
+                &self.color_matrix_pipeline,
+                scratch,
+                scratch,
+                output,
+                &passthrough,
+                "svg3 feMerge passthrough",
+            );
         }
     }
 

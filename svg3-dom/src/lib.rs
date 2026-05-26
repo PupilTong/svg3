@@ -45,6 +45,21 @@ pub enum ElementKind {
     Path,
     /// Filter definition container (SVG 1.1 `<filter>`).
     Filter,
+    /// Clip-path definition container (SVG 1.1 `<clipPath>`).
+    ClipPath,
+    /// Mask definition container (SVG 1.1 `<mask>`).
+    Mask,
+    /// Linear gradient paint server (SVG 1.1 `<linearGradient>`).
+    LinearGradient,
+    /// Radial gradient paint server (SVG 1.1 `<radialGradient>`).
+    RadialGradient,
+    /// Gradient stop (SVG 1.1 `<stop>`).
+    Stop,
+    /// Pattern paint server (SVG 1.1 `<pattern>`).
+    Pattern,
+    /// Foreign content container (SVG 1.1 `<foreignObject>`). svg3 does not
+    /// host HTML, so foreignObject parses but renders as empty.
+    ForeignObject,
     /// Gaussian blur filter primitive (SVG 1.1 `<feGaussianBlur>`).
     FeGaussianBlur,
     /// Image filter primitive (SVG 1.1 `<feImage>`).
@@ -69,6 +84,19 @@ pub enum ElementKind {
     FeConvolveMatrix,
     /// Component transfer filter primitive (SVG 1.1 `<feComponentTransfer>`).
     FeComponentTransfer,
+    /// Translate-in-pixel-space filter primitive (SVG 1.1 `<feOffset>`).
+    FeOffset,
+    /// Merge multiple named inputs in painter order (SVG 1.1 `<feMerge>`).
+    FeMerge,
+    /// One named input in a `<feMerge>` chain (SVG 1.1 `<feMergeNode>`).
+    FeMergeNode,
+    /// Blend two inputs by mode (SVG 1.1 `<feBlend>`).
+    FeBlend,
+    /// Composite two inputs by Porter-Duff operator or arithmetic (SVG 1.1
+    /// `<feComposite>`).
+    FeComposite,
+    /// Tile an input across the filter region (SVG 1.1 `<feTile>`).
+    FeTile,
     /// Per-channel transfer function for the R channel of `<feComponentTransfer>`.
     FeFuncR,
     /// Per-channel transfer function for the G channel of `<feComponentTransfer>`.
@@ -116,6 +144,13 @@ impl ElementKind {
             "line" => Self::Line,
             "path" => Self::Path,
             "filter" => Self::Filter,
+            "clipPath" => Self::ClipPath,
+            "mask" => Self::Mask,
+            "linearGradient" => Self::LinearGradient,
+            "radialGradient" => Self::RadialGradient,
+            "stop" => Self::Stop,
+            "pattern" => Self::Pattern,
+            "foreignObject" => Self::ForeignObject,
             "feGaussianBlur" => Self::FeGaussianBlur,
             "feImage" => Self::FeImage,
             "feColorMatrix" => Self::FeColorMatrix,
@@ -128,6 +163,12 @@ impl ElementKind {
             "feDisplacementMap" => Self::FeDisplacementMap,
             "feConvolveMatrix" => Self::FeConvolveMatrix,
             "feComponentTransfer" => Self::FeComponentTransfer,
+            "feOffset" => Self::FeOffset,
+            "feMerge" => Self::FeMerge,
+            "feMergeNode" => Self::FeMergeNode,
+            "feBlend" => Self::FeBlend,
+            "feComposite" => Self::FeComposite,
+            "feTile" => Self::FeTile,
             "feFuncR" => Self::FeFuncR,
             "feFuncG" => Self::FeFuncG,
             "feFuncB" => Self::FeFuncB,
@@ -157,6 +198,13 @@ impl ElementKind {
             Self::Line => "line",
             Self::Path => "path",
             Self::Filter => "filter",
+            Self::ClipPath => "clipPath",
+            Self::Mask => "mask",
+            Self::LinearGradient => "linearGradient",
+            Self::RadialGradient => "radialGradient",
+            Self::Stop => "stop",
+            Self::Pattern => "pattern",
+            Self::ForeignObject => "foreignObject",
             Self::FeGaussianBlur => "feGaussianBlur",
             Self::FeImage => "feImage",
             Self::FeColorMatrix => "feColorMatrix",
@@ -169,6 +217,12 @@ impl ElementKind {
             Self::FeDisplacementMap => "feDisplacementMap",
             Self::FeConvolveMatrix => "feConvolveMatrix",
             Self::FeComponentTransfer => "feComponentTransfer",
+            Self::FeOffset => "feOffset",
+            Self::FeMerge => "feMerge",
+            Self::FeMergeNode => "feMergeNode",
+            Self::FeBlend => "feBlend",
+            Self::FeComposite => "feComposite",
+            Self::FeTile => "feTile",
             Self::FeFuncR => "feFuncR",
             Self::FeFuncG => "feFuncG",
             Self::FeFuncB => "feFuncB",
@@ -484,6 +538,18 @@ mod tests {
             ElementKind::from_tag("feComponentTransfer"),
             ElementKind::FeComponentTransfer
         );
+        assert_eq!(ElementKind::from_tag("feOffset"), ElementKind::FeOffset);
+        assert_eq!(ElementKind::from_tag("feMerge"), ElementKind::FeMerge);
+        assert_eq!(
+            ElementKind::from_tag("feMergeNode"),
+            ElementKind::FeMergeNode
+        );
+        assert_eq!(ElementKind::from_tag("feBlend"), ElementKind::FeBlend);
+        assert_eq!(
+            ElementKind::from_tag("feComposite"),
+            ElementKind::FeComposite
+        );
+        assert_eq!(ElementKind::from_tag("feTile"), ElementKind::FeTile);
         assert_eq!(ElementKind::from_tag("feFuncR"), ElementKind::FeFuncR);
         assert_eq!(ElementKind::from_tag("feFuncA"), ElementKind::FeFuncA);
         assert_eq!(

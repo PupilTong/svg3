@@ -444,6 +444,29 @@ fn fs_displacement(in: VertexOutput) -> @location(0) vec4<f32> {
 
 // ---- feConvolveMatrix -----------------------------------------------------
 
+// SVG 1.1 §15.10 `edgeMode` — keep in sync with `EDGE_MODE_*` in `filters.rs`.
+const EDGE_MODE_DUPLICATE: u32 = 0u;
+const EDGE_MODE_WRAP: u32 = 1u;
+const EDGE_MODE_NONE: u32 = 2u;
+
+/// Sample the source texture with the requested `edgeMode` handling. The
+/// renderer's sampler is `ClampToEdge`, which already implements
+/// "duplicate"; the other two modes need an explicit out-of-bounds check.
+fn sample_with_edge_mode(uv: vec2<f32>, mode: u32) -> vec4<f32> {
+    if (mode == EDGE_MODE_NONE) {
+        if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+            return vec4<f32>(0.0);
+        }
+        return sample_in1(uv);
+    }
+    if (mode == EDGE_MODE_WRAP) {
+        let wrapped = fract(uv - floor(uv));
+        return sample_in1(wrapped);
+    }
+    // EDGE_MODE_DUPLICATE: the ClampToEdge sampler does the right thing.
+    return sample_in1(uv);
+}
+
 @fragment
 fn fs_convolve(in: VertexOutput) -> @location(0) vec4<f32> {
     let row0 = filter_params.matrix_r0;
@@ -452,6 +475,7 @@ fn fs_convolve(in: VertexOutput) -> @location(0) vec4<f32> {
     let divisor = filter_params.matrix_col4.x;
     let bias = filter_params.matrix_col4.y;
     let preserve_alpha = filter_params.flags == 1u;
+    let edge_mode = filter_params.mode;
     let tx = filter_params.texel_size.x;
     let ty = filter_params.texel_size.y;
 
@@ -468,7 +492,7 @@ fn fs_convolve(in: VertexOutput) -> @location(0) vec4<f32> {
         row2.x, row2.y, row2.z,
     );
     for (var i = 0u; i < 9u; i = i + 1u) {
-        acc += sample_in1(in.uv + offsets[i]) * weights[i];
+        acc += sample_with_edge_mode(in.uv + offsets[i], edge_mode) * weights[i];
     }
     var result = acc / divisor + vec4<f32>(bias);
     if (preserve_alpha) {
@@ -559,4 +583,181 @@ fn fs_component_transfer(in: VertexOutput) -> @location(0) vec4<f32> {
     );
     let result = clamp(vec4<f32>(r, g, b, a), vec4<f32>(0.0), vec4<f32>(1.0));
     return premultiply(result);
+}
+
+// ---- feOffset -------------------------------------------------------------
+//
+// SVG 1.1 §15.16: shift the input by `(dx, dy)` filter pixels. `direction`
+// carries the *UV-space* offset (already converted from filter-pixel space
+// by the renderer-side uniform builder). Samples outside the source are
+// clamped to the edge by the filter sampler, which would smear the source's
+// edge across the offset region — undesirable. We replicate the spec's
+// "transparent black outside source" by explicitly returning transparent
+// outside the [0,1] UV box.
+
+@fragment
+fn fs_offset(in: VertexOutput) -> @location(0) vec4<f32> {
+    let uv = in.uv - filter_params.direction;
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+        return vec4<f32>(0.0);
+    }
+    return sample_in1(uv);
+}
+
+// ---- feBlend --------------------------------------------------------------
+//
+// SVG 1.1 §15.7: `result = src.rgb * (1 - dst.a) + dst.rgb * (1 - src.a) + f(src, dst, mode)`.
+// The blend-mode-specific term lives in `blend_color`. Both inputs are
+// premultiplied; the spec describes the math on straight-alpha values, so we
+// unpremultiply first, then re-premultiply the result.
+
+fn blend_normal(s: vec3<f32>, d: vec3<f32>) -> vec3<f32> {
+    return s;
+}
+
+fn blend_multiply(s: vec3<f32>, d: vec3<f32>) -> vec3<f32> {
+    return s * d;
+}
+
+fn blend_screen(s: vec3<f32>, d: vec3<f32>) -> vec3<f32> {
+    return s + d - s * d;
+}
+
+fn blend_darken(s: vec3<f32>, d: vec3<f32>) -> vec3<f32> {
+    return min(s, d);
+}
+
+fn blend_lighten(s: vec3<f32>, d: vec3<f32>) -> vec3<f32> {
+    return max(s, d);
+}
+
+@fragment
+fn fs_blend(in: VertexOutput) -> @location(0) vec4<f32> {
+    // Filter targets are premultiplied; the blend math operates on straight
+    // RGB but the linear-mixing terms below need to keep the result
+    // premultiplied so downstream primitives and the final composite see a
+    // valid premultiplied texel.
+    let src = sample_in1(in.uv);
+    let dst = sample_in2(in.uv);
+    let s = unpremultiply(src);
+    let d = unpremultiply(dst);
+
+    var blended: vec3<f32>;
+    let mode = filter_params.mode;
+    if (mode == 1u) {
+        blended = blend_multiply(s.rgb, d.rgb);
+    } else if (mode == 2u) {
+        blended = blend_screen(s.rgb, d.rgb);
+    } else if (mode == 3u) {
+        blended = blend_darken(s.rgb, d.rgb);
+    } else if (mode == 4u) {
+        blended = blend_lighten(s.rgb, d.rgb);
+    } else {
+        blended = blend_normal(s.rgb, d.rgb);
+    }
+
+    // SVG 1.1 §15.7, written on premultiplied colour so the output stays
+    // premultiplied:
+    //   Co = (1 - αb) * Ca + (1 - αa) * Cb + αa * αb * B(Ca/αa, Cb/αb)
+    //   αo = αa + αb - αa * αb
+    // The blend function `B` operates on straight RGB (`blended` above);
+    // the linear terms use `src.rgb` and `dst.rgb` (already premultiplied).
+    let rgb = (1.0 - dst.a) * src.rgb + (1.0 - src.a) * dst.rgb + src.a * dst.a * blended;
+    let a = src.a + dst.a - src.a * dst.a;
+    return clamp(vec4<f32>(rgb, a), vec4<f32>(0.0), vec4<f32>(1.0));
+}
+
+// ---- feComposite ----------------------------------------------------------
+//
+// SVG 1.1 §15.6: Porter-Duff `over | in | out | atop | xor`, plus the
+// arithmetic mode `k1*src*dst + k2*src + k3*dst + k4`. The Porter-Duff math
+// is written on premultiplied colour; arithmetic uses straight colour.
+
+@fragment
+fn fs_fe_composite(in: VertexOutput) -> @location(0) vec4<f32> {
+    let src = sample_in1(in.uv);
+    let dst = sample_in2(in.uv);
+    let op = filter_params.mode;
+    var result: vec4<f32>;
+    if (op == 1u) {
+        // in: src * dst.a
+        result = src * dst.a;
+    } else if (op == 2u) {
+        // out: src * (1 - dst.a)
+        result = src * (1.0 - dst.a);
+    } else if (op == 3u) {
+        // atop: src * dst.a + dst * (1 - src.a)
+        result = src * dst.a + dst * (1.0 - src.a);
+    } else if (op == 4u) {
+        // xor: src * (1 - dst.a) + dst * (1 - src.a)
+        result = src * (1.0 - dst.a) + dst * (1.0 - src.a);
+    } else if (op == 5u) {
+        // arithmetic: result = k1*src*dst + k2*src + k3*dst + k4 (on straight RGB)
+        let s = unpremultiply(src);
+        let d = unpremultiply(dst);
+        let k1 = filter_params.extra.x;
+        let k2 = filter_params.extra.y;
+        let k3 = filter_params.extra.z;
+        let k4 = filter_params.extra.w;
+        let rgb = k1 * s.rgb * d.rgb + k2 * s.rgb + k3 * d.rgb + vec3<f32>(k4);
+        let alpha = clamp(k1 * s.a * d.a + k2 * s.a + k3 * d.a + k4, 0.0, 1.0);
+        result = vec4<f32>(clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0)) * alpha, alpha);
+    } else {
+        // over: src + dst * (1 - src.a)
+        result = src + dst * (1.0 - src.a);
+    }
+    return clamp(result, vec4<f32>(0.0), vec4<f32>(1.0));
+}
+
+// ---- feMerge --------------------------------------------------------------
+//
+// The renderer encodes `<feMerge>` as one source-over composite per child
+// node; this entry point composites `src` ON TOP OF `dst` and the renderer
+// drives it once per node. Same math as `fs_composite` op=over but with
+// inputs labelled by accumulation role.
+
+@fragment
+fn fs_merge_step(in: VertexOutput) -> @location(0) vec4<f32> {
+    let above = sample_in1(in.uv);
+    let below = sample_in2(in.uv);
+    let result = above + below * (1.0 - above.a);
+    return clamp(result, vec4<f32>(0.0), vec4<f32>(1.0));
+}
+
+// ---- Primitive subregion clip (SVG 1.1 §15.5) -----------------------------
+//
+// Run as a post-pass on a primitive's output when the primitive carries an
+// authored `x`/`y`/`width`/`height` subregion. `extra.xy` carries the
+// subregion's top-left in UV space and `extra.zw` carries its size. Pixels
+// outside the subregion are transparent black; inside they pass through.
+
+@fragment
+fn fs_subregion_clip(in: VertexOutput) -> @location(0) vec4<f32> {
+    let origin = filter_params.extra.xy;
+    let size = filter_params.extra.zw;
+    let inside = all(in.uv >= origin) && all(in.uv <= origin + size);
+    if (!inside) {
+        return vec4<f32>(0.0);
+    }
+    return sample_in1(in.uv);
+}
+
+// ---- feTile ---------------------------------------------------------------
+//
+// SVG 1.1 §15.27: tile the input subregion across the filter region. The
+// uniform's `extra.xy` carries the source rect's top-left in UV space and
+// `extra.zw` carries its size; both are computed by the renderer from the
+// upstream primitive's subregion (default = SourceGraphic = full target).
+// `fract()` would suffice for a 0..1 source, but a subregion-based tile must
+// wrap inside the rectangle.
+
+@fragment
+fn fs_tile(in: VertexOutput) -> @location(0) vec4<f32> {
+    let origin = filter_params.extra.xy;
+    let size = filter_params.extra.zw;
+    let safe_size = max(size, vec2<f32>(1e-6));
+    let local = (in.uv - origin) / safe_size;
+    let wrapped = fract(local - floor(local));
+    let uv = origin + wrapped * safe_size;
+    return sample_in1(uv);
 }
