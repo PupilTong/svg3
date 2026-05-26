@@ -120,7 +120,7 @@ pub(crate) fn tessellate_polygon(geo: &PolygonGeometry, color: [f32; 4]) -> Mesh
         .into_iter()
         .flat_map(|tri| tri.map(|index| index as u32))
         .collect();
-    Mesh { vertices, indices }
+    Mesh::new(vertices, indices)
 }
 
 /// Tessellate a resolved polygon's stroke into triangle geometry.

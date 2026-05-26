@@ -206,10 +206,7 @@ fn tessellate_plain_stroke(path: &Path, style: &StrokeStyle, color: [f32; 4]) ->
         return Mesh::default();
     }
 
-    Mesh {
-        vertices: buffers.vertices,
-        indices: buffers.indices,
-    }
+    Mesh::new(buffers.vertices, buffers.indices)
 }
 
 #[derive(Debug, Clone)]

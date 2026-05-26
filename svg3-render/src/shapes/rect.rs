@@ -150,15 +150,15 @@ pub(crate) fn to_path(geo: &RectGeometry) -> Path {
 }
 
 fn sharp_mesh(geo: &RectGeometry, color: [f32; 4]) -> Mesh {
-    Mesh {
-        vertices: vec![
+    Mesh::new(
+        vec![
             vertex(geo.x, geo.y, color),
             vertex(geo.x + geo.width, geo.y, color),
             vertex(geo.x + geo.width, geo.y + geo.height, color),
             vertex(geo.x, geo.y + geo.height, color),
         ],
-        indices: vec![0, 1, 2, 0, 2, 3],
-    }
+        vec![0, 1, 2, 0, 2, 3],
+    )
 }
 
 /// Tessellate a resolved rounded rectangle into an SDF-covered bounding quad.

@@ -172,6 +172,7 @@ pub(crate) fn tessellate_ellipsoid(geo: &EllipsoidGeometry, color: [f32; 4]) -> 
                 local: [0.0, 0.0],
                 params: [0.0; 4],
                 kind: KIND_SOLID,
+                paint_id: 0,
             });
         }
     }
@@ -192,7 +193,7 @@ pub(crate) fn tessellate_ellipsoid(geo: &EllipsoidGeometry, color: [f32; 4]) -> 
         }
     }
 
-    Mesh { vertices, indices }
+    Mesh::new(vertices, indices)
 }
 
 /// Parse a named SVG length attribute into a [`Length`], without resolving

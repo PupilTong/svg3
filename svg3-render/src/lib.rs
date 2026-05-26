@@ -4,10 +4,12 @@
 //! with [wgpu](https://crates.io/crates/wgpu).
 //!
 //! This milestone implements the SVG 1.1 `<rect>`, `<circle>`, `<ellipse>`,
-//! `<polygon>`, `<polyline>`, `<line>`, and `<path>` shapes, svg3's 3D
-//! `<cube>` and `<ellipsoid>` primitives, plus referenced `<filter>`
-//! elements composed from a multi-primitive chain executed end-to-end on
-//! the GPU. The supported primitives are `<feGaussianBlur>`,
+//! `<polygon>`, `<polyline>`, `<line>`, and `<path>` shapes, SVG paint
+//! servers (`<linearGradient>`, `<radialGradient>`, `<pattern>`, and
+//! `<stop>`), svg3's 3D `<cube>` and `<ellipsoid>` primitives, plus
+//! referenced `<filter>` elements composed from a multi-primitive chain
+//! executed end-to-end on the GPU. The supported primitives are
+//! `<feGaussianBlur>`,
 //! `<feImage>`, `<feColorMatrix>`, `<feTurbulence>`, `<feSpecularLighting>`,
 //! `<feDiffuseLighting>`, `<feMorphology>`, `<feFlood>`, `<feDropShadow>`,
 //! `<feDisplacementMap>`, `<feConvolveMatrix>`, and `<feComponentTransfer>`.
@@ -16,8 +18,9 @@
 //! lazily when a referenced filter paints and are sampled through
 //! `image.wgsl`. [`Renderer::encode_document`]
 //! is the single GPU entry point: it walks a parsed document, tessellates
-//! every supported shape, runs each referenced filter's primitive chain
-//! through offscreen ping/pong textures, and encodes the draws into a
+//! every supported shape, resolves referenced paint servers, runs each
+//! referenced filter's primitive chain through offscreen ping/pong textures,
+//! and encodes the draws into a
 //! caller-supplied [`wgpu::CommandEncoder`] / [`wgpu::TextureView`]. Both
 //! render paths are built on top of it:
 //! [`Renderer::render_to_image`] wraps it with offscreen-texture allocation,
@@ -44,15 +47,17 @@
 //!
 //! The crate is split into focused modules: `mesh` holds the [`Vertex`] /
 //! [`Mesh`] geometry model that shapes tessellate into; `shapes` resolves
-//! and tessellates each supported element; `scene` walks the document
-//! ([`build_scene`]); `camera` holds [`RenderConfig`] and the movable 3D
-//! [`Camera`]; `filters` resolves supported SVG filter definitions; and
-//! `renderer` owns the wgpu [`Renderer`], its [`GpuScene`] GPU buffers,
-//! filter post-processing pipelines, and headless [`Image`] readback.
+//! and tessellates each supported element; `paint` resolves SVG paint-server
+//! definitions; `scene` walks the document ([`build_scene`]); `camera` holds
+//! [`RenderConfig`] and the movable 3D [`Camera`]; `filters` resolves
+//! supported SVG filter definitions; and `renderer` owns the wgpu
+//! [`Renderer`], its [`GpuScene`] GPU buffers, filter post-processing
+//! pipelines, and headless [`Image`] readback.
 
 mod camera;
 mod filters;
 mod mesh;
+mod paint;
 mod renderer;
 mod scene;
 mod shapes;
