@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["svg3-dom", "svg3-style", "svg3-render", "svg3", "app-macos"]
+members = ["svg3", "app-macos"]
 
 [workspace.package]
 version = "0.1.0"
@@ -9,9 +9,6 @@ license = "MPL-2.0"
 
 [workspace.dependencies]
 # Internal crates
-svg3-dom = { path = "svg3-dom" }
-svg3-style = { path = "svg3-style" }
-svg3-render = { path = "svg3-render" }
 svg3 = { path = "svg3" }
 
 # Graphics
@@ -52,5 +49,5 @@ criterion = { package = "codspeed-criterion-compat", version = "4" }
 
 # Images / testing
 # `png` decodes embedded `<feImage>` PNG data URLs at render time and
-# encodes/decodes the golden images for svg3-render's snapshot tests.
+# encodes/decodes the golden images for svg3's snapshot tests.
 png = "0.18"

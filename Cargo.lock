@@ -157,8 +157,7 @@ dependencies = [
  "glam",
  "log",
  "pollster",
- "svg3-dom",
- "svg3-render",
+ "svg3",
  "wgpu",
  "winit",
 ]
@@ -2936,25 +2935,6 @@ dependencies = [
 name = "svg3"
 version = "0.1.0"
 dependencies = [
- "svg3-dom",
- "svg3-render",
- "svg3-style",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "svg3-dom"
-version = "0.1.0"
-dependencies = [
- "codspeed-criterion-compat",
- "quick-xml 0.40.1",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "svg3-render"
-version = "0.1.0"
-dependencies = [
  "base64",
  "bytemuck",
  "codspeed-criterion-compat",
@@ -2963,20 +2943,11 @@ dependencies = [
  "lyon_tessellation",
  "png",
  "pollster",
- "svg3-dom",
+ "quick-xml 0.40.1",
+ "stylo",
  "svgtypes",
  "thiserror 2.0.18",
  "wgpu",
-]
-
-[[package]]
-name = "svg3-style"
-version = "0.1.0"
-dependencies = [
- "log",
- "stylo",
- "svg3-dom",
- "thiserror 2.0.18",
 ]
 
 [[package]]

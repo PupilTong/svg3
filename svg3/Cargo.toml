@@ -5,7 +5,37 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-svg3-dom.workspace = true
-svg3-style.workspace = true
-svg3-render.workspace = true
+# Parsing
+base64.workspace = true
+quick-xml.workspace = true
+svgtypes.workspace = true
+
+# Style
+stylo.workspace = true
+
+# Rendering
+wgpu.workspace = true
+pollster.workspace = true
+bytemuck = { workspace = true, features = ["derive"] }
+glam.workspace = true
+lyon_tessellation.workspace = true
+png.workspace = true
+
+# Diagnostics
+log.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "parse"
+harness = false
+
+[[bench]]
+name = "tessellate"
+harness = false
+
+[[bench]]
+name = "render"
+harness = false
