@@ -34,7 +34,7 @@ const MAX_PATTERN_ITEMS: u32 = 8u;
 
 struct PaintServer {
     // [kind, stop_count, pattern_item_count, unused]
-    meta: vec4<u32>,
+    header: vec4<u32>,
     // linear: [x1, y1, x2, y2], radial: [cx, cy, r, 0],
     // pattern: [x, y, width, height]
     geometry: vec4<f32>,
@@ -131,7 +131,7 @@ fn stop_offset(paint: PaintServer, index: u32) -> f32 {
 }
 
 fn sample_gradient_stops(paint: PaintServer, t_unclamped: f32) -> vec4<f32> {
-    let count = min(paint.meta.y, MAX_GRADIENT_STOPS);
+    let count = min(paint.header.y, MAX_GRADIENT_STOPS);
     if (count == 0u) {
         return vec4<f32>(0.0);
     }
@@ -174,7 +174,7 @@ fn sample_pattern(paint: PaintServer, p: vec2<f32>) -> vec4<f32> {
         return vec4<f32>(0.0);
     }
 
-    let item_count = min(paint.meta.z, MAX_PATTERN_ITEMS);
+    let item_count = min(paint.header.z, MAX_PATTERN_ITEMS);
     let tile_size = tile.zw;
     let relative = p - tile.xy;
     let tile_p = relative - floor(relative / tile_size) * tile_size;
@@ -201,7 +201,7 @@ fn evaluate_paint(in: VertexOutput) -> vec4<f32> {
 
     let paint = paints[in.paint_id];
     let p = in.world_position.xy;
-    if (paint.meta.x == PAINT_LINEAR_GRADIENT) {
+    if (paint.header.x == PAINT_LINEAR_GRADIENT) {
         let a = paint.geometry.xy;
         let b = paint.geometry.zw;
         let axis = b - a;
@@ -209,12 +209,12 @@ fn evaluate_paint(in: VertexOutput) -> vec4<f32> {
         let t = select(0.0, dot(p - a, axis) / len2, len2 > 1e-6);
         return sample_gradient_stops(paint, t);
     }
-    if (paint.meta.x == PAINT_RADIAL_GRADIENT) {
+    if (paint.header.x == PAINT_RADIAL_GRADIENT) {
         let radius = paint.geometry.z;
         let t = select(0.0, distance(p, paint.geometry.xy) / radius, radius > 1e-6);
         return sample_gradient_stops(paint, t);
     }
-    if (paint.meta.x == PAINT_PATTERN) {
+    if (paint.header.x == PAINT_PATTERN) {
         return sample_pattern(paint, p);
     }
     return in.color;

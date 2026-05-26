@@ -2,9 +2,9 @@
 //!
 //! Each case parses an svg3 document — the SVG WPT `shapes/rect-*`,
 //! `shapes/circle-*`, `shapes/ellipse-*`, and `shapes/polygon-*` reference
-//! tests, plus polyline fill, stroked shapes, line, path, markers, the svg3
-//! 3D `<cube>` primitive, Gaussian blur and image filters, mixed-shape, and
-//! canonical SVG samples — renders
+//! tests, plus polyline fill, stroked shapes, line, path, markers, SVG paint
+//! servers, the svg3 3D `<cube>` primitive, Gaussian blur and image filters,
+//! mixed-shape, and canonical SVG samples — renders
 //! it headlessly with
 //! [`Renderer::render_to_image`], and compares the result against a committed
 //! golden PNG in `tests/snapshots/`. Those
@@ -365,6 +365,46 @@ fn cases() -> Vec<Case> {
         Case::square(
             "basic-shapes-overlap",
             r##"<svg><rect x="8" y="8" width="84" height="84" fill="#13294b"/><circle cx="36" cy="36" r="22" fill="#f2c14e"/><ellipse cx="62" cy="62" rx="28" ry="18" fill="#c14b2b"/><line x1="18" y1="80" x2="82" y2="20" stroke="#ffffff" stroke-width="6"/></svg>"##,
+        ),
+        // SVG paint servers: `<linearGradient>` with user-space coordinates
+        // and three `<stop>` entries, sampled per fragment in the shape
+        // shader.
+        Case::square(
+            "paint-linear-gradient-fill-user-space",
+            r##"<svg><defs><linearGradient id="g" gradientUnits="userSpaceOnUse" x1="16" y1="20" x2="84" y2="20"><stop offset="0%" stop-color="#c14b2b"/><stop offset="50%" stop-color="#f2c14e"/><stop offset="100%" stop-color="#2563eb"/></linearGradient></defs><rect width="100%" height="100%" fill="#13294b"/><rect x="16" y="20" width="68" height="60" fill="url(#g)"/></svg>"##,
+        ),
+        // Default `objectBoundingBox` gradient units on stroke paint. The
+        // gradient resolves against the authored rect bounds, not the
+        // expanded stroke mesh.
+        Case::square(
+            "paint-linear-gradient-stroke-object-bbox",
+            r##"<svg><defs><linearGradient id="g"><stop offset="0" stop-color="#c14b2b"/><stop offset="1" stop-color="#2563eb"/></linearGradient></defs><rect width="100%" height="100%" fill="#13294b"/><rect x="24" y="24" width="52" height="52" rx="8" fill="none" stroke="url(#g)" stroke-width="14"/></svg>"##,
+        ),
+        // `<radialGradient>` plus `<stop>` presentation attributes and style
+        // declarations, including stop-opacity blended over the background.
+        Case::square(
+            "paint-radial-gradient-stop-opacity",
+            r##"<svg><defs><radialGradient id="g" gradientUnits="userSpaceOnUse" cx="50" cy="50" r="38"><stop style="offset: 0%; stop-color: #f2c14e; stop-opacity: 1"/><stop offset="55%" stop-color="#c14b2b" stop-opacity="0.75"/><stop style="offset: 100%; stop-color: #2563eb; stop-opacity: 35%"/></radialGradient></defs><rect width="100%" height="100%" fill="#13294b"/><circle cx="50" cy="50" r="38" fill="url(#g)"/></svg>"##,
+        ),
+        // `<pattern patternUnits="userSpaceOnUse">` with rectangular child
+        // paints. The golden exposes tile repetition and child painter order.
+        Case::square(
+            "paint-pattern-fill-user-space",
+            r##"<svg><defs><pattern id="p" patternUnits="userSpaceOnUse" width="16" height="16"><rect width="16" height="16" fill="#2563eb"/><rect width="8" height="8" fill="#f2c14e"/><rect x="8" y="8" width="8" height="8" fill="#c14b2b" fill-opacity="0.75"/></pattern></defs><rect width="100%" height="100%" fill="#13294b"/><rect x="14" y="14" width="72" height="72" fill="url(#p)"/></svg>"##,
+        ),
+        // Default `objectBoundingBox` pattern units: the tile size tracks the
+        // painted element bounds. Semi-transparent child paint proves pattern
+        // items are composited source-over in document order.
+        Case::square(
+            "paint-pattern-object-bbox-composite",
+            r##"<svg><defs><pattern id="p" width="25%" height="25%"><rect width="15" height="15" fill="#11aa55"/><rect x="4" y="4" width="11" height="11" fill="#13294b" fill-opacity="0.55"/></pattern></defs><rect width="100%" height="100%" fill="#13294b"/><rect x="20" y="20" width="60" height="60" fill="url(#p)"/></svg>"##,
+        ),
+        // Paint servers feed SourceGraphic before filter execution. The
+        // desaturating filter should see the tiled pattern, not the fallback
+        // solid fill or an unpainted silhouette.
+        Case::square(
+            "paint-pattern-filter-source-graphic",
+            r##"<svg><defs><pattern id="p" patternUnits="userSpaceOnUse" width="10" height="10"><rect width="5" height="10" fill="#c14b2b"/><rect x="5" width="5" height="10" fill="#2563eb"/></pattern><filter id="gray"><feColorMatrix type="saturate" values="0"/></filter></defs><rect width="100%" height="100%" fill="#13294b"/><rect x="18" y="18" width="64" height="64" fill="url(#p)" filter="url(#gray)"/></svg>"##,
         ),
         // SVG filters: referenced `<filter>` definitions with
         // `<feGaussianBlur>` render their target subtree into an offscreen GPU
