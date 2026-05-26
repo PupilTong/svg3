@@ -1,19 +1,21 @@
 //! `svg3` — an extended SVG renderer for 3D models.
 //!
-//! Umbrella crate tying the layers together:
+//! The crate is split into three layers:
 //!
 //! - [`dom`] — parse SVG3 XML into an element tree.
-//! - [`style`] — resolve computed styles via Stylo.
+//! - [`style`] — resolve computed styles via Stylo (scaffolding).
 //! - [`render`] — paint the styled scene with wgpu.
 //!
 //! Status: early scaffolding. [`render_str`] wires the layers. [`dom`]
-//! parsing and [`render`]'s supported 2D shape path are implemented, but
+//! parsing and [`render`]'s supported shape path are implemented, but
 //! [`style`] is still a skeleton, so `render_str` currently surfaces the
-//! style stage's "not implemented" error.
+//! style stage's "not implemented" error. To render supported geometry
+//! today, use [`render::build_scene`] / [`render::Renderer::render_to_image`]
+//! directly.
 
-pub use svg3_dom as dom;
-pub use svg3_render as render;
-pub use svg3_style as style;
+pub mod dom;
+pub mod render;
+pub mod style;
 
 use thiserror::Error;
 
@@ -35,9 +37,7 @@ pub enum Error {
 ///
 /// This is the intended public entry point. The parse and render stages are
 /// implemented, but style resolution is still a scaffold, so the full
-/// pipeline currently returns [`style::StyleError::NotImplemented`]. To
-/// render supported 2D geometry today, use [`render::build_scene`] /
-/// [`render::Renderer::render_to_image`] directly.
+/// pipeline currently returns [`style::StyleError::NotImplemented`].
 pub fn render_str(input: &str, config: render::RenderConfig) -> Result<render::Image, Error> {
     let document = dom::parse(input)?;
     let styles = style::StyleEngine::new();
@@ -63,7 +63,7 @@ mod tests {
     }
 
     #[test]
-    fn build_scene_renders_rect_across_crates() {
+    fn build_scene_renders_rect_across_layers() {
         // The render stage works without the (still-skeleton) style stage:
         // parse a `<rect>` and tessellate it through the re-exported render
         // API, exercising the dom -> render path end to end.
@@ -79,7 +79,7 @@ mod tests {
     }
 
     #[test]
-    fn build_scene_renders_line_across_crates() {
+    fn build_scene_renders_line_across_layers() {
         let document = dom::parse(r#"<svg><line x2="20" y2="10" stroke="blue"/></svg>"#).unwrap();
         let mesh = render::build_scene(
             &document,
@@ -92,7 +92,7 @@ mod tests {
     }
 
     #[test]
-    fn build_scene_renders_path_across_crates() {
+    fn build_scene_renders_path_across_layers() {
         let document =
             dom::parse(r#"<svg><path d="M 0 0 L 20 0 L 10 10 Z" fill="blue"/></svg>"#).unwrap();
         let mesh = render::build_scene(

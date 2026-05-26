@@ -3,10 +3,10 @@
 //! The eye orbits a target — the loaded document's centre — at a distance
 //! the user can change. Yaw and pitch are spherical angles; at
 //! `yaw = pitch = 0` the eye sits straight in front of the document on the
-//! `+Z` (viewer) side, matching [`svg3_render::Camera::facing`].
+//! `+Z` (viewer) side, matching [`svg3::render::Camera::facing`].
 
 use glam::Vec3;
-use svg3_render::{Camera, Viewport};
+use svg3::render::{Camera, Viewport};
 
 /// Vertical field of view, in radians (matches `Camera::facing`).
 const FOV_Y: f32 = std::f32::consts::FRAC_PI_4;

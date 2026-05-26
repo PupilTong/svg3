@@ -14,7 +14,7 @@ permissions:
   contents: read
 
 jobs:
-  # Lint, test and coverage for the whole workspace. `svg3-render`
+  # Lint, test and coverage for the whole workspace. `svg3::render`
   # rasterises with wgpu and its headless render test needs a real GPU
   # adapter, which GitHub's `ubuntu-latest` runner lacks — so this job runs
   # on macOS, where wgpu uses Metal. `app-macos` (winit -> Cocoa) also only
@@ -49,7 +49,7 @@ jobs:
       - name: Test & generate coverage
         # `cargo llvm-cov` runs the tests under instrumentation and emits
         # an LCOV file; one step replaces the separate `cargo test` and
-        # coverage runs. The headless `svg3-render` render test exercises
+        # coverage runs. The headless `svg3::render` render test exercises
         # the Metal GPU here. `app-macos` is excluded from coverage — its
         # windowed event loop is not unit-testable.
         run: cargo llvm-cov --workspace --exclude app-macos --all-features --lcov --output-path lcov.info
@@ -70,8 +70,8 @@ jobs:
       - name: Test app-macos
         run: cargo test -p app-macos
 
-      - name: Benchmark svg3-render full renderer
-        run: cargo bench -p svg3-render --bench render -- --sample-size 10
+      - name: Benchmark svg3 full renderer
+        run: cargo bench -p svg3 --bench render -- --sample-size 10
 
   # Benchmark job. CodSpeed's simulation mode uses Valgrind, which is
   # Linux-only, so the benches have to run on `ubuntu-latest`. The `parse`

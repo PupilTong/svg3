@@ -9,8 +9,7 @@ name = "svg3-macos"
 path = "src/main.rs"
 
 [dependencies]
-svg3-dom.workspace = true
-svg3-render.workspace = true
+svg3.workspace = true
 winit.workspace = true
 wgpu.workspace = true
 pollster.workspace = true

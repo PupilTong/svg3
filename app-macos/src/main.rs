@@ -15,8 +15,8 @@ use std::process::Command;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
-use svg3_dom::Document;
-use svg3_render::{clear_target, document_viewport, RenderConfig, Renderer, Viewport};
+use svg3::dom::Document;
+use svg3::render::{clear_target, document_viewport, RenderConfig, Renderer, Viewport};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalSize};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -192,7 +192,7 @@ impl Gfx {
 
     fn set_svg_source(&mut self, source: String) {
         self.svg_source = source;
-        match svg3_dom::parse(&self.svg_source) {
+        match svg3::dom::parse(&self.svg_source) {
             Ok(document) => {
                 let viewport = document_viewport(&document, self.target_viewport());
                 // A freshly loaded document gets a head-on framing.
