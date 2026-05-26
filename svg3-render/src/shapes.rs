@@ -88,6 +88,7 @@ pub(crate) fn resolve_stroke(element: &Element) -> Option<[f32; 4]> {
     resolve_stroke_with_opacity(element, true)
 }
 
+#[cfg(test)]
 pub(crate) fn resolve_stroke_with_opacity(
     element: &Element,
     apply_opacity: bool,
@@ -138,6 +139,7 @@ pub(crate) fn vertex(x: f32, y: f32, color: [f32; 4]) -> Vertex {
         local: [0.0, 0.0],
         params: [0.0; 4],
         kind: KIND_SOLID,
+        paint_id: 0,
     }
 }
 
@@ -157,6 +159,7 @@ pub(crate) fn sdf_vertex(
         local,
         params,
         kind,
+        paint_id: 0,
     }
 }
 
@@ -170,13 +173,13 @@ pub(crate) fn sdf_quad(
     kind: u32,
     color: [f32; 4],
 ) -> Mesh {
-    Mesh {
-        vertices: corners
+    Mesh::new(
+        corners
             .iter()
             .map(|&(position, local)| sdf_vertex(position, local, params, kind, color))
             .collect(),
-        indices: vec![0, 1, 2, 0, 2, 3],
-    }
+        vec![0, 1, 2, 0, 2, 3],
+    )
 }
 
 /// Parse an absolute SVG length into user units. Accepts a plain number or a
@@ -269,7 +272,7 @@ pub(crate) fn parse_color_value(value: &str) -> Option<[f32; 4]> {
     }
 }
 
-fn resolve_opacity(element: &Element, name: &str) -> f32 {
+pub(crate) fn resolve_opacity(element: &Element, name: &str) -> f32 {
     element
         .attributes
         .get(name)
@@ -277,7 +280,7 @@ fn resolve_opacity(element: &Element, name: &str) -> f32 {
         .unwrap_or(1.0)
 }
 
-fn parse_opacity(value: &str) -> Option<f32> {
+pub(crate) fn parse_opacity(value: &str) -> Option<f32> {
     let value = value.trim();
     let opacity = if let Some(percent) = value.strip_suffix('%') {
         percent.trim().parse::<f32>().ok()? / 100.0

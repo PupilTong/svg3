@@ -39,7 +39,7 @@ use crate::filters::{
 };
 use crate::mesh::VERTEX_ATTRIBUTES;
 use crate::scene::{build_render_plan, RenderOp};
-use crate::{document_viewport, Mesh, RenderConfig, Vertex, Viewport};
+use crate::{document_viewport, mesh::PaintServer, Mesh, RenderConfig, Vertex, Viewport};
 
 /// Texture format the headless renderer draws into. sRGB-encoded so linear
 /// vertex colours are stored correctly; read back as `RGBA8`.
@@ -218,9 +218,10 @@ fn resolve_input<'a>(
         // fallback ("undefined" -> implementation-defined).
         FilterInput::BackgroundImage => &source.view,
         FilterInput::BackgroundAlpha => &source_alpha.view,
-        // `FillPaint` / `StrokePaint` are paint-server pseudo-inputs.
-        // Without a gradient/pattern resolver, they fall back to
-        // `SourceGraphic` so the primitive still runs.
+        // `FillPaint` / `StrokePaint` are filter-local paint pseudo-inputs.
+        // svg3 resolves paint servers for normal shape drawing, but does not
+        // yet materialize these pseudo-inputs as standalone flood textures.
+        // Falling back to `SourceGraphic` keeps the primitive running.
         FilterInput::FillPaint | FilterInput::StrokePaint => &source.view,
         FilterInput::Named(name) => match named.get(name.as_str()) {
             Some(i) => &outputs[*i].view,
@@ -471,6 +472,7 @@ pub struct GpuScene {
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     transform_buffer: wgpu::Buffer,
+    _paint_buffer: wgpu::Buffer,
     transform_bind_group: wgpu::BindGroup,
     index_count: u32,
 }
@@ -855,13 +857,31 @@ impl Renderer {
                 contents: bytemuck::bytes_of(&uniform),
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             });
+        let mut paint_servers = Vec::with_capacity(mesh.paint_servers().len() + 1);
+        // Paint id 0 is reserved for inline solid vertex colour. The dummy
+        // first entry keeps non-zero ids aligned with their storage index.
+        paint_servers.push(PaintServer::zeroed());
+        paint_servers.extend_from_slice(mesh.paint_servers());
+        let paint_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("svg3 paint server buffer"),
+                contents: bytemuck::cast_slice(&paint_servers),
+                usage: wgpu::BufferUsages::STORAGE,
+            });
         let transform_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("svg3 transform bind group"),
             layout: &self.bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: transform_buffer.as_entire_binding(),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: transform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: paint_buffer.as_entire_binding(),
+                },
+            ],
         });
         let vertex_buffer = self
             .device
@@ -881,6 +901,7 @@ impl Renderer {
             vertex_buffer,
             index_buffer,
             transform_buffer,
+            _paint_buffer: paint_buffer,
             transform_bind_group,
             index_count: mesh.indices.len() as u32,
         })
@@ -2898,6 +2919,101 @@ mod tests {
         );
         // A pixel outside the rect keeps the transparent clear colour.
         assert_eq!(image.pixel(2, 2)[3], 0, "background should be transparent");
+    }
+
+    #[test]
+    fn render_to_image_paints_linear_gradient_fill() {
+        let document = svg3_dom::parse(
+            r##"<svg><defs><linearGradient id="g" gradientUnits="userSpaceOnUse" x1="16" y1="0" x2="48" y2="0"><stop offset="0" stop-color="red"/><stop offset="1" stop-color="blue"/></linearGradient></defs><rect x="16" y="16" width="32" height="32" fill="url(#g)"/></svg>"##,
+        )
+        .unwrap();
+        let config = RenderConfig {
+            width: 64,
+            height: 64,
+            ..RenderConfig::default()
+        };
+        let Some(renderer) = skip_or_renderer("render_to_image_paints_linear_gradient_fill") else {
+            return;
+        };
+        let image = renderer
+            .render_to_image(&document, config)
+            .expect("headless render failed");
+
+        let left = image.pixel(18, 32);
+        let right = image.pixel(46, 32);
+        assert!(
+            left[0] > 180 && left[2] < 90,
+            "left side should be red-dominant, got {left:?}"
+        );
+        assert!(
+            right[2] > 180 && right[0] < 90,
+            "right side should be blue-dominant, got {right:?}"
+        );
+    }
+
+    #[test]
+    fn render_to_image_paints_radial_gradient_fill() {
+        let document = svg3_dom::parse(
+            r##"<svg><defs><radialGradient id="g" gradientUnits="userSpaceOnUse" cx="32" cy="32" r="20"><stop offset="0" stop-color="red"/><stop offset="1" stop-color="blue"/></radialGradient></defs><circle cx="32" cy="32" r="20" fill="url(#g)"/></svg>"##,
+        )
+        .unwrap();
+        let config = RenderConfig {
+            width: 64,
+            height: 64,
+            ..RenderConfig::default()
+        };
+        let Some(renderer) = skip_or_renderer("render_to_image_paints_radial_gradient_fill") else {
+            return;
+        };
+        let image = renderer
+            .render_to_image(&document, config)
+            .expect("headless render failed");
+
+        let centre = image.pixel(32, 32);
+        let edge = image.pixel(49, 32);
+        assert!(
+            centre[0] > 180 && centre[2] < 90,
+            "radial centre should be red, got {centre:?}"
+        );
+        assert!(
+            edge[2] > edge[0] && edge[2] > 90,
+            "radial edge should shift toward blue, got {edge:?}"
+        );
+    }
+
+    #[test]
+    fn render_to_image_paints_pattern_fill() {
+        let document = svg3_dom::parse(
+            r##"<svg><defs><pattern id="p" patternUnits="userSpaceOnUse" width="8" height="8"><rect width="4" height="8" fill="red"/><rect x="4" width="4" height="8" fill="blue"/></pattern></defs><rect x="16" y="16" width="32" height="32" fill="url(#p)"/></svg>"##,
+        )
+        .unwrap();
+        let config = RenderConfig {
+            width: 64,
+            height: 64,
+            ..RenderConfig::default()
+        };
+        let Some(renderer) = skip_or_renderer("render_to_image_paints_pattern_fill") else {
+            return;
+        };
+        let image = renderer
+            .render_to_image(&document, config)
+            .expect("headless render failed");
+
+        let red = image.pixel(18, 32);
+        let blue = image.pixel(22, 32);
+        let repeated_red = image.pixel(26, 32);
+        assert!(
+            red[0] > 180 && red[2] < 90,
+            "first pattern stripe should be red, got {red:?}"
+        );
+        assert!(
+            blue[2] > 180 && blue[0] < 90,
+            "second pattern stripe should be blue, got {blue:?}"
+        );
+        assert!(
+            repeated_red[0] > 180 && repeated_red[2] < 90,
+            "pattern should repeat horizontally, got {repeated_red:?}"
+        );
     }
 
     #[test]

@@ -472,7 +472,7 @@ pub(crate) fn tessellate_surface(geo: &SurfaceGeometry, color: [f32; 4]) -> Mesh
         );
     }
 
-    Mesh { vertices, indices }
+    Mesh::new(vertices, indices)
 }
 
 /// Append a row-major `rows × cols` grid of positions as
@@ -499,6 +499,7 @@ fn triangulate_grid(
             local: [0.0, 0.0],
             params: [0.0; 4],
             kind: KIND_SOLID,
+            paint_id: 0,
         });
     }
     for row in 0..rows - 1 {

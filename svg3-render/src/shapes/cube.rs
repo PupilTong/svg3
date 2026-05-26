@@ -119,6 +119,7 @@ pub(crate) fn tessellate_cube(geo: &CubeGeometry, color: [f32; 4]) -> Mesh {
         local: [0.0, 0.0],
         params: [0.0; 4],
         kind: KIND_SOLID,
+        paint_id: 0,
     };
 
     // Eight corners. SVG y is down, +Z is toward the viewer, so "top" is the
@@ -148,7 +149,7 @@ pub(crate) fn tessellate_cube(geo: &CubeGeometry, color: [f32; 4]) -> Mesh {
         5, 1, 2, 5, 2, 6,
     ];
 
-    Mesh { vertices, indices }
+    Mesh::new(vertices, indices)
 }
 
 /// Parse a named SVG length attribute into a [`Length`], without resolving it

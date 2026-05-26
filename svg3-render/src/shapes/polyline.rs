@@ -62,7 +62,7 @@ pub(crate) fn tessellate_polyline(geo: &PolylineGeometry, color: [f32; 4]) -> Me
         .into_iter()
         .flat_map(|tri| tri.map(|index| index as u32))
         .collect();
-    Mesh { vertices, indices }
+    Mesh::new(vertices, indices)
 }
 
 /// Tessellate a resolved polyline's open stroke into triangle geometry.

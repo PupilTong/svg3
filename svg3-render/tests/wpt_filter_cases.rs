@@ -3,11 +3,10 @@
 //! "unsupported WPT" cases as `#[ignore]` placeholders; that gap is now
 //! closed — every original WPT entry has a concrete assertion. Some cases
 //! validate svg3's documented approximation (e.g. `BackgroundImage` ≈
-//! `SourceGraphic` until enable-background capture lands, or fallback fill
-//! for gradient/pattern references) rather than the browser-perfect WPT
-//! pixel reference; the test comment calls that out explicitly. The
-//! approximations will tighten as the paint-server / mask / enable-background
-//! subsystems land, without changing the test surface.
+//! `SourceGraphic` until enable-background capture lands) rather than the
+//! browser-perfect WPT pixel reference; the test comment calls that out
+//! explicitly. The approximations will tighten as the mask /
+//! enable-background subsystems land, without changing the test surface.
 //! The pixel probes intentionally overlap `filter.rs`: this binary preserves
 //! the WPT lineage for each migrated case, and the GPU adapter is shared
 //! across tests via `OnceLock<Mutex<Renderer>>` so they self-skip cleanly on
@@ -820,8 +819,8 @@ fn wpt_svg_svg_in_svg_circular_filter_reference_crash_passes() {
 
 // ---- Genuinely out-of-scope for this milestone -----------------------------
 //
-// These WPT cases require subsystems svg3 does not yet host (gradients,
-// patterns, masks, clip-path, foreignObject, SMIL, browser-frame).
+// These WPT cases require subsystems svg3 does not yet host fully (masks,
+// browser-hosted foreignObject, SMIL, browser-frame).
 // Migrating them is tracked as separate work; they remain as ignored
 // placeholders so the gap is visible in `cargo test -- --ignored` output.
 
@@ -846,10 +845,8 @@ fn wpt_svg_render_order_clip_path_filter_order_passes() {
     // before the filter ran).
     assert_transparent(&image, 14, 14);
 }
-/// `<pattern>`-filled element + filter. Patterns aren't yet implemented as
-/// paint servers, so `fill="url(#pat)"` falls back to the default fill; the
-/// filter applies to that. The test verifies the no-crash + filter-applies
-/// invariants — the pattern semantics will tighten once paint servers land.
+/// `<pattern>`-filled element + filter. The pattern paint server should feed
+/// the filtered source graphic rather than falling back to the default fill.
 #[test]
 fn wpt_svg_render_reftests_filter_effects_on_pattern_passes() {
     let Some(renderer) = renderer() else {
@@ -857,7 +854,7 @@ fn wpt_svg_render_reftests_filter_effects_on_pattern_passes() {
     };
     let image = render(
         &renderer,
-        r##"<svg><defs><pattern id="p" width="8" height="8"><rect width="4" height="4" fill="red"/></pattern><filter id="f"><feColorMatrix type="saturate" values="0"/></filter></defs><rect x="16" y="16" width="32" height="32" fill="url(#p)" filter="url(#f)"/></svg>"##,
+        r##"<svg><defs><pattern id="p" patternUnits="userSpaceOnUse" width="8" height="8"><rect width="4" height="4" fill="red"/></pattern><filter id="f"><feColorMatrix type="saturate" values="0"/></filter></defs><rect x="16" y="16" width="32" height="32" fill="url(#p)" filter="url(#f)"/></svg>"##,
     );
     let centre = image.pixel(32, 32);
     assert!(
@@ -1021,10 +1018,9 @@ fn wpt_svg_import_filters_light_05_f_manual_passes() {
 }
 /// Overview filter exercising every pseudo-input. svg3 currently maps
 /// `BackgroundImage` / `BackgroundAlpha` / `FillPaint` / `StrokePaint` to
-/// `SourceGraphic` / `SourceAlpha` (until paint-server resolution and
-/// enable-background capture land). The test asserts that referencing
-/// these pseudo-inputs from a chain doesn't crash and produces a non-empty
-/// result.
+/// `SourceGraphic` / `SourceAlpha` until destination-background capture and
+/// filter-local paint capture land. The test asserts that referencing these
+/// pseudo-inputs from a chain doesn't crash and produces a non-empty result.
 #[test]
 fn wpt_svg_import_filters_overview_01_b_manual_passes() {
     let Some(renderer) = renderer() else {
@@ -1040,12 +1036,8 @@ fn wpt_svg_import_filters_overview_01_b_manual_passes() {
         "overview filter should produce visible output, got {centre:?}"
     );
 }
-/// Gradient + filter combination. svg3 parses `<linearGradient>` as a
-/// definition (skipped at render time) and `fill="url(#g)"` falls back to
-/// the default fill, so the gradient itself isn't painted yet — but the
-/// renderer must not crash, and the filter still applies to the fallback
-/// fill. Once gradient resolution lands, this test will tighten to the
-/// gradient-colour expectation.
+/// Gradient + filter combination. The referenced `<linearGradient>` should
+/// paint into SourceGraphic before the filter chain runs.
 #[test]
 fn wpt_svg_import_filters_overview_02_b_manual_passes() {
     let Some(renderer) = renderer() else {
@@ -1056,8 +1048,6 @@ fn wpt_svg_import_filters_overview_02_b_manual_passes() {
         r##"<svg><defs><linearGradient id="g"><stop offset="0" stop-color="red"/><stop offset="1" stop-color="blue"/></linearGradient><filter id="f"><feGaussianBlur stdDeviation="2"/></filter></defs><rect x="16" y="16" width="32" height="32" fill="url(#g)" filter="url(#f)"/></svg>"##,
     );
     let centre = image.pixel(32, 32);
-    // The fallback fill (black) blurred — alpha should be opaque in the
-    // rect's interior.
     assert!(
         centre[3] > 200,
         "gradient-filled rect + filter should still produce opaque centre, got {centre:?}"

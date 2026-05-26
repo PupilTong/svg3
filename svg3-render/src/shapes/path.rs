@@ -68,10 +68,7 @@ pub(crate) fn tessellate_path_fill(geo: &PathGeometry, color: [f32; 4]) -> Mesh 
         return Mesh::default();
     }
 
-    Mesh {
-        vertices: buffers.vertices,
-        indices: buffers.indices,
-    }
+    Mesh::new(buffers.vertices, buffers.indices)
 }
 
 /// Tessellate a resolved path's stroke into triangle geometry.

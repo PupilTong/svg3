@@ -201,11 +201,11 @@ pub(crate) enum FilterInput {
     BackgroundAlpha,
     /// The filter's `FillPaint`: a fullscreen flood of the filtered
     /// element's resolved `fill` paint. Currently approximated as
-    /// `SourceGraphic` until paint-server resolution lands.
+    /// `SourceGraphic` until filter-local paint capture lands.
     FillPaint,
     /// The filter's `StrokePaint`: a fullscreen flood of the filtered
     /// element's resolved `stroke` paint. Currently approximated as
-    /// `SourceGraphic` until paint-server resolution lands.
+    /// `SourceGraphic` until filter-local paint capture lands.
     StrokePaint,
     /// A named earlier primitive's `result`.
     Named(String),
@@ -2174,8 +2174,8 @@ mod tests {
         // BackgroundImage / BackgroundAlpha / FillPaint / StrokePaint are
         // recognised pseudo-inputs in their own variants — the renderer
         // currently maps them onto SourceGraphic / SourceAlpha as a
-        // documented approximation until paint-server / enable-background
-        // capture lands.
+        // documented approximation until filter-local paint and
+        // enable-background capture land.
         assert_eq!(
             FilterInput::parse(Some("BackgroundImage")),
             FilterInput::BackgroundImage

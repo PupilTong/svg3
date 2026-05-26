@@ -46,16 +46,19 @@ svg3 XML   ──►  svg3-dom    ──►  svg3-style   ──►  svg3-render
 > `feMorphology`, `feFlood`, `feDropShadow`, `feDisplacementMap`,
 > `feConvolveMatrix`, `feComponentTransfer`) and their child elements
 > (`feFuncR/G/B/A`, `feDistantLight`, `fePointLight`, `feSpotLight`),
-> `<marker>`, `<cube>`, and `<ellipsoid>` are recognised; the rest of SVG 1.1
+> `<marker>`, `<linearGradient>`, `<radialGradient>`, `<stop>`, `<pattern>`,
+> `<cube>`, and `<ellipsoid>` are recognised; the rest of SVG 1.1
 > round-trips as unknown elements. `svg3-render` tessellates fills and
 > strokes for `<rect>`, `<circle>`, `<ellipse>`, `<polygon>`, `<polyline>`,
 > and `<path>`, plus stroke-only `<line>` geometry, including stroke caps,
 > joins, dashes, `pathLength` dash calibration, opacity attributes, and
-> referenced SVG markers, plus svg3's 3D `<cube>` primitive, then
-> rasterises them headlessly to an image (roadmap items 3 and 4), using
-> root `<svg width>` / `<svg height>` as the percentage viewport. The
-> svg3 3D `<ellipsoid>` primitive (SPEC §5.3) tessellates the implicit
-> surface to a UV-parameterised mesh alongside `<cube>`.
+> referenced SVG markers and paint servers (`<linearGradient>`,
+> `<radialGradient>`, and rectangular-child `<pattern>` tiles), plus svg3's
+> 3D `<cube>` primitive, then rasterises them headlessly to an image
+> (roadmap items 3 and 4), using root `<svg width>` / `<svg height>` as the
+> percentage viewport. The svg3 3D `<ellipsoid>` primitive (SPEC §5.3)
+> tessellates the implicit surface to a UV-parameterised mesh alongside
+> `<cube>`.
 > Headless rendering also applies referenced `<filter>` elements composed
 > of an ordered chain of `<fe…>` primitives, with each primitive
 > implemented as a dedicated GPU fragment-shader pass over offscreen
