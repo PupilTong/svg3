@@ -1015,6 +1015,7 @@ fn is_renderable_element(kind: &ElementKind) -> bool {
             | ElementKind::Path
             | ElementKind::Cube
             | ElementKind::Ellipsoid
+            | ElementKind::Cylinder
             | ElementKind::Surface
     )
 }
