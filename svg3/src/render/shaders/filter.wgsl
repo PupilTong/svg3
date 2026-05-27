@@ -140,25 +140,54 @@ fn fs_blur(in: VertexOutput) -> @location(0) vec4<f32> {
 
 // ---- Final composite ------------------------------------------------------
 
-// Approximate NDC depth of the `z = 0` plane in the orthographic default
-// projection. Used as the fallback "filter plane" depth for composite
-// fragments that fall outside the source geometry (post-filter halo: the
-// source depth was never written, so the cleared `1.0` would otherwise
-// fail `LessEqual` against any earlier-drawn content). This is exact for
-// the orthographic camera and a reasonable approximation under
-// perspective — filter on a 3D element is implementation-defined per
-// SPEC §6.3.
-const FILTER_PLANE_NDC_DEPTH: f32 = 0.5;
-
 struct CompositeOutput {
     @location(0) color: vec4<f32>,
     // Forwards the source pass's per-pixel NDC depth into the target so
     // subsequent 3D draws can spatially occlude or be occluded by the
-    // filtered geometry (SPEC §7.3). Pixels with no source geometry
-    // (halo / cleared depth) fall back to `FILTER_PLANE_NDC_DEPTH` so
-    // the halo composites cleanly over coplanar background content but
-    // still loses to a 3D primitive in front of the `z = 0` plane.
+    // filtered geometry (SPEC §7.3). Halo pixels — fragments inside the
+    // filter region but outside the source geometry — get the NDC depth
+    // of the world `z = 0` plane *at that screen position*, computed
+    // per-fragment via the inverse projection encoded in `matrix_r0..r3`
+    // and `matrix_col4`. A constant fallback (taken at the document
+    // centre) was correct for the orthographic default but wrong for
+    // perspective with any pitch or yaw, where the z = 0 plane crosses
+    // a range of NDC depths across the screen — every fragment past the
+    // centre's depth then failed the `LessEqual` test, slicing later
+    // filters into half-moon wedges.
     @builtin(frag_depth) depth: f32,
+}
+
+/// NDC depth of the `world.z = 0` plane at the given UV under the
+/// current projection. The uniform packs:
+///   - `matrix_r0..r2.xyz`: rows of the inverse homography mapping
+///     NDC `(nx, ny)` back to user-space `(X, Y)` on the z = 0 plane.
+///   - `matrix_r3.xyz`: row 2 of the view-projection, columns
+///     `(0, 1, 3)` — the coefficients producing `clip.z` from
+///     `(X, Y, 0, 1)`.
+///   - `matrix_col4.xyz`: row 3 at the same columns — the `clip.w`
+///     coefficients.
+/// Falls back to `1.0` (far plane) when either the inverse homography
+/// or the forward `clip.w` is singular at this fragment, so a
+/// degenerate uniform doesn't write garbage depth.
+fn plane_ndc_depth(uv: vec2<f32>) -> f32 {
+    let ndc = vec2<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+    let v = vec3<f32>(ndc.x, ndc.y, 1.0);
+    let xyw = vec3<f32>(
+        dot(filter_params.matrix_r0.xyz, v),
+        dot(filter_params.matrix_r1.xyz, v),
+        dot(filter_params.matrix_r2.xyz, v),
+    );
+    if (abs(xyw.z) < 1e-6) {
+        return 1.0;
+    }
+    let xy = xyw.xy / xyw.z;
+    let v_xy1 = vec3<f32>(xy.x, xy.y, 1.0);
+    let clip_z = dot(filter_params.matrix_r3.xyz, v_xy1);
+    let clip_w = dot(filter_params.matrix_col4.xyz, v_xy1);
+    if (abs(clip_w) < 1e-6) {
+        return 1.0;
+    }
+    return clamp(clip_z / clip_w, 0.0, 1.0);
 }
 
 @fragment
@@ -169,7 +198,7 @@ fn fs_composite(in: VertexOutput) -> CompositeOutput {
     if (src_depth < 1.0) {
         depth = src_depth;
     } else {
-        depth = FILTER_PLANE_NDC_DEPTH;
+        depth = plane_ndc_depth(in.uv);
     }
     var out: CompositeOutput;
     out.color = color;
@@ -250,6 +279,36 @@ fn fs_turbulence(in: VertexOutput) -> @location(0) vec4<f32> {
 }
 
 // ---- feSpecularLighting / feDiffuseLighting -------------------------------
+//
+// All lighting math is evaluated in *user-space* `(X, Y, Z)` — the units
+// SVG 1.1 §15.21.2 assigns to `<fePointLight>` / `<feSpotLight>` positions.
+// Recovering user-space `(X, Y)` from a texel's UV needs the inverse of
+// the current projection restricted to the world `z = 0` plane, which the
+// renderer packs into `matrix_r0..2` as a 3×3 homography. Earlier code
+// approximated the conversion with a single `extent / viewport` scale,
+// which only matches user-space under orthographic projection — under a
+// moved perspective camera the scale is wrong and varies across the
+// texture, so the spot cone shifted off the lit region and clipped the
+// sphere with a hard black edge.
+
+/// User-space `(X, Y)` of the texel at `uv`, recovered via the inverse
+/// homography of the projection's `z = 0` plane.
+fn surface_user_xy(uv: vec2<f32>) -> vec2<f32> {
+    // UV → NDC. The composite path flips Y so SVG `y = 0` (top) maps to
+    // UV `y = 0`; here we undo that for the homography input.
+    let ndc = vec2<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+    let v = vec3<f32>(ndc.x, ndc.y, 1.0);
+    // `matrix_r0..2.xyz` are the rows of the 3×3 inverse homography.
+    let xyw = vec3<f32>(
+        dot(filter_params.matrix_r0.xyz, v),
+        dot(filter_params.matrix_r1.xyz, v),
+        dot(filter_params.matrix_r2.xyz, v),
+    );
+    if (abs(xyw.z) < 1e-6) {
+        return vec2<f32>(0.0, 0.0);
+    }
+    return xyw.xy / xyw.z;
+}
 
 fn surface_normal(uv: vec2<f32>) -> vec3<f32> {
     let dx = filter_params.texel_size.x;
@@ -266,9 +325,14 @@ fn surface_normal(uv: vec2<f32>) -> vec3<f32> {
     let br = sample_in1(uv + vec2<f32>(dx, dy)).a;
     let sx = (tr + 2.0 * mr + br) - (tl + 2.0 * ml + bl);
     let sy = (bl + 2.0 * bc + br) - (tl + 2.0 * tc + tr);
-    // Texel-size cancels out: `sx * texel_size / texel_size` collapses to `sx / 4`.
-    let nx = -sx * 0.25 * surface_scale;
-    let ny = -sy * 0.25 * surface_scale;
+    // Sobel returns `d(alpha)/d(texel)`. Convert to user-space gradient
+    // via the per-axis texel-to-user scale stored in `matrix_rN.w` so the
+    // normal direction is correct for non-square `tex/viewport` ratios
+    // (e.g. a 440×140 doc rendered into a 1500×1200 window texture).
+    let scale_x = filter_params.matrix_r0.w;
+    let scale_y = filter_params.matrix_r1.w;
+    let nx = -sx * 0.25 * surface_scale * scale_x;
+    let ny = -sy * 0.25 * surface_scale * scale_y;
     return normalize(vec3<f32>(nx, ny, 1.0));
 }
 
@@ -281,19 +345,13 @@ const LIGHT_TYPE_SPOT: f32 = 2.0;
 fn light_vector(uv: vec2<f32>, surface_z: f32) -> vec3<f32> {
     let kind = filter_params.lighting.w;
     if (kind >= LIGHT_TYPE_POINT - 0.5) {
-        // Point and spot lights store an x/y/z position in filter-pixel
-        // space; the light vector is the unit vector from the surface
-        // point toward the light. SVG 1.1 §15.21: all three axes use the
-        // same length scale (filter pixels), so the diff must be evaluated
-        // in pixel space — converting `pos.xy` into UV and leaving `pos.z`
-        // in pixels would mix units and collapse the light vector toward
-        // +Z whenever `z` is large.
-        let surface_pixel = vec3<f32>(
-            uv.x / filter_params.texel_size.x,
-            uv.y / filter_params.texel_size.y,
-            surface_z,
-        );
-        let diff = filter_params.light.xyz - surface_pixel;
+        // Point and spot lights carry user-space `(x, y, z)`; recover the
+        // surface point in matching user-space coordinates and take the
+        // diff so the resulting unit vector is independent of texture
+        // size and projection.
+        let surface_xy = surface_user_xy(uv);
+        let surface_point = vec3<f32>(surface_xy.x, surface_xy.y, surface_z);
+        let diff = filter_params.light.xyz - surface_point;
         return normalize(diff);
     }
     return normalize(filter_params.light.xyz);
@@ -304,22 +362,17 @@ fn light_vector(uv: vec2<f32>, surface_z: f32) -> vec3<f32> {
 /// the cone factor is `max(-dot(L, axis), 0)^specularExponent`, zero outside
 /// `limitingConeAngle`.
 ///
-/// The cone is evaluated in filter-pixel space rather than UV space so the
-/// angle math is dimensionally consistent — the existing diffuse/specular
-/// `light_vector` mixes UV (x, y) with pixel (z), which would degenerate the
-/// cone test for any light positioned above the surface.
+/// Evaluated in user-space so the cone angle matches the author's intent
+/// regardless of projection or texture size.
 fn spot_cone_factor(uv: vec2<f32>, surface_z: f32) -> f32 {
     if (filter_params.lighting.w < LIGHT_TYPE_SPOT - 0.5) {
         return 1.0;
     }
     let axis = normalize(filter_params.light_dir.xyz);
-    let surface_pixel = vec3<f32>(
-        uv.x / filter_params.texel_size.x,
-        uv.y / filter_params.texel_size.y,
-        surface_z,
-    );
-    let light_pixel = filter_params.light.xyz;
-    let diff = surface_pixel - light_pixel;
+    let surface_xy = surface_user_xy(uv);
+    let surface_point = vec3<f32>(surface_xy.x, surface_xy.y, surface_z);
+    let light_point = filter_params.light.xyz;
+    let diff = surface_point - light_point;
     if (dot(diff, diff) <= 1e-6) {
         // Surface coincides with the light origin — fully lit.
         return 1.0;

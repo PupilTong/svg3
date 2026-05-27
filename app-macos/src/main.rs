@@ -119,10 +119,13 @@ impl Gfx {
             config,
             document: None,
             svg_source: String::new(),
-            camera: OrbitCamera::framing(Viewport {
-                width: width as f32,
-                height: height as f32,
-            }),
+            camera: OrbitCamera::framing(
+                Viewport {
+                    width: width as f32,
+                    height: height as f32,
+                },
+                aspect_ratio(width, height),
+            ),
             status: String::new(),
         };
         gfx.set_svg_source(DEFAULT_SVG.to_owned());
@@ -196,7 +199,7 @@ impl Gfx {
             Ok(document) => {
                 let viewport = document_viewport(&document, self.target_viewport());
                 // A freshly loaded document gets a head-on framing.
-                self.camera.reset(viewport);
+                self.camera.reset(viewport, self.target_aspect());
                 self.document = Some((document, viewport));
                 self.set_status("rendered");
             }
@@ -275,9 +278,15 @@ impl Gfx {
         let Some(viewport) = self.document.as_ref().map(|(_, viewport)| *viewport) else {
             return;
         };
-        self.camera.reset(viewport);
+        self.camera.reset(viewport, self.target_aspect());
         self.window.request_redraw();
         self.refresh_title();
+    }
+
+    /// The render target's width / height ratio, used to fit the document
+    /// width inside the window's horizontal field of view.
+    fn target_aspect(&self) -> f32 {
+        aspect_ratio(self.config.width, self.config.height)
     }
 
     fn set_status(&mut self, status: &str) {
@@ -528,6 +537,12 @@ fn push_apple_script_literal_part(parts: &mut Vec<String>, current: &mut String)
     }
     parts.push(format!("\"{current}\""));
     current.clear();
+}
+
+/// Window width / height ratio, clamped against a zero-height surface so a
+/// degenerate window doesn't divide by zero in the camera-framing math.
+fn aspect_ratio(width: u32, height: u32) -> f32 {
+    width.max(1) as f32 / height.max(1) as f32
 }
 
 fn compact_status(status: &str, max_chars: usize) -> Cow<'_, str> {
