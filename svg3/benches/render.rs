@@ -18,7 +18,7 @@ const HEIGHT: u32 = 240;
 
 fn many_shapes_document() -> Document {
     let mut svg = String::from(
-        r##"<svg width="320" height="240"><rect width="100%" height="100%" fill="#0f172a"/>"##,
+        r##"<svg extension="pupiltong" width="320" height="240"><rect width="100%" height="100%" fill="#0f172a"/>"##,
     );
     for i in 0..96 {
         let x = 8 + (i * 31) % 280;

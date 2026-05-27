@@ -166,13 +166,26 @@ impl Mat4 {
     }
 }
 
-/// Parse a `transform` attribute value into a composed [`Mat4`].
+/// Parse an svg3 `transform` attribute value into a composed [`Mat4`].
 ///
 /// Returns `Some(identity)` for an empty / whitespace-only value, and
 /// `None` if any function is unrecognised or malformed — matching SPEC
 /// §2.4 ("a `transform` value containing an unrecognised function is in
 /// error; the affected attribute is ignored").
 pub(crate) fn parse_transform(value: &str) -> Option<Mat4> {
+    parse_transform_impl(value, true)
+}
+
+/// Parse a plain SVG 1.1 `transform` attribute.
+///
+/// This accepts only SVG 1.1 transform functions. svg3's 3D functions are
+/// treated as unrecognised, so the whole attribute is ignored when they
+/// appear in a document that has not opted into the extension.
+pub(crate) fn parse_svg_transform(value: &str) -> Option<Mat4> {
+    parse_transform_impl(value, false)
+}
+
+fn parse_transform_impl(value: &str, allow_3d: bool) -> Option<Mat4> {
     let mut c = Cursor::new(value);
     let mut acc = Mat4::identity();
     c.skip_ws();
@@ -194,7 +207,7 @@ pub(crate) fn parse_transform(value: &str) -> Option<Mat4> {
                 };
                 Mat4::translation(tx, ty, 0.0)
             }
-            "translate3d" => {
+            "translate3d" if allow_3d => {
                 let tx = c.read_number()?;
                 c.skip_ws();
                 let ty = c.read_number()?;
@@ -203,7 +216,7 @@ pub(crate) fn parse_transform(value: &str) -> Option<Mat4> {
                 c.skip_ws();
                 Mat4::translation(tx, ty, tz)
             }
-            "translateZ" => {
+            "translateZ" if allow_3d => {
                 let tz = c.read_number()?;
                 c.skip_ws();
                 Mat4::translation(0.0, 0.0, tz)
@@ -226,22 +239,22 @@ pub(crate) fn parse_transform(value: &str) -> Option<Mat4> {
                         .mul(&Mat4::translation(-cx, -cy, 0.0))
                 }
             }
-            "rotateX" => {
+            "rotateX" if allow_3d => {
                 let a = c.read_angle()?;
                 c.skip_ws();
                 Mat4::rotation_x(a)
             }
-            "rotateY" => {
+            "rotateY" if allow_3d => {
                 let a = c.read_angle()?;
                 c.skip_ws();
                 Mat4::rotation_y(a)
             }
-            "rotateZ" => {
+            "rotateZ" if allow_3d => {
                 let a = c.read_angle()?;
                 c.skip_ws();
                 Mat4::rotation_z(a)
             }
-            "rotate3d" => {
+            "rotate3d" if allow_3d => {
                 let x = c.read_number()?;
                 c.skip_ws();
                 let y = c.read_number()?;
@@ -266,7 +279,7 @@ pub(crate) fn parse_transform(value: &str) -> Option<Mat4> {
                 };
                 Mat4::scaling(sx, sy, 1.0)
             }
-            "scale3d" => {
+            "scale3d" if allow_3d => {
                 let sx = c.read_number()?;
                 c.skip_ws();
                 let sy = c.read_number()?;
@@ -275,7 +288,7 @@ pub(crate) fn parse_transform(value: &str) -> Option<Mat4> {
                 c.skip_ws();
                 Mat4::scaling(sx, sy, sz)
             }
-            "scaleZ" => {
+            "scaleZ" if allow_3d => {
                 let sz = c.read_number()?;
                 c.skip_ws();
                 Mat4::scaling(1.0, 1.0, sz)
@@ -305,7 +318,7 @@ pub(crate) fn parse_transform(value: &str) -> Option<Mat4> {
                 c.skip_ws();
                 Mat4::matrix_2d(a, b, cc, d, e, f)
             }
-            "matrix3d" => {
+            "matrix3d" if allow_3d => {
                 let mut vals = [0.0_f32; 16];
                 for slot in &mut vals {
                     *slot = c.read_number()?;
@@ -495,6 +508,14 @@ mod tests {
         let m = parse_transform("translate(7, 4)").unwrap();
         let p = m.transform_point([1.0, 2.0, 3.0]);
         assert!(approx(p, [8.0, 6.0, 3.0]));
+    }
+
+    #[test]
+    fn plain_svg_transform_rejects_svg3_3d_functions() {
+        assert!(parse_svg_transform("translate(7, 4) rotate(90)").is_some());
+        assert!(parse_svg_transform("translate3d(1, 2, 3)").is_none());
+        assert!(parse_svg_transform("rotateZ(90)").is_none());
+        assert!(parse_svg_transform("translate(7, 4) translateZ(3)").is_none());
     }
 
     #[test]
