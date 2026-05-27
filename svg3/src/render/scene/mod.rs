@@ -68,10 +68,13 @@ pub(crate) enum RenderOp {
 /// position relative to nearby 3D content.
 const Z_PAINTER_STRIDE: f32 = 0.1;
 const DUMMY_COLOR: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+// Pre-Stylo approximation: these are inherited as authored strings because
+// shape resolvers still read presentation attributes directly.
 const INHERITED_PRESENTATION_ATTRS: &[&str] = &[
     "color",
     "fill",
     "fill-opacity",
+    "fill-rule",
     "marker",
     "marker-end",
     "marker-mid",
@@ -296,6 +299,8 @@ fn append_render_ops(
     // Resolve clip-path before filter (SVG 2 render order). When the
     // element references a clip-path, the filter's source texture is
     // clipped to the clip-path's UV rect before primitives run.
+    // TODO: clip geometry is still resolved in viewport space; ancestor
+    // transforms move the source mesh but not the clip region yet.
     let clip_uv = definitions
         .clips
         .resolve(&node.element)
@@ -992,7 +997,10 @@ fn is_definition_container(kind: &ElementKind) -> bool {
 }
 
 fn inherits_to_children(kind: &ElementKind) -> bool {
-    matches!(kind, ElementKind::Svg | ElementKind::Group)
+    matches!(
+        kind,
+        ElementKind::Svg | ElementKind::Group | ElementKind::Marker
+    )
 }
 
 fn is_renderable_element(kind: &ElementKind) -> bool {
@@ -1382,6 +1390,20 @@ mod tests {
     }
 
     #[test]
+    fn build_scene_inherits_root_paint_to_direct_children() {
+        let document =
+            crate::dom::parse(r##"<svg fill="blue"><rect width="10" height="10"/></svg>"##)
+                .unwrap();
+        let mesh = build_scene(&document, vp());
+
+        assert_eq!(mesh.vertices.len(), 4);
+        assert!(mesh
+            .vertices
+            .iter()
+            .all(|vertex| vertex.color == [0.0, 0.0, 1.0, 1.0]));
+    }
+
+    #[test]
     fn build_scene_inherits_group_stroke_for_multiple_lines() {
         let document = crate::dom::parse(
             r##"<svg><g stroke="red" stroke-width="4"><line x1="10" y1="20" x2="40" y2="20"/><line x1="10" y1="40" x2="40" y2="40"/></g></svg>"##,
@@ -1396,6 +1418,43 @@ mod tests {
             .all(|vertex| vertex.color == [1.0, 0.0, 0.0, 1.0]));
         assert!(mesh.vertices.iter().any(|vertex| vertex.position[1] < 20.0));
         assert!(mesh.vertices.iter().any(|vertex| vertex.position[1] > 40.0));
+    }
+
+    #[test]
+    fn build_scene_inherits_group_fill_rule_for_paths() {
+        let direct = crate::dom::parse(
+            r##"<svg><path fill-rule="evenodd" d="M 10 10 H 90 V 90 H 10 Z M 30 30 H 70 V 70 H 30 Z"/></svg>"##,
+        )
+        .unwrap();
+        let inherited = crate::dom::parse(
+            r##"<svg><g fill-rule="evenodd"><path d="M 10 10 H 90 V 90 H 10 Z M 30 30 H 70 V 70 H 30 Z"/></g></svg>"##,
+        )
+        .unwrap();
+        let nonzero = crate::dom::parse(
+            r##"<svg><path d="M 10 10 H 90 V 90 H 10 Z M 30 30 H 70 V 70 H 30 Z"/></svg>"##,
+        )
+        .unwrap();
+
+        let direct = build_scene(&direct, vp());
+        let inherited = build_scene(&inherited, vp());
+        let nonzero = build_scene(&nonzero, vp());
+        assert_eq!(inherited.indices, direct.indices);
+        assert_ne!(inherited.indices, nonzero.indices);
+    }
+
+    #[test]
+    fn marker_children_inherit_marker_presentation_attributes() {
+        let document = crate::dom::parse(
+            r##"<svg><defs><marker id="arrow" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="8" refX="0" refY="0" fill="red"><path d="M0 0 L10 4 L0 8 Z"/></marker></defs><line x1="20" y1="20" x2="40" y2="20" stroke="none" marker-end="url(#arrow)"/></svg>"##,
+        )
+        .unwrap();
+        let mesh = build_scene(&document, vp());
+
+        assert!(!mesh.is_empty());
+        assert!(mesh
+            .vertices
+            .iter()
+            .all(|vertex| vertex.color == [1.0, 0.0, 0.0, 1.0]));
     }
 
     #[test]
