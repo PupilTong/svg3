@@ -158,10 +158,12 @@ pub const CRAB_FULL_SVG: &str = r##"<svg width="400" height="400" xmlns="http://
   <path d="M 258 70 L 202 132 L 252 160 L 208 232 L 312 198 L 266 142 L 264 128 L 312 80 L 285 67 Z"
         fill="#f5d33a"/>
 
-  <!-- Cape: a flowing 2D <path> on the lower-left, drawn behind the
-       body. Stroke gives it the cartoon outline of the 2D reference. -->
-  <path d="M 95 275 Q 115 285 115 320 Q 118 350 105 365 Q 85 370 70 365 Q 50 360 48 340 Q 45 310 55 290 Q 70 275 95 275 Z"
-        fill="#c8242c" stroke="#3a2418" stroke-width="3"/>
+  <!-- Cape: a flowing flag-shaped 2D <path> on the lower-left, drawn
+       behind the body. Anchor at upper-right, curved bulge in the
+       middle, tail point at the lower-left — closer to a flowing
+       cloak silhouette than the previous round blob. -->
+  <path d="M 115 275 C 125 310, 110 350, 75 370 L 45 355 C 50 325, 60 295, 80 280 Z"
+        fill="#c8242c" stroke="#3a2418" stroke-width="3" stroke-linejoin="round"/>
 
   <!-- Hammer head outline + cube. 2D <rect> drawn first as a thin
        dark rim extending slightly outside the cube's silhouette. -->
