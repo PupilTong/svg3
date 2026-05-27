@@ -395,6 +395,12 @@ fn cases() -> Vec<Case> {
             "basic-shapes-overlap",
             r##"<svg><rect x="8" y="8" width="84" height="84" fill="#13294b"/><circle cx="36" cy="36" r="22" fill="#f2c14e"/><ellipse cx="62" cy="62" rx="28" ry="18" fill="#c14b2b"/><line x1="18" y1="80" x2="82" y2="20" stroke="#ffffff" stroke-width="6"/></svg>"##,
         ),
+        // `<g>` composes transforms and inherited presentation attributes
+        // once for all descendants in the group.
+        Case::square(
+            "group-transform-inherited-paint",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><g fill="#f2c14e" stroke="#2563eb" stroke-width="5" transform="translate(8, 6) rotate(8, 50, 50)"><rect x="18" y="18" width="26" height="42"/><circle cx="62" cy="40" r="17" fill="#c14b2b"/><line x1="22" y1="74" x2="78" y2="70" fill="none"/></g></svg>"##,
+        ),
         // SVG paint servers: `<linearGradient>` with user-space coordinates
         // and three `<stop>` entries, sampled per fragment in the shape
         // shader.

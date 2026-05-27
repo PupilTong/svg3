@@ -7,8 +7,8 @@
 //! the SVG WPT suite (`svg/shapes/circle-0*.svg`).
 //!
 //! Length parsing, `fill`, and stroke resolution are shared with the other
-//! basic shapes — see [`crate::render::shapes`]. `transform` and grouping are not
-//! handled yet — see the crate roadmap.
+//! basic shapes — see [`crate::render::shapes`]. Group inheritance and
+//! `transform` composition are applied by [`crate::render::scene`].
 
 use crate::dom::Element;
 use lyon_tessellation::path::Path;

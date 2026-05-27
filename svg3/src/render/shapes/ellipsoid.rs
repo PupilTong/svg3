@@ -25,9 +25,9 @@
 //! with the same colour, so the end result is the same union of triangles.
 //!
 //! Length parsing and `fill` resolution are shared with the 2D basic shapes
-//! and [`crate::render::shapes::cube`] — see [`crate::render::shapes`]. `transform` and
-//! grouping are not applied yet, matching the rest of
-//! [`crate::render::scene::build_scene`].
+//! and [`crate::render::shapes::cube`] — see [`crate::render::shapes`].
+//! Group inheritance and `transform` composition are applied by
+//! [`crate::render::scene`].
 
 use crate::dom::Element;
 

@@ -1,9 +1,8 @@
 //! [SPEC.md](../../SPEC.md) §4 transform-attribute parser (v0 subset).
 //!
-//! Scoped to `<surface>`'s child `<path>` elements at this milestone; the
-//! global transform pipeline (composing `transform` onto every shape per
-//! SPEC §4.3) is still a roadmap item, but its parser can reuse this
-//! module unchanged when it lands.
+//! Shared by `<surface>`'s child `<path>` handling and the scene walker's
+//! global transform pipeline, which composes `transform` attributes onto
+//! rendered elements per SPEC §4.3.
 //!
 //! Supported functions:
 //!   * SVG 1.1 §7.6: `translate`, `scale`, `rotate(angle [, cx, cy])`,

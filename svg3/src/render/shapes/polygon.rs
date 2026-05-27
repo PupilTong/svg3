@@ -9,8 +9,9 @@
 //! Unlike `<rect>` and `<circle>`, a polygon can be concave, so its fill is
 //! tessellated by ear clipping rather than a centre-pivoted triangle fan.
 //! `fill` and stroke resolution and the mesh [`Vertex`] constructor are
-//! shared with the other basic shapes — see [`crate::render::shapes`]. `transform`
-//! and grouping are not handled yet — see the crate roadmap.
+//! shared with the other basic shapes — see [`crate::render::shapes`]. Group
+//! inheritance and `transform` composition are applied by
+//! [`crate::render::scene`].
 
 use crate::dom::Element;
 use lyon_tessellation::path::Path;

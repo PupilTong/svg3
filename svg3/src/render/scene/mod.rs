@@ -10,6 +10,10 @@
 
 mod markers;
 
+use std::borrow::Cow;
+use std::cell::Cell;
+use std::collections::BTreeMap;
+
 use crate::dom::{Document, Element, ElementKind, NodeId};
 
 use crate::render::filters::{
@@ -18,6 +22,7 @@ use crate::render::filters::{
 };
 use crate::render::paint::{Paint, PaintBounds, PaintDefinitions};
 use crate::render::shapes;
+use crate::render::transform::{parse_transform, Mat4};
 use crate::render::{Mesh, Viewport};
 
 use markers::{append_marker_instances, MarkerDefinitions};
@@ -63,6 +68,23 @@ pub(crate) enum RenderOp {
 /// position relative to nearby 3D content.
 const Z_PAINTER_STRIDE: f32 = 0.1;
 const DUMMY_COLOR: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+const INHERITED_PRESENTATION_ATTRS: &[&str] = &[
+    "color",
+    "fill",
+    "fill-opacity",
+    "marker",
+    "marker-end",
+    "marker-mid",
+    "marker-start",
+    "stroke",
+    "stroke-dasharray",
+    "stroke-dashoffset",
+    "stroke-linecap",
+    "stroke-linejoin",
+    "stroke-miterlimit",
+    "stroke-opacity",
+    "stroke-width",
+];
 
 /// Whether an element belongs to the 2D plane (`z = 0`) or the 3D
 /// graphics-element set ([SPEC.md](../../SPEC.md) §5). Drives whether a
@@ -108,6 +130,87 @@ struct SceneContext<'a> {
     twod_index: std::cell::Cell<u32>,
 }
 
+#[derive(Debug)]
+pub(super) struct TraversalState {
+    transform: Mat4,
+    inherited_attrs: BTreeMap<String, String>,
+}
+
+impl Default for TraversalState {
+    fn default() -> Self {
+        Self {
+            transform: Mat4::identity(),
+            inherited_attrs: BTreeMap::new(),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct TraversalFrame {
+    previous_transform: Mat4,
+    restored_attrs: Vec<(String, Option<String>)>,
+}
+
+#[derive(Clone, Copy)]
+struct RenderDefinitions<'a> {
+    filters: &'a FilterDefinitions,
+    clips: &'a ClipPathDefinitions,
+}
+
+impl TraversalState {
+    fn enter_element(&mut self, element: &Element) -> TraversalFrame {
+        let previous_transform = self.transform;
+        if let Some(local) = element
+            .attributes
+            .get("transform")
+            .and_then(|value| parse_transform(value))
+        {
+            self.transform = self.transform.mul(&local);
+        }
+
+        let mut restored_attrs = Vec::new();
+        if inherits_to_children(&element.kind) {
+            for &name in INHERITED_PRESENTATION_ATTRS {
+                if let Some(value) = element.attributes.get(name) {
+                    restored_attrs.push((
+                        name.to_owned(),
+                        self.inherited_attrs.insert(name.to_owned(), value.clone()),
+                    ));
+                }
+            }
+        }
+
+        TraversalFrame {
+            previous_transform,
+            restored_attrs,
+        }
+    }
+
+    fn exit_element(&mut self, frame: TraversalFrame) {
+        self.transform = frame.previous_transform;
+        for (name, previous) in frame.restored_attrs.into_iter().rev() {
+            if let Some(value) = previous {
+                self.inherited_attrs.insert(name, value);
+            } else {
+                self.inherited_attrs.remove(&name);
+            }
+        }
+    }
+
+    fn effective_element<'a>(&self, element: &'a Element) -> Cow<'a, Element> {
+        if self.inherited_attrs.is_empty() {
+            return Cow::Borrowed(element);
+        }
+
+        let mut attributes = self.inherited_attrs.clone();
+        attributes.extend(element.attributes.clone());
+        Cow::Owned(Element {
+            kind: element.kind.clone(),
+            attributes,
+        })
+    }
+}
+
 /// Walk `document` and tessellate every supported 2D SVG shape into one
 /// combined [`Mesh`].
 ///
@@ -117,8 +220,8 @@ struct SceneContext<'a> {
 /// appended in document order, so a later shape paints over an earlier one. A
 /// shape that is not rendered — a degenerate size, `fill="none"`, or a
 /// missing/`none` stroke on stroke-only geometry — contributes nothing.
-/// `transform` and grouping are not applied yet, so a shape is placed at its
-/// own coordinates regardless of any ancestor `<g>`.
+/// `<g>` and root-level inherited presentation attributes are applied to
+/// descendants, and `transform` attributes compose down the tree.
 pub fn build_scene(document: &Document, viewport: Viewport) -> Mesh {
     let markers = MarkerDefinitions::default();
     let paints = PaintDefinitions::default();
@@ -126,12 +229,15 @@ pub fn build_scene(document: &Document, viewport: Viewport) -> Mesh {
         viewport,
         markers: &markers,
         paints: &paints,
-        twod_index: std::cell::Cell::new(0),
+        twod_index: Cell::new(0),
     };
     let mut mesh = Mesh::default();
+    let mut state = TraversalState::default();
+    let root_frame = state.enter_element(document.element(document.root()));
     for child in document.node(document.root()).children.iter().copied() {
-        append_subtree_mesh(document, child, &context, true, &mut mesh);
+        append_subtree_mesh(document, child, &context, &mut state, true, &mut mesh);
     }
+    state.exit_element(root_frame);
     mesh
 }
 
@@ -140,27 +246,34 @@ pub fn build_scene(document: &Document, viewport: Viewport) -> Mesh {
 pub(crate) fn build_render_plan(document: &Document, viewport: Viewport) -> Vec<RenderOp> {
     let filters = FilterDefinitions::collect(document);
     let clips = ClipPathDefinitions::collect(document);
+    let definitions = RenderDefinitions {
+        filters: &filters,
+        clips: &clips,
+    };
     let markers = MarkerDefinitions::default();
     let paints = PaintDefinitions::default();
     let context = SceneContext {
         viewport,
         markers: &markers,
         paints: &paints,
-        twod_index: std::cell::Cell::new(0),
+        twod_index: Cell::new(0),
     };
     let mut plan = Vec::new();
     let mut pending_mesh = Mesh::default();
+    let mut state = TraversalState::default();
+    let root_frame = state.enter_element(document.element(document.root()));
     for child in document.node(document.root()).children.iter().copied() {
         append_render_ops(
             document,
             child,
-            &filters,
-            &clips,
+            definitions,
             &context,
+            &mut state,
             &mut pending_mesh,
             &mut plan,
         );
     }
+    state.exit_element(root_frame);
     flush_mesh(&mut pending_mesh, &mut plan);
     plan
 }
@@ -168,9 +281,9 @@ pub(crate) fn build_render_plan(document: &Document, viewport: Viewport) -> Vec<
 fn append_render_ops(
     document: &Document,
     id: crate::dom::NodeId,
-    filters: &FilterDefinitions,
-    clips: &ClipPathDefinitions,
+    definitions: RenderDefinitions<'_>,
     context: &SceneContext<'_>,
+    state: &mut TraversalState,
     pending_mesh: &mut Mesh,
     plan: &mut Vec<RenderOp>,
 ) {
@@ -178,18 +291,20 @@ fn append_render_ops(
     if is_definition_container(&node.element.kind) {
         return;
     }
+    let frame = state.enter_element(&node.element);
 
     // Resolve clip-path before filter (SVG 2 render order). When the
     // element references a clip-path, the filter's source texture is
     // clipped to the clip-path's UV rect before primitives run.
-    let clip_uv = clips
+    let clip_uv = definitions
+        .clips
         .resolve(&node.element)
         .map(|shape| shape.to_uv(context.viewport));
 
-    match filters.resolve(&node.element) {
+    match definitions.filters.resolve(&node.element) {
         Some(FilterResolution::Chain(chain)) => {
             let mut filtered_mesh = Mesh::default();
-            append_subtree_mesh(document, id, context, true, &mut filtered_mesh);
+            append_entered_subtree_mesh(document, id, context, state, true, &mut filtered_mesh);
             // A primitive affects the chain output if any of:
             //  - its parameters are non-identity (`is_visible`)
             //  - its DAG wiring is non-default — e.g. `<feGaussianBlur
@@ -222,10 +337,11 @@ fn append_render_ops(
                 if visible {
                     flush_mesh(pending_mesh, plan);
                     // SVG `currentColor`: resolve the filtered element's
-                    // `color` attribute and substitute it into any
+                    // effective `color` attribute and substitute it into any
                     // `flood-color="currentColor"` / `lighting-color="currentColor"`
                     // primitives in the chain.
-                    let current_color = resolve_current_color(&node.element);
+                    let effective = state.effective_element(&node.element);
+                    let current_color = resolve_current_color(effective.as_ref());
                     let mut owned_chain: Vec<FilterPrimitive> = chain.to_vec();
                     for primitive in owned_chain.iter_mut() {
                         primitive.substitute_current_color(current_color);
@@ -239,6 +355,7 @@ fn append_render_ops(
                     pending_mesh.append(filtered_mesh);
                 }
             }
+            state.exit_element(frame);
             return;
         }
         Some(FilterResolution::EmptyTransparent) => {
@@ -246,18 +363,29 @@ fn append_render_ops(
             // filter — the result is just transparent black. Drop the
             // element's geometry on the floor; the filter "replaces" the
             // source with nothing.
+            state.exit_element(frame);
             return;
         }
         None => {}
     }
 
-    append_element_mesh_biased(document, id, context, true, pending_mesh);
+    append_element_mesh_biased(document, id, context, state, true, pending_mesh);
     if owns_children(&node.element.kind) {
+        state.exit_element(frame);
         return;
     }
     for child in node.children.iter().copied() {
-        append_render_ops(document, child, filters, clips, context, pending_mesh, plan);
+        append_render_ops(
+            document,
+            child,
+            definitions,
+            context,
+            state,
+            pending_mesh,
+            plan,
+        );
     }
+    state.exit_element(frame);
 }
 
 /// Resolve `currentColor` from an element's `color` attribute. Without a
@@ -276,6 +404,7 @@ fn append_subtree_mesh(
     document: &Document,
     id: NodeId,
     context: &SceneContext<'_>,
+    state: &mut TraversalState,
     include_markers: bool,
     mesh: &mut Mesh,
 ) {
@@ -283,7 +412,21 @@ fn append_subtree_mesh(
     if is_definition_container(&node.element.kind) {
         return;
     }
-    append_element_mesh_biased(document, id, context, include_markers, mesh);
+    let frame = state.enter_element(&node.element);
+    append_entered_subtree_mesh(document, id, context, state, include_markers, mesh);
+    state.exit_element(frame);
+}
+
+fn append_entered_subtree_mesh(
+    document: &Document,
+    id: NodeId,
+    context: &SceneContext<'_>,
+    state: &mut TraversalState,
+    include_markers: bool,
+    mesh: &mut Mesh,
+) {
+    let node = document.node(id);
+    append_element_mesh_biased(document, id, context, state, include_markers, mesh);
     if owns_children(&node.element.kind) {
         return;
     }
@@ -291,7 +434,7 @@ fn append_subtree_mesh(
         // TODO: Nested filters need their own render plan and offscreen pass.
         // This first filter milestone treats a filtered subtree as raw source
         // geometry for the outer filter.
-        append_subtree_mesh(document, child, context, include_markers, mesh);
+        append_subtree_mesh(document, child, context, state, include_markers, mesh);
     }
 }
 
@@ -306,14 +449,30 @@ fn append_element_mesh_biased(
     document: &Document,
     id: NodeId,
     context: &SceneContext<'_>,
+    state: &TraversalState,
     include_markers: bool,
     mesh: &mut Mesh,
 ) {
+    let source_element = &document.node(id).element;
+    if !is_renderable_element(&source_element.kind) {
+        return;
+    }
+
     let start = mesh.vertices.len();
-    let element = &document.node(id).element;
-    append_element_mesh(document, id, context, include_markers, mesh);
+    let element = state.effective_element(source_element);
+    append_element_mesh(
+        document,
+        id,
+        element.as_ref(),
+        context,
+        include_markers,
+        mesh,
+    );
     if mesh.vertices.len() == start {
         return;
+    }
+    if state.transform != Mat4::identity() {
+        apply_transform(mesh, start, state.transform);
     }
     if ElementDimension::of(&element.kind) == ElementDimension::TwoD {
         let index = context.twod_index.get();
@@ -325,13 +484,13 @@ fn append_element_mesh_biased(
 fn append_element_mesh(
     document: &Document,
     id: NodeId,
+    element: &Element,
     context: &SceneContext<'_>,
     include_markers: bool,
     mesh: &mut Mesh,
 ) {
     let viewport = context.viewport;
     let markers = context.markers;
-    let element = &document.node(id).element;
     let features = element_features(element, include_markers);
     match &element.kind {
         ElementKind::Rect => {
@@ -744,6 +903,12 @@ fn append_element_mesh(
     }
 }
 
+fn apply_transform(mesh: &mut Mesh, start: usize, transform: Mat4) {
+    for vertex in &mut mesh.vertices[start..] {
+        vertex.position = transform.transform_point(vertex.position);
+    }
+}
+
 fn append_painted_mesh(mut part: Mesh, paint: Paint, mesh: &mut Mesh) {
     paint.apply_to_mesh(&mut part);
     mesh.append(part);
@@ -826,6 +991,26 @@ fn is_definition_container(kind: &ElementKind) -> bool {
     )
 }
 
+fn inherits_to_children(kind: &ElementKind) -> bool {
+    matches!(kind, ElementKind::Svg | ElementKind::Group)
+}
+
+fn is_renderable_element(kind: &ElementKind) -> bool {
+    matches!(
+        kind,
+        ElementKind::Rect
+            | ElementKind::Circle
+            | ElementKind::Ellipse
+            | ElementKind::Polygon
+            | ElementKind::Polyline
+            | ElementKind::Line
+            | ElementKind::Path
+            | ElementKind::Cube
+            | ElementKind::Ellipsoid
+            | ElementKind::Surface
+    )
+}
+
 /// Whether an element owns its children directly (consumes them as
 /// geometric inputs rather than as nested scene content). `<surface>`
 /// reads its `<path>` children to build a Bezier-patch surface; the
@@ -878,6 +1063,21 @@ mod tests {
             width: 100.0,
             height: 100.0,
         }
+    }
+
+    fn assert_xy(position: [f32; 3], expected: [f32; 2]) {
+        assert!(
+            (position[0] - expected[0]).abs() < 1e-6,
+            "x mismatch: got {}, expected {}",
+            position[0],
+            expected[0]
+        );
+        assert!(
+            (position[1] - expected[1]).abs() < 1e-6,
+            "y mismatch: got {}, expected {}",
+            position[1],
+            expected[1]
+        );
     }
 
     #[test]
@@ -1157,6 +1357,85 @@ mod tests {
         // The ellipse, reached despite the `<g>` wrappers, is an SDF quad.
         assert_eq!(mesh.vertices.len(), 4);
         assert_eq!(mesh.vertices[0].kind, KIND_ELLIPSE);
+    }
+
+    #[test]
+    fn build_scene_inherits_group_paint_for_multiple_descendants() {
+        let document = crate::dom::parse(
+            r##"<svg><g fill="blue"><rect width="10" height="10"/><circle cx="30" cy="30" r="6"/><rect x="50" width="10" height="10" fill="red"/></g></svg>"##,
+        )
+        .unwrap();
+        let mesh = build_scene(&document, vp());
+
+        let blue = mesh
+            .vertices
+            .iter()
+            .filter(|vertex| vertex.color == [0.0, 0.0, 1.0, 1.0])
+            .count();
+        let red = mesh
+            .vertices
+            .iter()
+            .filter(|vertex| vertex.color == [1.0, 0.0, 0.0, 1.0])
+            .count();
+        assert_eq!(blue, 8, "the rect and circle should inherit group fill");
+        assert_eq!(red, 4, "the explicit child fill should override the group");
+    }
+
+    #[test]
+    fn build_scene_inherits_group_stroke_for_multiple_lines() {
+        let document = crate::dom::parse(
+            r##"<svg><g stroke="red" stroke-width="4"><line x1="10" y1="20" x2="40" y2="20"/><line x1="10" y1="40" x2="40" y2="40"/></g></svg>"##,
+        )
+        .unwrap();
+        let mesh = build_scene(&document, vp());
+
+        assert!(!mesh.is_empty());
+        assert!(mesh
+            .vertices
+            .iter()
+            .all(|vertex| vertex.color == [1.0, 0.0, 0.0, 1.0]));
+        assert!(mesh.vertices.iter().any(|vertex| vertex.position[1] < 20.0));
+        assert!(mesh.vertices.iter().any(|vertex| vertex.position[1] > 40.0));
+    }
+
+    #[test]
+    fn build_scene_composes_nested_group_transforms() {
+        let document = crate::dom::parse(
+            r#"<svg><g transform="translate(10, 0)"><g transform="scale(2)"><rect x="5" y="6" width="4" height="3"/></g></g></svg>"#,
+        )
+        .unwrap();
+        let mesh = build_scene(&document, vp());
+
+        assert_eq!(mesh.vertices.len(), 4);
+        assert_xy(mesh.vertices[0].position, [20.0, 12.0]);
+        assert_xy(mesh.vertices[1].position, [28.0, 12.0]);
+        assert_xy(mesh.vertices[2].position, [28.0, 18.0]);
+        assert_xy(mesh.vertices[3].position, [20.0, 18.0]);
+    }
+
+    #[test]
+    fn render_plan_filters_group_source_with_inherited_paint_and_transform() {
+        let document = crate::dom::parse(
+            r##"<svg><filter id="soft"><feGaussianBlur stdDeviation="1"/></filter><g fill="blue" transform="translate(10, 0)" filter="url(#soft)"><rect width="10" height="10"/></g></svg>"##,
+        )
+        .unwrap();
+        let plan = build_render_plan(&document, vp());
+
+        assert_eq!(plan.len(), 1);
+        let RenderOp::Filter { mesh, .. } = &plan[0] else {
+            panic!("expected the filtered group to be isolated");
+        };
+        assert_eq!(mesh.vertices.len(), 4);
+        assert!(mesh
+            .vertices
+            .iter()
+            .all(|vertex| vertex.color == [0.0, 0.0, 1.0, 1.0]));
+        let min_x = mesh
+            .vertices
+            .iter()
+            .map(|vertex| vertex.position[0])
+            .fold(f32::INFINITY, f32::min);
+        assert_eq!(min_x, 10.0, "group transform should be applied once");
     }
 
     #[test]
