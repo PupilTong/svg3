@@ -99,6 +99,35 @@ fn alpha_cross_png_data_uri() -> String {
     png_data_uri(16, 16, &rgba)
 }
 
+/// The three-sphere lighting document — three green discs each lit by a
+/// different `<fe…Light>` source through a `feDiffuseLighting` + arithmetic
+/// `feComposite` chain. Shared between the orthographic and perspective
+/// snapshot cases so the only difference between their goldens is the
+/// projection (and the depth handling that surfaces under perspective).
+const THREE_SPHERES_LIGHTING_SVG: &str = r##"<svg width="440" height="140" xmlns="http://www.w3.org/2000/svg">
+  <filter id="lightMe1">
+    <feDiffuseLighting in="SourceGraphic" result="light" lighting-color="white">
+      <fePointLight x="150" y="60" z="20" />
+    </feDiffuseLighting>
+    <feComposite in="SourceGraphic" in2="light" operator="arithmetic" k1="1" k2="0" k3="0" k4="0" />
+  </filter>
+  <circle cx="170" cy="80" r="50" fill="green" filter="url(#lightMe1)" />
+  <filter id="lightMe2">
+    <feDiffuseLighting in="SourceGraphic" result="light" lighting-color="white">
+      <feDistantLight azimuth="240" elevation="20" />
+    </feDiffuseLighting>
+    <feComposite in="SourceGraphic" in2="light" operator="arithmetic" k1="1" k2="0" k3="0" k4="0" />
+  </filter>
+  <circle cx="280" cy="80" r="50" fill="green" filter="url(#lightMe2)" />
+  <filter id="lightMe3">
+    <feDiffuseLighting in="SourceGraphic" result="light" lighting-color="white">
+      <feSpotLight x="360" y="5" z="30" limitingConeAngle="20" pointsAtX="390" pointsAtY="80" pointsAtZ="0" />
+    </feDiffuseLighting>
+    <feComposite in="SourceGraphic" in2="light" operator="arithmetic" k1="1" k2="0" k3="0" k4="0" />
+  </filter>
+  <circle cx="390" cy="80" r="50" fill="green" filter="url(#lightMe3)" />
+</svg>"##;
+
 /// All snapshot cases: the 2D shape references, then the 3D camera views.
 fn cases() -> Vec<Case> {
     // A deliberately asymmetric scene — a yellow disc near the top-left and
@@ -746,6 +775,85 @@ fn cases() -> Vec<Case> {
             "filter-spot-lighting",
             r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="spot"><feDiffuseLighting surfaceScale="5" diffuseConstant="1" lighting-color="#ffffff"><feSpotLight x="50" y="50" z="40" pointsAtX="50" pointsAtY="50" pointsAtZ="0" specularExponent="4" limitingConeAngle="35"/></feDiffuseLighting></filter><circle cx="50" cy="50" r="28" fill="#888888" filter="url(#spot)"/></svg>"##,
         ),
+        // The MDN canonical "three lights side-by-side" example: a row of
+        // three green discs lit respectively by a `<fePointLight>`, a
+        // `<feDistantLight>`, and a `<feSpotLight>`, each composited with
+        // `feComposite operator="arithmetic" k1=1 k2=0 k3=0 k4=0` —
+        // i.e. multiply the green source by the lighting result. Pins the
+        // canonical "modulate the source by a light" recipe across all
+        // three light source kinds in a single document, and exercises a
+        // wide non-square user-space (440×140).
+        Case::sized(
+            "filter-three-spheres-lighting",
+            THREE_SPHERES_LIGHTING_SVG,
+            440,
+            140,
+        ),
+        // Same three-sphere doc, but viewed through the 3D perspective
+        // camera that `app-macos` uses. Pins the fix for a
+        // multi-filter perspective bug: the filter composite's halo NDC
+        // depth was hardcoded to `0.5` (the orthographic z=0 plane), so
+        // under perspective every filter past the first one wrote depth
+        // `> 0.5` for its actual geometry and lost the `LessEqual`
+        // depth test against the previous filter's halo, dropping every
+        // subsequent sphere. The shader now reads the renderer-supplied
+        // NDC depth of `z = 0` under the active projection.
+        Case::sized(
+            "filter-three-spheres-lighting-perspective",
+            THREE_SPHERES_LIGHTING_SVG,
+            440,
+            140,
+        )
+        .with_camera(Camera::facing(440, 140)),
+        // Same three-sphere doc, viewed through a *yawed* perspective
+        // camera. Pins the second half of the perspective-filter fix:
+        // light positions and spot-cone math used to live in filter
+        // texture pixel coordinates (with a single `extent / viewport`
+        // pre-scale that assumed orthographic). Under a yawed camera
+        // the geometry projects non-uniformly, so the cone test shifted
+        // wildly off the lit region and left a hard black wedge across
+        // sphere 3. The lighting shader now recovers each texel's
+        // user-space `(X, Y)` via an inverse homography of the
+        // projection's `z = 0` plane, so light vectors evaluate in
+        // SVG user-space units regardless of camera pose.
+        Case::sized(
+            "filter-three-spheres-lighting-yawed",
+            THREE_SPHERES_LIGHTING_SVG,
+            440,
+            140,
+        )
+        .with_camera({
+            let mut c = Camera::facing(440, 140);
+            // Match the kind of yaw an `app-macos` user produces with a
+            // right-arrow orbit: shift the eye to the +X side, keep the
+            // look-at at the document centre, eye at the same distance.
+            c.eye.x += 120.0;
+            c
+        }),
+        // The same three-sphere doc viewed through a *pitched* perspective
+        // camera. Pins the third aspect of the perspective-filter fix: the
+        // halo NDC depth used to be a single value sampled at the document
+        // centre, which is correct for any axis-aligned projection but
+        // wrong as soon as the z = 0 plane crosses a range of NDC depths
+        // across the screen — under pitch every fragment past the centre
+        // failed the `LessEqual` depth test and was clipped, leaving the
+        // bottom half of spheres past the first one missing. The composite
+        // shader now computes the z = 0 plane NDC depth per fragment from
+        // the inverse projection packed into the composite uniform.
+        Case::sized(
+            "filter-three-spheres-lighting-pitched",
+            THREE_SPHERES_LIGHTING_SVG,
+            440,
+            140,
+        )
+        .with_camera({
+            let mut c = Camera::facing(440, 140);
+            // Match a `+15°` pitch from the `app-macos` orbit camera:
+            // lift the eye towards `-Y` and pull it back along `+Z` so
+            // the look direction tilts down at the document.
+            c.eye.y -= 100.0;
+            c
+        }),
         // The MDN canonical `feSpecularLighting` example, verbatim: a 220×220
         // viewBox circle lit by a `<fePointLight>` with `lighting-color` =
         // `#bbbbbb` and `specularExponent="20"`, then composited onto the

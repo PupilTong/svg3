@@ -924,6 +924,7 @@ impl Renderer {
             target,
             target_depth,
             extent,
+            view_projection,
         );
     }
 
@@ -979,7 +980,7 @@ impl Renderer {
             }
             FilterPrimitiveKind::SpecularLighting(l) | FilterPrimitiveKind::DiffuseLighting(l) => {
                 let specular = matches!(primitive.kind, FilterPrimitiveKind::SpecularLighting(_));
-                let uniform = lighting_uniform(extent, viewport, *l, specular);
+                let uniform = lighting_uniform(extent, viewport, view_projection, *l, specular);
                 self.encode_filter_pass(
                     encoder,
                     &self.lighting_pipeline,
@@ -1471,8 +1472,10 @@ impl Renderer {
         destination: &wgpu::TextureView,
         destination_depth: &wgpu::TextureView,
         extent: wgpu::Extent3d,
+        view_projection: Mat4,
     ) {
-        let uniform = FilterUniform::composite(extent.width, extent.height);
+        let uniform =
+            FilterUniform::composite_with_projection(extent.width, extent.height, view_projection);
         let bind_group = self.create_composite_bind_group(
             chain_output,
             source_view,
