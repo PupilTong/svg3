@@ -2386,6 +2386,62 @@ mod tests {
     }
 
     #[test]
+    fn render_to_image_skips_cube_without_extension_attribute() {
+        let document = crate::dom::parse(
+            r#"<svg width="64" height="64"><cube cx="32" cy="32" cz="0" size="32" fill="blue"/></svg>"#,
+        )
+        .unwrap();
+        let config = RenderConfig {
+            width: 64,
+            height: 64,
+            ..RenderConfig::default()
+        };
+        let Some(renderer) =
+            skip_or_renderer("render_to_image_skips_cube_without_extension_attribute")
+        else {
+            return;
+        };
+
+        let image = renderer
+            .render_to_image(&document, config)
+            .expect("headless render failed");
+
+        assert_eq!(
+            image.pixel(32, 32)[3],
+            0,
+            "plain SVG documents must not paint svg3 <cube> elements"
+        );
+    }
+
+    #[test]
+    fn render_to_image_skips_surface_and_children_without_extension_attribute() {
+        let document = crate::dom::parse(
+            r#"<svg width="64" height="64"><surface d="M 0 L 1" fill="blue"><path d="M 16 16 H 48 V 48 H 16 Z"/><path d="M 16 16 H 48 V 48 H 16 Z" transform="translateZ(20)"/></surface></svg>"#,
+        )
+        .unwrap();
+        let config = RenderConfig {
+            width: 64,
+            height: 64,
+            ..RenderConfig::default()
+        };
+        let Some(renderer) = skip_or_renderer(
+            "render_to_image_skips_surface_and_children_without_extension_attribute",
+        ) else {
+            return;
+        };
+
+        let image = renderer
+            .render_to_image(&document, config)
+            .expect("headless render failed");
+
+        assert_eq!(
+            image.pixel(32, 32)[3],
+            0,
+            "plain SVG documents must not paint svg3 <surface> elements or their child paths"
+        );
+    }
+
+    #[test]
     fn render_to_image_draws_cube_orthographic() {
         let document = crate::dom::parse(
             r#"<svg extension="pupiltong" width="64" height="64"><cube cx="32" cy="32" cz="0" size="32" fill="blue"/></svg>"#,
