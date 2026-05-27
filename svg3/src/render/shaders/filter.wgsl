@@ -194,6 +194,22 @@ fn plane_ndc_depth(uv: vec2<f32>) -> f32 {
 fn fs_composite(in: VertexOutput) -> CompositeOutput {
     let color = sample_in1(in.uv);
     let src_depth = textureSample(source_depth_texture, depth_sampler, in.uv);
+    // Discard fragments that are simultaneously outside the source
+    // silhouette AND make zero colour contribution. Without this the
+    // composite quad — which covers the whole filter region (≈ the
+    // viewport) — writes the `z = 0` plane's NDC depth at every empty
+    // pixel, and under a perspective + orbit camera that plane tilts
+    // and slices through any 3D geometry whose back face sits behind
+    // it. We still write `plane_ndc_depth` at non-source pixels that
+    // *do* contribute colour (the filter's blur / drop-shadow / lit
+    // flat-region halo), because subsequent 2D filters chain through
+    // those pixels via the `LessEqual` tie at the plane's depth.
+    // Inside the source silhouette we always pass through (even at
+    // `alpha = 0`, e.g. the dark side of an `feSpecularLighting`
+    // sphere) so the source geometry's depth still gets written.
+    if (color.a <= 0.0 && src_depth >= 1.0) {
+        discard;
+    }
     var depth: f32;
     if (src_depth < 1.0) {
         depth = src_depth;

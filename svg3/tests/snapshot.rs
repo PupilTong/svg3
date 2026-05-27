@@ -25,6 +25,7 @@ use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 mod common;
+mod crab_cases;
 
 use common::{png_data_uri, quadrant_png_data_uri, solid_png_data_uri};
 use svg3::dom::parse;
@@ -1394,6 +1395,52 @@ fn cases() -> Vec<Case> {
             c.eye.y -= 30.0;
             c
         }),
+        // ---- 3D crab character ----
+        //
+        // Three progressive cases that build the same character out of
+        // SPEC §5 3D primitives shaded purely by an SVG filter chain
+        // (alpha-bump-into-feDiffuseLighting/feSpecularLighting). They
+        // are the regression evidence for the "no scene-lighting feature
+        // needed — filters do the shading" approach. Fixtures live in
+        // `tests/crab_cases.rs`.
+        //
+        // 1. The probe: one ellipsoid + the shade filter. Smoke test for
+        //    "filter on a 3D primitive produces convincing fake-3D".
+        Case::sized(
+            "shade-on-ellipsoid",
+            crab_cases::SHADE_PROBE_SVG,
+            crab_cases::SHADE_PROBE_SIZE,
+            crab_cases::SHADE_PROBE_SIZE,
+        ),
+        // 2. The face — body + two eyes + mouth. Validates that the
+        //    filter result composes across adjacent ellipsoids and that
+        //    layered face features at higher cz read correctly against
+        //    the body.
+        Case::sized(
+            "crab-face",
+            crab_cases::CRAB_FACE_SVG,
+            crab_cases::CRAB_FACE_SIZE,
+            crab_cases::CRAB_FACE_SIZE,
+        ),
+        // 3. The full character: cape, hammer (cube + small yellow cube
+        //    "bolt"), body, arms, legs, face. End-to-end coverage of
+        //    the modeling approach.
+        Case::sized(
+            "crab-full",
+            crab_cases::CRAB_FULL_SVG,
+            crab_cases::CRAB_FULL_SIZE,
+            crab_cases::CRAB_FULL_SIZE,
+        ),
+        // 4. The 2D reference asset (loaded from
+        //    `tests/fixtures/crab_2d.svg`) rendered through svg3.
+        //    Useful as a baseline for the 2D-renderer next to the
+        //    `crab-full` 3D fixture above.
+        Case::sized(
+            "crab-2d-reference",
+            crab_cases::CRAB_2D_REFERENCE_SVG,
+            crab_cases::CRAB_2D_REFERENCE_WIDTH,
+            crab_cases::CRAB_2D_REFERENCE_HEIGHT,
+        ),
     ]
 }
 
