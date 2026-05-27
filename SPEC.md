@@ -31,7 +31,7 @@ elements and attribute values defined in this specification.
 Specifically, `svg3` adds:
 
 - A set of *three-dimensional graphics elements* (§5) — `'cube'`,
-  `'ellipsoid'`, and `'surface'` — which describe geometry that
+  `'ellipsoid'`, `'surface'`, and `'cylinder'` — which describe geometry that
   extends along all three coordinate axes.
 - A set of *additional transform functions* (§4) — `translate3d`,
   `translateZ`, `scale3d`, `scaleZ`, `rotateX`, `rotateY`,
@@ -544,6 +544,53 @@ The `'surface'` element does not replace SVG 1.1's `'path'` element
 ([SVG11], §8); two-dimensional paths in the plane `z = 0` are
 authored with the SVG 1.1 `'path'` element, and the two are
 processed independently.
+
+### 5.5 The `'cylinder'` element
+
+The `'cylinder'` element defines a right elliptical cylinder in the
+user coordinate system. In local coordinates its central axis is
+parallel to the Z axis.
+
+**Attributes:**
+
+| Attribute | Type | Default | Description |
+|---|---|---|---|
+| `cx` | `<coordinate>` | `0` | X coordinate of the centre. |
+| `cy` | `<coordinate>` | `0` | Y coordinate of the centre. |
+| `cz` | `<coordinate>` | `0` | Z coordinate of the centre. |
+| `r` | `<length>` | (none) | Radius of a circular cap; defaults `rx` and `ry`, and supplies the default diameter for `depth`. |
+| `rx` | `<length>` | `r` if present, otherwise `0` | Cap radius along X. |
+| `ry` | `<length>` | `r` if present, otherwise `0` | Cap radius along Y. |
+| `depth` | `<length>` | `2r` if `r` is present, otherwise `0` | Extent along Z. |
+
+A negative value for `'r'`, `'rx'`, `'ry'`, or `'depth'` is an
+error. The element MUST be rendered as if it had not been specified.
+
+A value of zero for `'rx'`, `'ry'`, or `'depth'` disables rendering
+of the element.
+
+If `'rx'` or `'ry'` is not specified and `'r'` is, the unspecified
+attribute defaults to the value of `'r'`. If `'depth'` is not
+specified and `'r'` is, `'depth'` defaults to twice the value of
+`'r'` resolved on the Z-axis length basis. If neither is specified,
+the per-axis attribute defaults to zero.
+
+The element describes the set of points `(x, y, z)` satisfying
+
+```
+((x − cx) / rx)² + ((y − cy) / ry)² ≤ 1
+and
+cz − depth / 2 ≤ z ≤ cz + depth / 2
+```
+
+(with both radii and depth strictly positive — see the zero-disables
+rule above) in local coordinates. The element's `'transform'` is then
+applied per §4.3.
+
+The `'cylinder'` element does not replace SVG 1.1's `'circle'` or
+`'ellipse'` elements ([SVG11], §9.4); two-dimensional circles and
+ellipses in the plane `z = 0` are authored with the SVG 1.1
+elements, and the three are processed independently.
 
 ---
 

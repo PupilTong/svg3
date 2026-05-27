@@ -363,14 +363,15 @@ mod tests {
 
     #[test]
     fn parse_nested_groups() {
-        let xml = "<svg><g><cube/><ellipsoid/></g></svg>";
+        let xml = "<svg><g><cube/><ellipsoid/><cylinder/></g></svg>";
         let doc = parse(xml).unwrap();
         let group_id = doc.node(doc.root()).children[0];
         let group = doc.node(group_id);
         assert_eq!(group.element.kind, ElementKind::Group);
-        assert_eq!(group.children.len(), 2);
+        assert_eq!(group.children.len(), 3);
         assert_eq!(doc.element(group.children[0]).kind, ElementKind::Cube);
         assert_eq!(doc.element(group.children[1]).kind, ElementKind::Ellipsoid);
+        assert_eq!(doc.element(group.children[2]).kind, ElementKind::Cylinder);
     }
 
     #[test]

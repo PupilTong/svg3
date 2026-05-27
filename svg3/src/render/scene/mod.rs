@@ -80,7 +80,10 @@ enum ElementDimension {
 impl ElementDimension {
     fn of(kind: &ElementKind) -> Self {
         match kind {
-            ElementKind::Cube | ElementKind::Ellipsoid | ElementKind::Surface => Self::ThreeD,
+            ElementKind::Cube
+            | ElementKind::Ellipsoid
+            | ElementKind::Cylinder
+            | ElementKind::Surface => Self::ThreeD,
             _ => Self::TwoD,
         }
     }
@@ -296,8 +299,8 @@ fn append_subtree_mesh(
 /// bias. Snapshots the mesh's vertex count, delegates to the tessellator,
 /// then shifts the newly-appended vertices forward in Z if the element is
 /// 2D — fill, stroke, and marker geometry all share the same bias slot so
-/// the element composites cleanly internally. 3D elements (`<cube>`) keep
-/// their authored world Z so spatial occlusion against the 2D plane and
+/// the element composites cleanly internally. 3D elements keep their
+/// authored world Z so spatial occlusion against the 2D plane and
 /// other 3D content works per [SPEC.md](../../SPEC.md) §7.3.
 fn append_element_mesh_biased(
     document: &Document,
@@ -705,6 +708,22 @@ fn append_element_mesh(
                 }
             }
         }
+        ElementKind::Cylinder => {
+            if let Some(geo) = shapes::cylinder::resolve_cylinder(element, viewport) {
+                let cylinder_mesh = shapes::cylinder::tessellate_cylinder(&geo, DUMMY_COLOR);
+                if let Some(bounds) = PaintBounds::from_mesh(&cylinder_mesh) {
+                    if let Some(paint) = context.paints.resolve_fill(
+                        document,
+                        element,
+                        bounds,
+                        viewport,
+                        features.has_opacity_attrs,
+                    ) {
+                        append_painted_mesh(cylinder_mesh, paint, mesh);
+                    }
+                }
+            }
+        }
         ElementKind::Surface => {
             if let Some(geo) = shapes::surface::resolve_surface(document, id, viewport) {
                 let surface_mesh = shapes::surface::tessellate_surface(&geo, DUMMY_COLOR);
@@ -1009,6 +1028,40 @@ mod tests {
         // SPEC §5.3: a zero radius on any axis disables rendering.
         let document =
             crate::dom::parse(r#"<svg><ellipsoid cx="50" cy="50" r="10" rz="0"/></svg>"#).unwrap();
+        assert!(build_scene(&document, vp()).is_empty());
+    }
+
+    #[test]
+    fn build_scene_tessellates_cylinder() {
+        // A `<cylinder>` is dispatched to the cylinder tessellator and
+        // contributes cap + side-wall triangles at its authored Z.
+        let document =
+            crate::dom::parse(r#"<svg><cylinder cx="50" cy="50" cz="0" r="20" depth="30"/></svg>"#)
+                .unwrap();
+        let mesh = build_scene(&document, vp());
+        assert!(!mesh.vertices.is_empty());
+        assert_eq!(mesh.indices.len() % 3, 0);
+        assert!(mesh.vertices.iter().all(|v| v.kind == 0));
+        let min_z = mesh
+            .vertices
+            .iter()
+            .map(|v| v.position[2])
+            .fold(f32::INFINITY, f32::min);
+        let max_z = mesh
+            .vertices
+            .iter()
+            .map(|v| v.position[2])
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert!((min_z + 15.0).abs() < 1e-4);
+        assert!((max_z - 15.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn build_scene_skips_zero_depth_cylinder() {
+        // SPEC §5.5: a zero depth disables rendering.
+        let document =
+            crate::dom::parse(r#"<svg><cylinder cx="50" cy="50" r="10" depth="0"/></svg>"#)
+                .unwrap();
         assert!(build_scene(&document, vp()).is_empty());
     }
 
