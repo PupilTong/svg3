@@ -1425,6 +1425,16 @@ fn cases() -> Vec<Case> {
             crab_cases::CRAB_FULL_SIZE,
             crab_cases::CRAB_FULL_SIZE,
         ),
+        // 4. The 2D reference asset (loaded from
+        //    `tests/fixtures/crab_2d.svg`) rendered through svg3.
+        //    Useful as a baseline for the 2D-renderer next to the
+        //    `crab-full` 3D fixture above.
+        Case::sized(
+            "crab-2d-reference",
+            crab_cases::CRAB_2D_REFERENCE_SVG,
+            crab_cases::CRAB_2D_REFERENCE_WIDTH,
+            crab_cases::CRAB_2D_REFERENCE_HEIGHT,
+        ),
     ]
 }
 

@@ -9,6 +9,22 @@
 
 #![allow(dead_code)]
 
+/// Width for [`CRAB_2D_REFERENCE_SVG`] — matches the 2D asset's
+/// `viewBox` X extent. svg3 does not yet honor `viewBox` /
+/// `preserveAspectRatio`, so the render target needs to be large
+/// enough to contain the source paths' native coordinates or the
+/// image clips to a corner of the canvas.
+pub const CRAB_2D_REFERENCE_WIDTH: u32 = 2500;
+/// Height for [`CRAB_2D_REFERENCE_SVG`].
+pub const CRAB_2D_REFERENCE_HEIGHT: u32 = 2345;
+
+/// The 2D reference asset the 3D fixtures are loosely modelled after,
+/// loaded from `tests/fixtures/crab_2d.svg`. Snapshotting this through
+/// svg3 documents how the project's own 2D renderer handles a real-
+/// world stylised SVG (paths + linear gradients + clip-path) — a
+/// baseline next to the `crab-full` 3D render.
+pub const CRAB_2D_REFERENCE_SVG: &str = include_str!("fixtures/crab_2d.svg");
+
 /// Render size (square) for [`SHADE_PROBE_SVG`].
 pub const SHADE_PROBE_SIZE: u32 = 200;
 
