@@ -746,6 +746,95 @@ fn cases() -> Vec<Case> {
             "filter-spot-lighting",
             r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="spot"><feDiffuseLighting surfaceScale="5" diffuseConstant="1" lighting-color="#ffffff"><feSpotLight x="50" y="50" z="40" pointsAtX="50" pointsAtY="50" pointsAtZ="0" specularExponent="4" limitingConeAngle="35"/></feDiffuseLighting></filter><circle cx="50" cy="50" r="28" fill="#888888" filter="url(#spot)"/></svg>"##,
         ),
+        // The MDN canonical `feSpecularLighting` example, verbatim: a 220×220
+        // viewBox circle lit by a `<fePointLight>` with `lighting-color` =
+        // `#bbbbbb` and `specularExponent="20"`, then composited onto the
+        // source via `feComposite operator="arithmetic"` (`k2=1, k3=1`). The
+        // golden pins the canonical recipe for "add a specular highlight on
+        // top of the source" — the same pattern shown on the MDN page for
+        // `feSpecularLighting` — and exercises a non-square user-space (the
+        // `width="200"` plus `viewBox="0 0 220 220"`).
+        Case::sized(
+            "filter-specular-lighting-mdn",
+            r##"<svg
+  height="200"
+  width="200"
+  viewBox="0 0 220 220"
+  xmlns="http://www.w3.org/2000/svg">
+  <filter id="filter">
+    <feSpecularLighting
+      result="specOut"
+      specularExponent="20"
+      lighting-color="#bbbbbb">
+      <fePointLight x="50" y="75" z="200" />
+    </feSpecularLighting>
+    <feComposite
+      in="SourceGraphic"
+      in2="specOut"
+      operator="arithmetic"
+      k1="0"
+      k2="1"
+      k3="1"
+      k4="0" />
+  </filter>
+  <circle cx="110" cy="110" r="100" filter="url(#filter)" />
+</svg>"##,
+            200,
+            200,
+        ),
+        // `feDiffuseLighting` with `feDistantLight`, varying `surfaceScale`
+        // (positive vs negative). WPT `filters-diffuse-01` exercises this
+        // axis; per SVG 1.1 §15.21 a negative surfaceScale inverts the
+        // height-field, flipping the lit/dark sides.
+        Case::square(
+            "filter-diffuse-lighting-negative-surface-scale",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="up"><feDiffuseLighting surfaceScale="10" diffuseConstant="1" lighting-color="white"><feDistantLight azimuth="45" elevation="45"/></feDiffuseLighting></filter><filter id="down"><feDiffuseLighting surfaceScale="-10" diffuseConstant="1" lighting-color="white"><feDistantLight azimuth="45" elevation="45"/></feDiffuseLighting></filter><circle cx="30" cy="50" r="18" fill="#666666" filter="url(#up)"/><circle cx="70" cy="50" r="18" fill="#666666" filter="url(#down)"/></svg>"##,
+        ),
+        // WPT `filters-light-02`-derived: `azimuth="0"` (light coming from
+        // the +x direction in SVG y-down user space) lights the right side
+        // of the disc; `azimuth="180"` lights the left. Pins the spec
+        // convention that azimuth is interpreted clockwise from the +x axis.
+        Case::square(
+            "filter-distant-light-azimuth-pair",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="r"><feSpecularLighting surfaceScale="5" specularConstant="20" specularExponent="10" lighting-color="white"><feDistantLight azimuth="0" elevation="30"/></feSpecularLighting></filter><filter id="l"><feSpecularLighting surfaceScale="5" specularConstant="20" specularExponent="10" lighting-color="white"><feDistantLight azimuth="180" elevation="30"/></feSpecularLighting></filter><circle cx="30" cy="50" r="18" fill="black" filter="url(#r)"/><circle cx="70" cy="50" r="18" fill="black" filter="url(#l)"/></svg>"##,
+        ),
+        // WPT `filters-light-05`-derived: `elevation="90"` is straight
+        // overhead (full diffuse strength at the lit pole), `elevation="0"`
+        // is grazing (much darker). Pins the spec convention that elevation
+        // is the angle above the surface plane in degrees.
+        Case::square(
+            "filter-distant-light-elevation-pair",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="overhead"><feDiffuseLighting surfaceScale="5" diffuseConstant="1" lighting-color="white"><feDistantLight azimuth="0" elevation="90"/></feDiffuseLighting></filter><filter id="grazing"><feDiffuseLighting surfaceScale="5" diffuseConstant="1" lighting-color="white"><feDistantLight azimuth="0" elevation="0"/></feDiffuseLighting></filter><circle cx="30" cy="50" r="18" fill="white" filter="url(#overhead)"/><circle cx="70" cy="50" r="18" fill="white" filter="url(#grazing)"/></svg>"##,
+        ),
+        // WPT `filters-specular-01`-derived: side-by-side `specularExponent`
+        // values 1, 4, and 20. The exponent controls highlight tightness —
+        // 1 spreads diffusely; 20 collapses to a small bright spot.
+        Case::square(
+            "filter-specular-exponent-sweep",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="e1"><feSpecularLighting surfaceScale="10" specularConstant="1" specularExponent="1" lighting-color="white"><feDistantLight azimuth="45" elevation="45"/></feSpecularLighting></filter><filter id="e4"><feSpecularLighting surfaceScale="10" specularConstant="1" specularExponent="4" lighting-color="white"><feDistantLight azimuth="45" elevation="45"/></feSpecularLighting></filter><filter id="e20"><feSpecularLighting surfaceScale="10" specularConstant="1" specularExponent="20" lighting-color="white"><feDistantLight azimuth="45" elevation="45"/></feSpecularLighting></filter><circle cx="20" cy="50" r="14" fill="#222222" filter="url(#e1)"/><circle cx="50" cy="50" r="14" fill="#222222" filter="url(#e4)"/><circle cx="80" cy="50" r="14" fill="#222222" filter="url(#e20)"/></svg>"##,
+        ),
+        // WPT `filters-light-04`-derived: `feSpotLight` with
+        // `limitingConeAngle="0"` produces no illumination (zero cone), and
+        // a wide cone produces near-full illumination. Pins that the cone
+        // limit is honored even with extreme angles.
+        Case::square(
+            "filter-spot-limiting-cone-extremes",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="narrow"><feDiffuseLighting surfaceScale="5" diffuseConstant="1" lighting-color="white"><feSpotLight x="50" y="50" z="40" pointsAtX="50" pointsAtY="50" pointsAtZ="0" specularExponent="0" limitingConeAngle="0.001"/></feDiffuseLighting></filter><filter id="wide"><feDiffuseLighting surfaceScale="5" diffuseConstant="1" lighting-color="white"><feSpotLight x="50" y="50" z="40" pointsAtX="50" pointsAtY="50" pointsAtZ="0" specularExponent="0" limitingConeAngle="89"/></feDiffuseLighting></filter><circle cx="30" cy="50" r="18" fill="white" filter="url(#narrow)"/><circle cx="70" cy="50" r="18" fill="white" filter="url(#wide)"/></svg>"##,
+        ),
+        // `feSpotLight specularExponent="0"`: the spec's "no falloff inside
+        // the cone" case. The cone-factor should be a flat 1.0 wherever the
+        // cone is hit, giving a sharp lit disc rather than a soft spot.
+        Case::square(
+            "filter-spot-no-cone-falloff",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="flat"><feDiffuseLighting surfaceScale="5" diffuseConstant="1" lighting-color="white"><feSpotLight x="50" y="50" z="50" pointsAtX="50" pointsAtY="50" pointsAtZ="0" specularExponent="0" limitingConeAngle="30"/></feDiffuseLighting></filter><circle cx="50" cy="50" r="32" fill="white" filter="url(#flat)"/></svg>"##,
+        ),
+        // Combined diffuse + specular via `feMerge` (the WPT `light-05`
+        // recipe). Stacks a diffuse base under a specular highlight to
+        // produce a "shaded sphere" look from one distant light.
+        Case::square(
+            "filter-lighting-diffuse-plus-specular-merge",
+            r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="combined"><feDiffuseLighting surfaceScale="10" diffuseConstant="1" lighting-color="#88aacc" result="diff"><feDistantLight azimuth="135" elevation="45"/></feDiffuseLighting><feSpecularLighting in="SourceGraphic" surfaceScale="10" specularConstant="1" specularExponent="20" lighting-color="white" result="spec"><feDistantLight azimuth="135" elevation="45"/></feSpecularLighting><feMerge><feMergeNode in="diff"/><feMergeNode in="spec"/></feMerge></filter><circle cx="50" cy="50" r="30" fill="white" filter="url(#combined)"/></svg>"##,
+        ),
         // SVG image filters: referenced `<feImage>` data URLs become
         // lazily-uploaded GPU textures, then composite in painter order just
         // like geometry-sourced filters.

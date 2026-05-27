@@ -979,7 +979,7 @@ impl Renderer {
             }
             FilterPrimitiveKind::SpecularLighting(l) | FilterPrimitiveKind::DiffuseLighting(l) => {
                 let specular = matches!(primitive.kind, FilterPrimitiveKind::SpecularLighting(_));
-                let uniform = lighting_uniform(extent, *l, specular);
+                let uniform = lighting_uniform(extent, viewport, *l, specular);
                 self.encode_filter_pass(
                     encoder,
                     &self.lighting_pipeline,
