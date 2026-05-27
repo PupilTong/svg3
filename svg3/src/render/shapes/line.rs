@@ -6,8 +6,9 @@
 //! SVG 1.1 geometry rules ([SVG11] §9.5).
 //!
 //! Length parsing and stroke paint resolution are shared with the other
-//! basic shapes — see [`crate::render::shapes`]. `transform`, grouping, and CSS
-//! cascade input are not handled yet — see the crate roadmap.
+//! basic shapes — see [`crate::render::shapes`]. Group inheritance and
+//! `transform` composition are applied by [`crate::render::scene`]; CSS
+//! cascade input is still a roadmap item.
 
 use crate::dom::Element;
 use lyon_tessellation::path::Path;

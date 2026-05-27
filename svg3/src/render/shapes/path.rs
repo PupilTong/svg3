@@ -5,8 +5,9 @@
 //! resulting path with Lyon, while keeping the rest of the crate's current
 //! presentation-attribute model: `fill`, `stroke`, `stroke-width`,
 //! `stroke-linecap`, `stroke-linejoin`, dashed strokes, `pathLength`, and
-//! `fill-rule` are read directly from attributes; CSS and transforms are not
-//! applied yet.
+//! `fill-rule` are read directly from attributes; CSS cascade input is not
+//! applied yet. Group inheritance and `transform` composition are handled by
+//! [`crate::render::scene`].
 
 use crate::dom::Element;
 use lyon_tessellation::geometry_builder::{BuffersBuilder, VertexBuffers};

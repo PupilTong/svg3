@@ -24,10 +24,9 @@
 //! the other 3D primitives' SPEC §5 error behaviour.
 //!
 //! Each child `<path>` may carry its own `'transform'` attribute (see
-//! [`crate::render::transform`]) lifting its local `z = 0` polyline into 3D. The
-//! surface's *own* `'transform'` is not yet composed by the scene walker
-//! — that's an svg3-wide gap, see
-//! [`crate::render::scene::build_scene`].
+//! [`crate::render::transform`]) lifting its local `z = 0` polyline into
+//! 3D. The surface's own `'transform'` and any ancestor group transforms are
+//! composed by [`crate::render::scene`].
 
 use std::collections::{BTreeMap, BTreeSet};
 

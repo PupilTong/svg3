@@ -27,7 +27,7 @@ use crate::render::paint::PaintDefinitions;
 use crate::render::shapes::{self, stroke::MarkerKind};
 use crate::render::{Mesh, Viewport};
 
-use super::{append_subtree_mesh, url_reference_id, SceneContext};
+use super::{append_subtree_mesh, url_reference_id, SceneContext, TraversalState};
 
 #[derive(Debug, Default)]
 pub(super) struct MarkerDefinitions {
@@ -266,12 +266,22 @@ pub(super) fn append_marker_instances(
             paints,
             twod_index: std::cell::Cell::new(0),
         };
+        let mut marker_state = TraversalState::default();
+        let marker_frame = marker_state.enter_element(&document.node(marker.node).element);
         // Marker subtrees render with marker expansion disabled. This keeps
         // authored marker references inside a marker from recursively
         // instancing other marker definitions.
         for child in document.node(marker.node).children.iter().copied() {
-            append_subtree_mesh(document, child, &marker_context, false, &mut marker_mesh);
+            append_subtree_mesh(
+                document,
+                child,
+                &marker_context,
+                &mut marker_state,
+                false,
+                &mut marker_mesh,
+            );
         }
+        marker_state.exit_element(marker_frame);
         if marker_mesh.is_empty() {
             continue;
         }
