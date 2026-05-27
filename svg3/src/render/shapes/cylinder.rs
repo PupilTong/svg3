@@ -396,9 +396,9 @@ mod tests {
     #[test]
     fn tessellate_winds_caps_and_side_wall_outward() {
         let geo = CylinderGeometry {
-            cx: 0.0,
-            cy: 0.0,
-            cz: 0.0,
+            cx: 12.5,
+            cy: -7.0,
+            cz: 4.0,
             rx: 2.0,
             ry: 3.0,
             depth: 4.0,
@@ -420,10 +420,15 @@ mod tests {
                 (a[1] + b[1] + c[1]) / 3.0,
                 (a[2] + b[2] + c[2]) / 3.0,
             ];
-            let dot = normal[0] * centroid[0] + normal[1] * centroid[1] + normal[2] * centroid[2];
+            let outward = [
+                centroid[0] - geo.cx,
+                centroid[1] - geo.cy,
+                centroid[2] - geo.cz,
+            ];
+            let dot = normal[0] * outward[0] + normal[1] * outward[1] + normal[2] * outward[2];
             assert!(
                 dot > 0.0,
-                "triangle is wound inward: normal {normal:?} vs centroid {centroid:?}"
+                "triangle is wound inward: normal {normal:?} vs outward {outward:?}"
             );
         }
     }
