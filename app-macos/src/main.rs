@@ -45,7 +45,7 @@ const CLEAR_COLOR: wgpu::Color = wgpu::Color {
     a: 1.0,
 };
 
-const DEFAULT_SVG: &str = r##"<svg><rect x="40" y="40" width="220" height="130" fill="#2563eb"/><circle cx="245" cy="155" r="64" fill="#f97316"/><ellipse cx="395" cy="130" rx="62" ry="38" fill="#a855f7"/><polygon points="505,58 565,170 448,170" fill="#facc15"/><polyline points="400,70 575,220 355,220" fill="#22c55e"/><line x1="48" y1="220" x2="330" y2="70" stroke="#111827" stroke-width="10"/><path d="M 620 58 C 675 58 690 148 635 178 Q 595 148 620 58 Z" fill="#14b8a6" stroke="#0f172a" stroke-width="6"/><cube cx="490" cy="270" cz="0" size="90" fill="#ef4444"/><ellipsoid cx="200" cy="280" cz="0" rx="60" ry="40" rz="40" fill="#10b981"/><surface fill="#ec4899" d="P 0 10 4 8 P 1 12 5 10 P 2 14 6 12 P 3 8 7 14 P 4 11 0 9 P 5 13 1 11 P 6 15 2 13 P 7 9 3 15"><path d="M 699 270 C 699 302.586 672.586 329 640 329"/><path d="M 640 329 C 607.414 329 581 302.586 581 270"/><path d="M 581 270 C 581 237.414 607.414 211 640 211"/><path d="M 640 211 C 672.586 211 699 237.414 699 270"/><path d="M 671 270 C 671 287.121 657.121 301 640 301"/><path d="M 640 301 C 622.879 301 609 287.121 609 270"/><path d="M 609 270 C 609 252.879 622.879 239 640 239"/><path d="M 640 239 C 657.121 239 671 252.879 671 270"/><path d="M 14 0 C 14 18.667 -14 18.667 -14 0" transform="translate3d(685, 270, 0) rotateX(90)"/><path d="M -14 0 C -14 -18.667 14 -18.667 14 0" transform="translate3d(685, 270, 0) rotateX(90)"/><path d="M 14 0 C 14 18.667 -14 18.667 -14 0" transform="translate3d(640, 315, 0) rotateZ(90) rotateX(90)"/><path d="M -14 0 C -14 -18.667 14 -18.667 14 0" transform="translate3d(640, 315, 0) rotateZ(90) rotateX(90)"/><path d="M 14 0 C 14 18.667 -14 18.667 -14 0" transform="translate3d(595, 270, 0) rotateZ(180) rotateX(90)"/><path d="M -14 0 C -14 -18.667 14 -18.667 14 0" transform="translate3d(595, 270, 0) rotateZ(180) rotateX(90)"/><path d="M 14 0 C 14 18.667 -14 18.667 -14 0" transform="translate3d(640, 225, 0) rotateZ(270) rotateX(90)"/><path d="M -14 0 C -14 -18.667 14 -18.667 14 0" transform="translate3d(640, 225, 0) rotateZ(270) rotateX(90)"/></surface></svg>"##;
+const DEFAULT_SVG: &str = r##"<svg extension="pupiltong"><rect x="40" y="40" width="220" height="130" fill="#2563eb"/><circle cx="245" cy="155" r="64" fill="#f97316"/><ellipse cx="395" cy="130" rx="62" ry="38" fill="#a855f7"/><polygon points="505,58 565,170 448,170" fill="#facc15"/><polyline points="400,70 575,220 355,220" fill="#22c55e"/><line x1="48" y1="220" x2="330" y2="70" stroke="#111827" stroke-width="10"/><path d="M 620 58 C 675 58 690 148 635 178 Q 595 148 620 58 Z" fill="#14b8a6" stroke="#0f172a" stroke-width="6"/><cube cx="490" cy="270" cz="0" size="90" fill="#ef4444"/><ellipsoid cx="200" cy="280" cz="0" rx="60" ry="40" rz="40" fill="#10b981"/><surface fill="#ec4899" d="P 0 10 4 8 P 1 12 5 10 P 2 14 6 12 P 3 8 7 14 P 4 11 0 9 P 5 13 1 11 P 6 15 2 13 P 7 9 3 15"><path d="M 699 270 C 699 302.586 672.586 329 640 329"/><path d="M 640 329 C 607.414 329 581 302.586 581 270"/><path d="M 581 270 C 581 237.414 607.414 211 640 211"/><path d="M 640 211 C 672.586 211 699 237.414 699 270"/><path d="M 671 270 C 671 287.121 657.121 301 640 301"/><path d="M 640 301 C 622.879 301 609 287.121 609 270"/><path d="M 609 270 C 609 252.879 622.879 239 640 239"/><path d="M 640 239 C 657.121 239 671 252.879 671 270"/><path d="M 14 0 C 14 18.667 -14 18.667 -14 0" transform="translate3d(685, 270, 0) rotateX(90)"/><path d="M -14 0 C -14 -18.667 14 -18.667 14 0" transform="translate3d(685, 270, 0) rotateX(90)"/><path d="M 14 0 C 14 18.667 -14 18.667 -14 0" transform="translate3d(640, 315, 0) rotateZ(90) rotateX(90)"/><path d="M -14 0 C -14 -18.667 14 -18.667 14 0" transform="translate3d(640, 315, 0) rotateZ(90) rotateX(90)"/><path d="M 14 0 C 14 18.667 -14 18.667 -14 0" transform="translate3d(595, 270, 0) rotateZ(180) rotateX(90)"/><path d="M -14 0 C -14 -18.667 14 -18.667 14 0" transform="translate3d(595, 270, 0) rotateZ(180) rotateX(90)"/><path d="M 14 0 C 14 18.667 -14 18.667 -14 0" transform="translate3d(640, 225, 0) rotateZ(270) rotateX(90)"/><path d="M -14 0 C -14 -18.667 14 -18.667 14 0" transform="translate3d(640, 225, 0) rotateZ(270) rotateX(90)"/></surface></svg>"##;
 
 /// GPU state, created once the window exists.
 ///
@@ -181,7 +181,7 @@ impl Gfx {
             self.renderer.encode_document(
                 document,
                 *viewport,
-                self.view_projection(*viewport),
+                self.view_projection(document, *viewport),
                 &view,
                 self.target_extent(),
                 &mut encoder,
@@ -248,15 +248,19 @@ impl Gfx {
         }
     }
 
-    /// The view-projection matrix for the current camera framing `viewport`.
-    fn view_projection(&self, viewport: Viewport) -> glam::Mat4 {
-        RenderConfig {
+    /// The view-projection matrix for the current document and viewport.
+    fn view_projection(&self, document: &Document, viewport: Viewport) -> glam::Mat4 {
+        let config = RenderConfig {
             format: self.config.format,
             width: self.config.width.max(1),
             height: self.config.height.max(1),
             camera: Some(self.camera.to_camera(viewport)),
+        };
+        if document.svg3_extension_enabled() {
+            config.view_projection()
+        } else {
+            config.projection()
         }
-        .view_projection()
     }
 
     /// Orbit the camera by `dyaw` / `dpitch` radians and redraw.
@@ -477,7 +481,7 @@ fn prompt_for_svg(default_source: &str) -> Result<Option<String>> {
         .arg(format!(
             "set promptText to {}",
             apple_script_string(
-                "Paste an SVG string. This demo currently renders <rect>, <circle>, <ellipse>, <polygon>, filled <polyline>, <line>, and <path> elements; svg3's 3D <cube>, <ellipsoid>, and <surface> primitives (the latter taking <path> children plus its own SVG-path-data-like d attribute over child indices); and referenced <filter> definitions with <feGaussianBlur/> and PNG data-URL <feImage/>."
+                "Paste an SVG string. This demo currently renders <rect>, <circle>, <ellipse>, <polygon>, filled <polyline>, <line>, and <path> elements; referenced <filter> definitions with <feGaussianBlur/> and PNG data-URL <feImage/>; and, when the root has extension=\"pupiltong\", svg3's 3D <cube>, <ellipsoid>, and <surface> primitives."
             )
         ))
         .arg("-e")

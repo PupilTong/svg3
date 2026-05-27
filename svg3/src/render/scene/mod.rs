@@ -22,7 +22,7 @@ use crate::render::filters::{
 };
 use crate::render::paint::{Paint, PaintBounds, PaintDefinitions};
 use crate::render::shapes;
-use crate::render::transform::{parse_transform, Mat4};
+use crate::render::transform::{parse_svg_transform, parse_transform, Mat4};
 use crate::render::{Mesh, Viewport};
 
 use markers::{append_marker_instances, MarkerDefinitions};
@@ -127,6 +127,7 @@ struct SceneContext<'a> {
     viewport: Viewport,
     markers: &'a MarkerDefinitions,
     paints: &'a PaintDefinitions,
+    svg3_extension_enabled: bool,
     /// Monotonic counter for the next 2D shape's painter-order Z bias
     /// slot. [`Cell`] so the immutable `&SceneContext` plumbing already
     /// established here can mutate it as we walk.
@@ -161,13 +162,15 @@ struct RenderDefinitions<'a> {
 }
 
 impl TraversalState {
-    fn enter_element(&mut self, element: &Element) -> TraversalFrame {
+    fn enter_element(&mut self, element: &Element, svg3_extension_enabled: bool) -> TraversalFrame {
         let previous_transform = self.transform;
-        if let Some(local) = element
-            .attributes
-            .get("transform")
-            .and_then(|value| parse_transform(value))
-        {
+        if let Some(local) = element.attributes.get("transform").and_then(|value| {
+            if svg3_extension_enabled {
+                parse_transform(value)
+            } else {
+                parse_svg_transform(value)
+            }
+        }) {
             self.transform = self.transform.mul(&local);
         }
 
@@ -225,6 +228,9 @@ impl TraversalState {
 /// missing/`none` stroke on stroke-only geometry — contributes nothing.
 /// `<g>` and root-level inherited presentation attributes are applied to
 /// descendants, and `transform` attributes compose down the tree.
+/// svg3-only 3D elements and 3D transform functions are enabled only when
+/// the root `<svg>` has `extension="pupiltong"`; otherwise they are ignored
+/// so the document renders as normal SVG.
 pub fn build_scene(document: &Document, viewport: Viewport) -> Mesh {
     let markers = MarkerDefinitions::default();
     let paints = PaintDefinitions::default();
@@ -232,11 +238,15 @@ pub fn build_scene(document: &Document, viewport: Viewport) -> Mesh {
         viewport,
         markers: &markers,
         paints: &paints,
+        svg3_extension_enabled: document.svg3_extension_enabled(),
         twod_index: Cell::new(0),
     };
     let mut mesh = Mesh::default();
     let mut state = TraversalState::default();
-    let root_frame = state.enter_element(document.element(document.root()));
+    let root_frame = state.enter_element(
+        document.element(document.root()),
+        context.svg3_extension_enabled,
+    );
     for child in document.node(document.root()).children.iter().copied() {
         append_subtree_mesh(document, child, &context, &mut state, true, &mut mesh);
     }
@@ -259,12 +269,16 @@ pub(crate) fn build_render_plan(document: &Document, viewport: Viewport) -> Vec<
         viewport,
         markers: &markers,
         paints: &paints,
+        svg3_extension_enabled: document.svg3_extension_enabled(),
         twod_index: Cell::new(0),
     };
     let mut plan = Vec::new();
     let mut pending_mesh = Mesh::default();
     let mut state = TraversalState::default();
-    let root_frame = state.enter_element(document.element(document.root()));
+    let root_frame = state.enter_element(
+        document.element(document.root()),
+        context.svg3_extension_enabled,
+    );
     for child in document.node(document.root()).children.iter().copied() {
         append_render_ops(
             document,
@@ -294,7 +308,10 @@ fn append_render_ops(
     if is_definition_container(&node.element.kind) {
         return;
     }
-    let frame = state.enter_element(&node.element);
+    if is_svg3_3d_element(&node.element.kind) && !context.svg3_extension_enabled {
+        return;
+    }
+    let frame = state.enter_element(&node.element, context.svg3_extension_enabled);
 
     // Resolve clip-path before filter (SVG 2 render order). When the
     // element references a clip-path, the filter's source texture is
@@ -417,7 +434,10 @@ fn append_subtree_mesh(
     if is_definition_container(&node.element.kind) {
         return;
     }
-    let frame = state.enter_element(&node.element);
+    if is_svg3_3d_element(&node.element.kind) && !context.svg3_extension_enabled {
+        return;
+    }
+    let frame = state.enter_element(&node.element, context.svg3_extension_enabled);
     append_entered_subtree_mesh(document, id, context, state, include_markers, mesh);
     state.exit_element(frame);
 }
@@ -431,6 +451,9 @@ fn append_entered_subtree_mesh(
     mesh: &mut Mesh,
 ) {
     let node = document.node(id);
+    if is_svg3_3d_element(&node.element.kind) && !context.svg3_extension_enabled {
+        return;
+    }
     append_element_mesh_biased(document, id, context, state, include_markers, mesh);
     if owns_children(&node.element.kind) {
         return;
@@ -495,7 +518,6 @@ fn append_element_mesh(
     mesh: &mut Mesh,
 ) {
     let viewport = context.viewport;
-    let markers = context.markers;
     let features = element_features(element, include_markers);
     match &element.kind {
         ElementKind::Rect => {
@@ -652,8 +674,7 @@ fn append_element_mesh(
                 if has_markers {
                     append_marker_instances(
                         document,
-                        markers,
-                        context.paints,
+                        context,
                         element,
                         &shapes::polygon::to_path(&geo),
                         stroke_style
@@ -715,8 +736,7 @@ fn append_element_mesh(
                 if has_markers {
                     append_marker_instances(
                         document,
-                        markers,
-                        context.paints,
+                        context,
                         element,
                         &shapes::polyline::to_path(&geo),
                         stroke_style
@@ -788,8 +808,7 @@ fn append_element_mesh(
                         .expect("stroke width should exist when markers exist");
                     append_marker_instances(
                         document,
-                        markers,
-                        context.paints,
+                        context,
                         element,
                         &shapes::line::to_path(&geo),
                         marker_stroke_width,
@@ -830,8 +849,7 @@ fn append_element_mesh(
                     let stroke_style = shapes::stroke::resolve_stroke_style(element, viewport);
                     append_marker_instances(
                         document,
-                        markers,
-                        context.paints,
+                        context,
                         element,
                         geo.path(),
                         stroke_style.width,
@@ -1020,6 +1038,13 @@ fn is_renderable_element(kind: &ElementKind) -> bool {
     )
 }
 
+fn is_svg3_3d_element(kind: &ElementKind) -> bool {
+    matches!(
+        kind,
+        ElementKind::Cube | ElementKind::Ellipsoid | ElementKind::Cylinder | ElementKind::Surface
+    )
+}
+
 /// Whether an element owns its children directly (consumes them as
 /// geometric inputs rather than as nested scene content). `<surface>`
 /// reads its `<path>` children to build a Bezier-patch surface; the
@@ -1171,6 +1196,57 @@ mod tests {
     }
 
     #[test]
+    fn build_scene_skips_svg3_3d_elements_without_extension_attribute() {
+        let document = crate::dom::parse(
+            r##"<svg><rect width="10" height="10" fill="blue"/><cube cx="50" cy="50" size="20" fill="red"/></svg>"##,
+        )
+        .unwrap();
+        let mesh = build_scene(&document, vp());
+
+        assert_eq!(mesh.vertices.len(), 4);
+        assert!(mesh
+            .vertices
+            .iter()
+            .all(|vertex| vertex.color == [0.0, 0.0, 1.0, 1.0]));
+    }
+
+    #[test]
+    fn build_scene_skips_disabled_surface_children() {
+        let document = crate::dom::parse(
+            r##"<svg><surface d="M 0 L 1" fill="red"><path d="M 10 10 L 90 10"/><path d="M 10 90 L 90 90"/></surface></svg>"##,
+        )
+        .unwrap();
+
+        assert!(build_scene(&document, vp()).is_empty());
+    }
+
+    #[test]
+    fn build_scene_ignores_svg3_3d_transform_functions_without_extension_attribute() {
+        let document = crate::dom::parse(
+            r#"<svg><g transform="translate3d(10, 0, 20)"><rect width="10" height="10"/></g></svg>"#,
+        )
+        .unwrap();
+        let mesh = build_scene(&document, vp());
+
+        assert_eq!(mesh.vertices.len(), 4);
+        assert_xy(mesh.vertices[0].position, [0.0, 0.0]);
+        assert_eq!(mesh.vertices[0].position[2], 0.0);
+    }
+
+    #[test]
+    fn build_scene_applies_svg3_3d_transform_functions_with_extension_attribute() {
+        let document = crate::dom::parse(
+            r#"<svg extension="pupiltong"><g transform="translate3d(10, 0, 20)"><rect width="10" height="10"/></g></svg>"#,
+        )
+        .unwrap();
+        let mesh = build_scene(&document, vp());
+
+        assert_eq!(mesh.vertices.len(), 4);
+        assert_xy(mesh.vertices[0].position, [10.0, 0.0]);
+        assert_eq!(mesh.vertices[0].position[2], 20.0);
+    }
+
+    #[test]
     fn render_plan_isolates_filtered_subtree_in_painter_order() {
         let document = crate::dom::parse(
             r##"<svg><rect width="10" height="10" fill="blue"/><filter id="soft"><feGaussianBlur stdDeviation="3"/></filter><g filter="url(#soft)"><rect x="20" width="10" height="10" fill="red"/></g><rect x="40" width="10" height="10" fill="green"/></svg>"##,
@@ -1182,6 +1258,16 @@ mod tests {
         assert!(matches!(plan[0], RenderOp::Mesh(_)));
         assert!(matches!(plan[1], RenderOp::Filter { .. }));
         assert!(matches!(plan[2], RenderOp::Mesh(_)));
+    }
+
+    #[test]
+    fn render_plan_skips_disabled_svg3_3d_element_before_filter_resolution() {
+        let document = crate::dom::parse(
+            r##"<svg><filter id="paint"><feFlood flood-color="red"/></filter><cube cx="50" cy="50" size="20" filter="url(#paint)"/></svg>"##,
+        )
+        .unwrap();
+
+        assert!(build_render_plan(&document, vp()).is_empty());
     }
 
     #[test]
@@ -1213,8 +1299,10 @@ mod tests {
         // contributes its UV-parameterised surface mesh to the combined
         // mesh — KIND_SOLID triangles, vertices on the implicit surface,
         // 3D so left at its authored Z (no painter bias).
-        let document =
-            crate::dom::parse(r#"<svg><ellipsoid cx="50" cy="50" cz="0" r="20"/></svg>"#).unwrap();
+        let document = crate::dom::parse(
+            r#"<svg extension="pupiltong"><ellipsoid cx="50" cy="50" cz="0" r="20"/></svg>"#,
+        )
+        .unwrap();
         let mesh = build_scene(&document, vp());
         assert!(!mesh.vertices.is_empty());
         assert_eq!(mesh.indices.len() % 3, 0);
@@ -1235,8 +1323,10 @@ mod tests {
     #[test]
     fn build_scene_skips_zero_radius_ellipsoid() {
         // SPEC §5.3: a zero radius on any axis disables rendering.
-        let document =
-            crate::dom::parse(r#"<svg><ellipsoid cx="50" cy="50" r="10" rz="0"/></svg>"#).unwrap();
+        let document = crate::dom::parse(
+            r#"<svg extension="pupiltong"><ellipsoid cx="50" cy="50" r="10" rz="0"/></svg>"#,
+        )
+        .unwrap();
         assert!(build_scene(&document, vp()).is_empty());
     }
 
@@ -1245,7 +1335,7 @@ mod tests {
         // A `<cylinder>` is dispatched to the cylinder tessellator and
         // contributes cap + side-wall triangles at its authored Z.
         let document =
-            crate::dom::parse(r#"<svg><cylinder cx="50" cy="50" cz="0" r="20" depth="30"/></svg>"#)
+            crate::dom::parse(r#"<svg extension="pupiltong"><cylinder cx="50" cy="50" cz="0" r="20" depth="30"/></svg>"#)
                 .unwrap();
         let mesh = build_scene(&document, vp());
         assert!(!mesh.vertices.is_empty());
@@ -1268,9 +1358,10 @@ mod tests {
     #[test]
     fn build_scene_skips_zero_depth_cylinder() {
         // SPEC §5.5: a zero depth disables rendering.
-        let document =
-            crate::dom::parse(r#"<svg><cylinder cx="50" cy="50" r="10" depth="0"/></svg>"#)
-                .unwrap();
+        let document = crate::dom::parse(
+            r#"<svg extension="pupiltong"><cylinder cx="50" cy="50" r="10" depth="0"/></svg>"#,
+        )
+        .unwrap();
         assert!(build_scene(&document, vp()).is_empty());
     }
 

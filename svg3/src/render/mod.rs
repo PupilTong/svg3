@@ -6,7 +6,8 @@
 //! This milestone implements the SVG 1.1 basic shapes (`<rect>`, `<circle>`,
 //! `<ellipse>`, `<polygon>`, `<polyline>`, `<line>`, `<path>`), SVG paint
 //! servers (`<linearGradient>`, `<radialGradient>`, `<pattern>`, `<stop>`),
-//! svg3's 3D `<cube>`, `<ellipsoid>`, `<cylinder>`, and `<surface>` primitives, plus
+//! svg3's 3D `<cube>`, `<ellipsoid>`, `<cylinder>`, and `<surface>` primitives
+//! when the root has `extension="pupiltong"`, plus
 //! referenced `<filter>` elements composed from a multi-primitive chain
 //! executed end-to-end on the GPU. [`Renderer::encode_document`] is the
 //! single GPU entry point; both render paths are built on top of it:

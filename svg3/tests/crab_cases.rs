@@ -32,7 +32,7 @@ pub const SHADE_PROBE_SIZE: u32 = 200;
 /// validating that the filter pipeline produces fake-3D shading on a
 /// 3D primitive's silhouette. This is the "smallest unit of evidence"
 /// for the approach.
-pub const SHADE_PROBE_SVG: &str = r##"<svg width="200" height="200" xmlns="http://www.w3.org/2000/svg">
+pub const SHADE_PROBE_SVG: &str = r##"<svg extension="pupiltong" width="200" height="200" xmlns="http://www.w3.org/2000/svg">
   <defs>
     <filter id="shade-3d">
       <feGaussianBlur in="SourceAlpha" stdDeviation="5" result="bump"/>
@@ -65,7 +65,7 @@ pub const CRAB_FACE_SIZE: u32 = 300;
 /// a visible tooth. Validates that the shading filter composes across
 /// several adjacent ellipsoids and that the spatial Z layering (face
 /// features at cz > body) reads correctly.
-pub const CRAB_FACE_SVG: &str = r##"<svg width="300" height="300" xmlns="http://www.w3.org/2000/svg">
+pub const CRAB_FACE_SVG: &str = r##"<svg extension="pupiltong" width="300" height="300" xmlns="http://www.w3.org/2000/svg">
   <defs>
     <filter id="shade-3d">
       <feGaussianBlur in="SourceAlpha" stdDeviation="5" result="bump"/>
@@ -127,7 +127,7 @@ pub const CRAB_FULL_SIZE: u32 = 400;
 /// brown irises and bright catchlights, wide cartoon mouth with one
 /// visible tooth, two pincer-claw arms (two ellipsoids each for the
 /// split pincer), and a small white bauble cradled in the right claw.
-pub const CRAB_FULL_SVG: &str = r##"<svg width="400" height="400" xmlns="http://www.w3.org/2000/svg">
+pub const CRAB_FULL_SVG: &str = r##"<svg extension="pupiltong" width="400" height="400" xmlns="http://www.w3.org/2000/svg">
   <defs>
     <!-- Soft / matte: diffuse only, no specular highlight. Used for
          the body, arms, legs, cape — the 2D reference has a soft peach

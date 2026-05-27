@@ -508,6 +508,11 @@ impl Renderer {
     /// Render every supported SVG shape in `document` headlessly into an
     /// [`Image`] of `config.width × config.height` pixels.
     ///
+    /// svg3-only 3D elements, 3D transform functions, and the optional 3D
+    /// camera are active only when the root `<svg>` has
+    /// `extension="pupiltong"`. Without that opt-in, the document is rendered
+    /// as normal SVG with the flat orthographic projection.
+    ///
     /// Wraps [`encode_document`](Renderer::encode_document) with the
     /// headless-specific glue: it allocates the offscreen sRGB texture,
     /// clears it to transparent, encodes the document draws, then copies
@@ -531,7 +536,11 @@ impl Renderer {
             height: height as f32,
         };
         let viewport = document_viewport(document, target_viewport);
-        let view_projection = config.view_projection();
+        let view_projection = if document.svg3_extension_enabled() {
+            config.view_projection()
+        } else {
+            config.projection()
+        };
 
         let extent = wgpu::Extent3d {
             width,
@@ -2317,7 +2326,7 @@ mod tests {
     #[test]
     fn render_to_image_draws_rect_through_camera() {
         let document = crate::dom::parse(
-            r#"<svg width="64" height="64"><rect x="16" y="16" width="32" height="32" fill="blue"/></svg>"#,
+            r#"<svg extension="pupiltong" width="64" height="64"><rect x="16" y="16" width="32" height="32" fill="blue"/></svg>"#,
         )
         .unwrap();
         let config = RenderConfig {
@@ -2341,9 +2350,101 @@ mod tests {
     }
 
     #[test]
-    fn render_to_image_draws_cube_orthographic() {
+    fn render_to_image_ignores_camera_without_extension_attribute() {
+        let document = crate::dom::parse(
+            r#"<svg width="64" height="64"><rect x="16" y="16" width="32" height="32" fill="blue"/></svg>"#,
+        )
+        .unwrap();
+        let orthographic = RenderConfig {
+            width: 64,
+            height: 64,
+            ..RenderConfig::default()
+        };
+        let mut angled = Camera::facing(64, 64);
+        angled.eye.x += 48.0;
+        let with_camera = RenderConfig {
+            camera: Some(angled),
+            ..orthographic
+        };
+        let Some(renderer) =
+            skip_or_renderer("render_to_image_ignores_camera_without_extension_attribute")
+        else {
+            return;
+        };
+
+        let flat = renderer
+            .render_to_image(&document, orthographic)
+            .expect("orthographic render failed");
+        let camera = renderer
+            .render_to_image(&document, with_camera)
+            .expect("camera render failed");
+
+        assert_eq!(
+            flat.pixels, camera.pixels,
+            "normal SVG documents should ignore the 3D camera"
+        );
+    }
+
+    #[test]
+    fn render_to_image_skips_cube_without_extension_attribute() {
         let document = crate::dom::parse(
             r#"<svg width="64" height="64"><cube cx="32" cy="32" cz="0" size="32" fill="blue"/></svg>"#,
+        )
+        .unwrap();
+        let config = RenderConfig {
+            width: 64,
+            height: 64,
+            ..RenderConfig::default()
+        };
+        let Some(renderer) =
+            skip_or_renderer("render_to_image_skips_cube_without_extension_attribute")
+        else {
+            return;
+        };
+
+        let image = renderer
+            .render_to_image(&document, config)
+            .expect("headless render failed");
+
+        assert_eq!(
+            image.pixel(32, 32)[3],
+            0,
+            "plain SVG documents must not paint svg3 <cube> elements"
+        );
+    }
+
+    #[test]
+    fn render_to_image_skips_surface_and_children_without_extension_attribute() {
+        let document = crate::dom::parse(
+            r#"<svg width="64" height="64"><surface d="M 0 L 1" fill="blue"><path d="M 16 16 H 48 V 48 H 16 Z"/><path d="M 16 16 H 48 V 48 H 16 Z" transform="translateZ(20)"/></surface></svg>"#,
+        )
+        .unwrap();
+        let config = RenderConfig {
+            width: 64,
+            height: 64,
+            ..RenderConfig::default()
+        };
+        let Some(renderer) = skip_or_renderer(
+            "render_to_image_skips_surface_and_children_without_extension_attribute",
+        ) else {
+            return;
+        };
+
+        let image = renderer
+            .render_to_image(&document, config)
+            .expect("headless render failed");
+
+        assert_eq!(
+            image.pixel(32, 32)[3],
+            0,
+            "plain SVG documents must not paint svg3 <surface> elements or their child paths"
+        );
+    }
+
+    #[test]
+    fn render_to_image_draws_cube_orthographic() {
+        let document = crate::dom::parse(
+            r#"<svg extension="pupiltong" width="64" height="64"><cube cx="32" cy="32" cz="0" size="32" fill="blue"/></svg>"#,
         )
         .unwrap();
         let config = RenderConfig {
@@ -2368,7 +2469,7 @@ mod tests {
     #[test]
     fn render_to_image_draws_cube_through_camera() {
         let document = crate::dom::parse(
-            r#"<svg width="64" height="64"><cube cx="32" cy="32" cz="0" size="20" fill="blue"/></svg>"#,
+            r#"<svg extension="pupiltong" width="64" height="64"><cube cx="32" cy="32" cz="0" size="20" fill="blue"/></svg>"#,
         )
         .unwrap();
         let config = RenderConfig {
@@ -2393,7 +2494,7 @@ mod tests {
     #[test]
     fn render_to_image_skips_degenerate_cube() {
         let document = crate::dom::parse(
-            r#"<svg width="64" height="64"><cube cx="32" cy="32" size="32" depth="0" fill="blue"/></svg>"#,
+            r#"<svg extension="pupiltong" width="64" height="64"><cube cx="32" cy="32" size="32" depth="0" fill="blue"/></svg>"#,
         )
         .unwrap();
         let config = RenderConfig {
@@ -2413,7 +2514,7 @@ mod tests {
     #[test]
     fn render_to_image_draws_ellipsoid_orthographic() {
         let document = crate::dom::parse(
-            r#"<svg width="64" height="64"><ellipsoid cx="32" cy="32" cz="0" r="16" fill="blue"/></svg>"#,
+            r#"<svg extension="pupiltong" width="64" height="64"><ellipsoid cx="32" cy="32" cz="0" r="16" fill="blue"/></svg>"#,
         )
         .unwrap();
         let config = RenderConfig {
@@ -2439,7 +2540,7 @@ mod tests {
     #[test]
     fn render_to_image_draws_ellipsoid_through_camera() {
         let document = crate::dom::parse(
-            r#"<svg width="64" height="64"><ellipsoid cx="32" cy="32" cz="0" r="14" fill="blue"/></svg>"#,
+            r#"<svg extension="pupiltong" width="64" height="64"><ellipsoid cx="32" cy="32" cz="0" r="14" fill="blue"/></svg>"#,
         )
         .unwrap();
         let config = RenderConfig {
@@ -2465,7 +2566,7 @@ mod tests {
     #[test]
     fn render_to_image_skips_degenerate_ellipsoid() {
         let document = crate::dom::parse(
-            r#"<svg width="64" height="64"><ellipsoid cx="32" cy="32" r="16" rz="0" fill="blue"/></svg>"#,
+            r#"<svg extension="pupiltong" width="64" height="64"><ellipsoid cx="32" cy="32" r="16" rz="0" fill="blue"/></svg>"#,
         )
         .unwrap();
         let config = RenderConfig {
@@ -2485,7 +2586,7 @@ mod tests {
     #[test]
     fn render_to_image_draws_cylinder_orthographic() {
         let document = crate::dom::parse(
-            r#"<svg width="64" height="64"><cylinder cx="32" cy="32" cz="0" r="16" fill="blue"/></svg>"#,
+            r#"<svg extension="pupiltong" width="64" height="64"><cylinder cx="32" cy="32" cz="0" r="16" fill="blue"/></svg>"#,
         )
         .unwrap();
         let config = RenderConfig {
@@ -2510,7 +2611,7 @@ mod tests {
     #[test]
     fn render_to_image_draws_cylinder_through_camera() {
         let document = crate::dom::parse(
-            r#"<svg width="64" height="64"><cylinder cx="32" cy="32" cz="0" r="14" depth="28" fill="blue"/></svg>"#,
+            r#"<svg extension="pupiltong" width="64" height="64"><cylinder cx="32" cy="32" cz="0" r="14" depth="28" fill="blue"/></svg>"#,
         )
         .unwrap();
         let config = RenderConfig {
@@ -2536,7 +2637,7 @@ mod tests {
     #[test]
     fn render_to_image_skips_degenerate_cylinder() {
         let document = crate::dom::parse(
-            r#"<svg width="64" height="64"><cylinder cx="32" cy="32" r="16" depth="0" fill="blue"/></svg>"#,
+            r#"<svg extension="pupiltong" width="64" height="64"><cylinder cx="32" cy="32" r="16" depth="0" fill="blue"/></svg>"#,
         )
         .unwrap();
         let config = RenderConfig {
@@ -2556,7 +2657,7 @@ mod tests {
     #[test]
     fn render_to_image_2d_rect_occludes_ellipsoid_fully_behind_z0() {
         let document = crate::dom::parse(
-            r#"<svg width="64" height="64"><rect x="16" y="16" width="32" height="32" fill="red"/><ellipsoid cx="32" cy="32" cz="-20" r="15" fill="blue"/></svg>"#,
+            r#"<svg extension="pupiltong" width="64" height="64"><rect x="16" y="16" width="32" height="32" fill="red"/><ellipsoid cx="32" cy="32" cz="-20" r="15" fill="blue"/></svg>"#,
         )
         .unwrap();
         let config = RenderConfig {
@@ -2582,7 +2683,7 @@ mod tests {
     #[test]
     fn render_to_image_2d_rect_occludes_cube_behind_z0() {
         let document = crate::dom::parse(
-            r#"<svg width="64" height="64"><rect x="32" y="16" width="32" height="32" fill="red"/><cube cx="32" cy="32" cz="0" size="30" fill="blue"/></svg>"#,
+            r#"<svg extension="pupiltong" width="64" height="64"><rect x="32" y="16" width="32" height="32" fill="red"/><cube cx="32" cy="32" cz="0" size="30" fill="blue"/></svg>"#,
         )
         .unwrap();
         let config = RenderConfig {
@@ -2617,7 +2718,7 @@ mod tests {
     #[test]
     fn render_to_image_2d_rect_fully_occludes_cube_fully_behind_z0() {
         let document = crate::dom::parse(
-            r#"<svg width="64" height="64"><rect x="16" y="16" width="32" height="32" fill="red"/><cube cx="32" cy="32" cz="-15" size="20" fill="blue"/></svg>"#,
+            r#"<svg extension="pupiltong" width="64" height="64"><rect x="16" y="16" width="32" height="32" fill="red"/><cube cx="32" cy="32" cz="-15" size="20" fill="blue"/></svg>"#,
         )
         .unwrap();
         let config = RenderConfig {
@@ -2643,7 +2744,7 @@ mod tests {
     #[test]
     fn render_to_image_cube_in_front_occludes_later_2d_rect() {
         let document = crate::dom::parse(
-            r#"<svg width="64" height="64"><cube cx="32" cy="32" cz="20" size="20" fill="blue"/><rect x="16" y="16" width="32" height="32" fill="red"/></svg>"#,
+            r#"<svg extension="pupiltong" width="64" height="64"><cube cx="32" cy="32" cz="20" size="20" fill="blue"/><rect x="16" y="16" width="32" height="32" fill="red"/></svg>"#,
         )
         .unwrap();
         let config = RenderConfig {
@@ -2669,7 +2770,7 @@ mod tests {
     #[test]
     fn render_to_image_filtered_rect_occludes_cube_behind_z0() {
         let document = crate::dom::parse(
-            r##"<svg width="64" height="64"><filter id="soft"><feGaussianBlur stdDeviation="2"/></filter><rect x="16" y="16" width="32" height="32" fill="red" filter="url(#soft)"/><cube cx="32" cy="32" cz="-15" size="20" fill="blue"/></svg>"##,
+            r##"<svg extension="pupiltong" width="64" height="64"><filter id="soft"><feGaussianBlur stdDeviation="2"/></filter><rect x="16" y="16" width="32" height="32" fill="red" filter="url(#soft)"/><cube cx="32" cy="32" cz="-15" size="20" fill="blue"/></svg>"##,
         )
         .unwrap();
         let config = RenderConfig {

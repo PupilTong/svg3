@@ -15,6 +15,11 @@ mod parser;
 pub use element::ElementKind;
 pub use parser::{parse, ParseError};
 
+/// Root `<svg>` attribute that opts a document into svg3's 3D extension.
+pub const SVG3_EXTENSION_ATTRIBUTE: &str = "extension";
+/// Required value for [`SVG3_EXTENSION_ATTRIBUTE`].
+pub const SVG3_EXTENSION_VALUE: &str = "pupiltong";
+
 /// Element data living on a [`Node`]: a tag [`ElementKind`] and the raw
 /// attributes parsed from XML.
 ///
@@ -118,6 +123,14 @@ impl Document {
         &self.node(id).element
     }
 
+    /// Whether the root `<svg>` opts into svg3's 3D extension features.
+    pub fn svg3_extension_enabled(&self) -> bool {
+        self.element(self.root())
+            .attributes
+            .get(SVG3_EXTENSION_ATTRIBUTE)
+            .is_some_and(|value| value.trim() == SVG3_EXTENSION_VALUE)
+    }
+
     /// Append a new child element under `parent` and return its id.
     pub fn append_child(&mut self, parent: NodeId, kind: ElementKind) -> NodeId {
         let id = self.alloc(Element::new(kind));
@@ -165,5 +178,17 @@ mod tests {
         assert_eq!(doc.node(doc.root()).children, vec![cube_id]);
         assert_eq!(doc.element(cube_id).kind, ElementKind::Cube);
         assert_eq!(doc.len(), 2);
+    }
+
+    #[test]
+    fn svg3_extension_requires_root_pupiltong_attribute() {
+        let plain = crate::dom::parse(r#"<svg><cube/></svg>"#).unwrap();
+        assert!(!plain.svg3_extension_enabled());
+
+        let enabled = crate::dom::parse(r#"<svg extension="pupiltong"><cube/></svg>"#).unwrap();
+        assert!(enabled.svg3_extension_enabled());
+
+        let other = crate::dom::parse(r#"<svg extension="other"><cube/></svg>"#).unwrap();
+        assert!(!other.svg3_extension_enabled());
     }
 }

@@ -105,7 +105,7 @@ fn alpha_cross_png_data_uri() -> String {
 /// `feComposite` chain. Shared between the orthographic and perspective
 /// snapshot cases so the only difference between their goldens is the
 /// projection (and the depth handling that surfaces under perspective).
-const THREE_SPHERES_LIGHTING_SVG: &str = r##"<svg width="440" height="140" xmlns="http://www.w3.org/2000/svg">
+const THREE_SPHERES_LIGHTING_SVG: &str = r##"<svg extension="pupiltong" width="440" height="140" xmlns="http://www.w3.org/2000/svg">
   <filter id="lightMe1">
     <feDiffuseLighting in="SourceGraphic" result="light" lighting-color="white">
       <fePointLight x="150" y="60" z="20" />
@@ -134,7 +134,7 @@ fn cases() -> Vec<Case> {
     // A deliberately asymmetric scene — a yellow disc near the top-left and
     // a red panel near the bottom-right over a navy ground — so a camera
     // view's orientation (upright? mirrored?) is unambiguous.
-    const CAMERA_SCENE: &str = r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><circle cx="30" cy="28" r="18" fill="#f2c14e"/><rect x="52" y="56" width="36" height="32" fill="#c14b2b"/></svg>"##;
+    const CAMERA_SCENE: &str = r##"<svg extension="pupiltong" width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><circle cx="30" cy="28" r="18" fill="#f2c14e"/><rect x="52" y="56" width="36" height="32" fill="#c14b2b"/></svg>"##;
 
     // Straight-on reference view, framing the document head-on.
     let front = Camera::facing(100, 100);
@@ -1183,14 +1183,14 @@ fn cases() -> Vec<Case> {
         // bounding rectangle: same coverage as a same-sized `<rect>`.
         Case::square(
             "cube-orthographic",
-            r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><cube cx="50" cy="50" cz="0" size="50" fill="#f2c14e"/></svg>"##,
+            r##"<svg extension="pupiltong" width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><cube cx="50" cy="50" cz="0" size="50" fill="#f2c14e"/></svg>"##,
         ),
         // A non-cubic cuboid: explicit `width`/`height`/`depth` produce a
         // rectangular box. Through the orthographic default it projects to
         // its width-by-height rectangle.
         Case::square(
             "cube-non-cubic",
-            r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><cube cx="50" cy="50" cz="0" width="70" height="30" depth="20" fill="#c14b2b"/></svg>"##,
+            r##"<svg extension="pupiltong" width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><cube cx="50" cy="50" cz="0" width="70" height="30" depth="20" fill="#c14b2b"/></svg>"##,
         ),
         // Through the camera the cube's depth dimension is visible. The
         // background `<rect>` sits at world `z = 0` and (per SPEC §7.3)
@@ -1199,7 +1199,7 @@ fn cases() -> Vec<Case> {
         // silhouette survives the depth test.
         Case::square(
             "cube-camera-angled",
-            r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><cube cx="50" cy="50" cz="0" size="40" fill="#f2c14e"/></svg>"##,
+            r##"<svg extension="pupiltong" width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><cube cx="50" cy="50" cz="0" size="40" fill="#f2c14e"/></svg>"##,
         )
         .with_camera({
             // The same `angled` framing as the 2D camera snapshots, so the
@@ -1216,14 +1216,14 @@ fn cases() -> Vec<Case> {
         // wins at every overlap pixel.
         Case::square(
             "cube-occluded-by-2d-rect",
-            r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><rect x="30" y="30" width="40" height="40" fill="#c14b2b"/><cube cx="50" cy="50" cz="-20" size="30" fill="#f2c14e"/></svg>"##,
+            r##"<svg extension="pupiltong" width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><rect x="30" y="30" width="40" height="40" fill="#c14b2b"/><cube cx="50" cy="50" cz="-20" size="30" fill="#f2c14e"/></svg>"##,
         ),
         // The converse: a cube fully in *front* of `z = 0` (cz = +20)
         // paints over a coplanar 2D rect declared earlier as the
         // background — closer-to-viewer Z wins.
         Case::square(
             "cube-in-front-of-2d-rect",
-            r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><rect x="30" y="30" width="40" height="40" fill="#c14b2b"/><cube cx="50" cy="50" cz="20" size="30" fill="#f2c14e"/></svg>"##,
+            r##"<svg extension="pupiltong" width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><rect x="30" y="30" width="40" height="40" fill="#c14b2b"/><cube cx="50" cy="50" cz="20" size="30" fill="#f2c14e"/></svg>"##,
         ),
         // 2D-3D depth resolution survives a filter chain. The filtered
         // rect sits at `z = 0`; a cube declared after it that lies fully
@@ -1233,7 +1233,7 @@ fn cases() -> Vec<Case> {
         // filter's spatial Z — addressing review P1.2.
         Case::square(
             "cube-occluded-by-filtered-rect",
-            r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><filter id="soft"><feGaussianBlur stdDeviation="3"/></filter><rect x="30" y="30" width="40" height="40" fill="#c14b2b" filter="url(#soft)"/><cube cx="50" cy="50" cz="-20" size="30" fill="#f2c14e"/></svg>"##,
+            r##"<svg extension="pupiltong" width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><filter id="soft"><feGaussianBlur stdDeviation="3"/></filter><rect x="30" y="30" width="40" height="40" fill="#c14b2b" filter="url(#soft)"/><cube cx="50" cy="50" cz="-20" size="30" fill="#f2c14e"/></svg>"##,
         ),
         // SPEC §5.3 `<ellipsoid>` through the orthographic default. With
         // `rx = ry = rz`, the ellipsoid collapses to its bounding disc; an
@@ -1241,11 +1241,11 @@ fn cases() -> Vec<Case> {
         // visible in the silhouette.
         Case::square(
             "ellipsoid-orthographic",
-            r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><ellipsoid cx="50" cy="50" cz="0" r="30" fill="#f2c14e"/></svg>"##,
+            r##"<svg extension="pupiltong" width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><ellipsoid cx="50" cy="50" cz="0" r="30" fill="#f2c14e"/></svg>"##,
         ),
         Case::square(
             "ellipsoid-anisotropic",
-            r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><ellipsoid cx="50" cy="50" cz="0" rx="40" ry="20" rz="20" fill="#c14b2b"/></svg>"##,
+            r##"<svg extension="pupiltong" width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><ellipsoid cx="50" cy="50" cz="0" rx="40" ry="20" rz="20" fill="#c14b2b"/></svg>"##,
         ),
         // Through the camera the ellipsoid's depth is visible: the
         // background `<rect>` at `z = 0` (per SPEC §7.3) occludes any
@@ -1253,7 +1253,7 @@ fn cases() -> Vec<Case> {
         // only the front hemisphere.
         Case::square(
             "ellipsoid-camera-angled",
-            r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><ellipsoid cx="50" cy="50" cz="0" r="25" fill="#f2c14e"/></svg>"##,
+            r##"<svg extension="pupiltong" width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><ellipsoid cx="50" cy="50" cz="0" r="25" fill="#f2c14e"/></svg>"##,
         )
         .with_camera({
             let mut c = Camera::facing(100, 100);
@@ -1265,34 +1265,34 @@ fn cases() -> Vec<Case> {
         // so the rect at z = 0 hides it completely at the overlap.
         Case::square(
             "ellipsoid-occluded-by-2d-rect",
-            r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><rect x="30" y="30" width="40" height="40" fill="#c14b2b"/><ellipsoid cx="50" cy="50" cz="-25" r="20" fill="#f2c14e"/></svg>"##,
+            r##"<svg extension="pupiltong" width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><rect x="30" y="30" width="40" height="40" fill="#c14b2b"/><ellipsoid cx="50" cy="50" cz="-25" r="20" fill="#f2c14e"/></svg>"##,
         ),
         // Converse: an ellipsoid in front of `z = 0` (cz = +25) paints
         // over a coplanar 2D rect declared earlier as the background.
         Case::square(
             "ellipsoid-in-front-of-2d-rect",
-            r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><rect x="30" y="30" width="40" height="40" fill="#c14b2b"/><ellipsoid cx="50" cy="50" cz="25" r="20" fill="#f2c14e"/></svg>"##,
+            r##"<svg extension="pupiltong" width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><rect x="30" y="30" width="40" height="40" fill="#c14b2b"/><ellipsoid cx="50" cy="50" cz="25" r="20" fill="#f2c14e"/></svg>"##,
         ),
         // SPEC §5.5 `<cylinder>` through the orthographic default. With
         // `r` and no explicit `depth`, the cap radii are `r` and depth is
         // the diameter, so the silhouette is the front circular cap.
         Case::square(
             "cylinder-orthographic",
-            r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><cylinder cx="50" cy="50" cz="0" r="28" fill="#f2c14e"/></svg>"##,
+            r##"<svg extension="pupiltong" width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><cylinder cx="50" cy="50" cz="0" r="28" fill="#f2c14e"/></svg>"##,
         ),
         // Explicit `rx`/`ry`/`depth` produce an elliptical cylinder. The
         // orthographic default shows the elliptical cap and validates the
         // independent cap radii.
         Case::square(
             "cylinder-anisotropic",
-            r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><cylinder cx="50" cy="50" cz="0" rx="38" ry="18" depth="34" fill="#c14b2b"/></svg>"##,
+            r##"<svg extension="pupiltong" width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><cylinder cx="50" cy="50" cz="0" rx="38" ry="18" depth="34" fill="#c14b2b"/></svg>"##,
         ),
         // Through the camera the side wall becomes visible. The background
         // rect at `z = 0` occludes the back half, leaving the front cap and
         // front side-wall silhouette.
         Case::square(
             "cylinder-camera-angled",
-            r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><cylinder cx="50" cy="50" cz="0" r="24" depth="42" fill="#f2c14e"/></svg>"##,
+            r##"<svg extension="pupiltong" width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><cylinder cx="50" cy="50" cz="0" r="24" depth="42" fill="#f2c14e"/></svg>"##,
         )
         .with_camera({
             let mut c = Camera::facing(100, 100);
@@ -1304,7 +1304,7 @@ fn cases() -> Vec<Case> {
         // so the rect at z = 0 hides it completely at the overlap.
         Case::square(
             "cylinder-occluded-by-2d-rect",
-            r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><rect x="30" y="30" width="40" height="40" fill="#c14b2b"/><cylinder cx="50" cy="50" cz="-30" r="20" depth="40" fill="#f2c14e"/></svg>"##,
+            r##"<svg extension="pupiltong" width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><rect x="30" y="30" width="40" height="40" fill="#c14b2b"/><cylinder cx="50" cy="50" cz="-30" r="20" depth="40" fill="#f2c14e"/></svg>"##,
         ),
         // SPEC §5.4 `<surface>` — degree-1 Bezier between two parallel
         // child paths produces a ruled quad strip. Sweeping a horizontal
@@ -1313,7 +1313,7 @@ fn cases() -> Vec<Case> {
         // integrates with the depth pipeline.
         Case::square(
             "surface-ruled-flat",
-            r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><surface d="M 0 L 1" fill="#f2c14e"><path d="M 20 30 L 80 30"/><path d="M 20 30 L 80 30" transform="translate(0, 40)"/></surface></svg>"##,
+            r##"<svg extension="pupiltong" width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><surface d="M 0 L 1" fill="#f2c14e"><path d="M 20 30 L 80 30"/><path d="M 20 30 L 80 30" transform="translate(0, 40)"/></surface></svg>"##,
         ),
         // SPEC §5.4 — degree-3 Bezier surface through 4 child paths,
         // viewed through the angled-perspective camera. Paths 1 and 2
@@ -1321,7 +1321,7 @@ fn cases() -> Vec<Case> {
         // `ellipsoid-camera-angled` framing for visual consistency.
         Case::square(
             "surface-cubic-camera-angled",
-            r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><surface d="M 0 C 1 2 3" fill="#f2c14e"><path d="M 30 30 L 70 30 L 70 70 L 30 70"/><path d="M 30 30 L 70 30 L 70 70 L 30 70" transform="translate3d(15, 0, 20)"/><path d="M 30 30 L 70 30 L 70 70 L 30 70" transform="translate3d(-15, 0, 40)"/><path d="M 30 30 L 70 30 L 70 70 L 30 70" transform="translateZ(60)"/></surface></svg>"##,
+            r##"<svg extension="pupiltong" width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><surface d="M 0 C 1 2 3" fill="#f2c14e"><path d="M 30 30 L 70 30 L 70 70 L 30 70"/><path d="M 30 30 L 70 30 L 70 70 L 30 70" transform="translate3d(15, 0, 20)"/><path d="M 30 30 L 70 30 L 70 70 L 30 70" transform="translate3d(-15, 0, 40)"/><path d="M 30 30 L 70 30 L 70 70 L 30 70" transform="translateZ(60)"/></surface></svg>"##,
         )
         .with_camera({
             let mut c = Camera::facing(100, 100);
@@ -1333,7 +1333,7 @@ fn cases() -> Vec<Case> {
         // path; the join at path 3 has C0 continuity.
         Case::square(
             "surface-chained-patches",
-            r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><surface d="M 0 C 1 2 3 L 4" fill="#c14b2b"><path d="M 30 30 L 70 30 L 70 70 L 30 70"/><path d="M 30 30 L 70 30 L 70 70 L 30 70" transform="translate3d(10, -10, 15)"/><path d="M 30 30 L 70 30 L 70 70 L 30 70" transform="translate3d(-10, -10, 30)"/><path d="M 30 30 L 70 30 L 70 70 L 30 70" transform="translateZ(45)"/><path d="M 30 30 L 70 30 L 70 70 L 30 70" transform="translate3d(0, 20, 70)"/></surface></svg>"##,
+            r##"<svg extension="pupiltong" width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><surface d="M 0 C 1 2 3 L 4" fill="#c14b2b"><path d="M 30 30 L 70 30 L 70 70 L 30 70"/><path d="M 30 30 L 70 30 L 70 70 L 30 70" transform="translate3d(10, -10, 15)"/><path d="M 30 30 L 70 30 L 70 70 L 30 70" transform="translate3d(-10, -10, 30)"/><path d="M 30 30 L 70 30 L 70 70 L 30 70" transform="translateZ(45)"/><path d="M 30 30 L 70 30 L 70 70 L 30 70" transform="translate3d(0, 20, 70)"/></surface></svg>"##,
         )
         .with_camera({
             let mut c = Camera::facing(100, 100);
@@ -1346,7 +1346,7 @@ fn cases() -> Vec<Case> {
         // patch chain wrapping back to path 0).
         Case::square(
             "surface-closed-prism",
-            r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><surface d="M 0 L 1 L 2 L 3 Z" fill="#f2c14e"><path d="M 35 35 L 65 35"/><path d="M 35 35 L 65 35" transform="translateZ(30)"/><path d="M 35 35 L 65 35" transform="translate3d(0, 30, 30)"/><path d="M 35 35 L 65 35" transform="translate3d(0, 30, 0)"/></surface></svg>"##,
+            r##"<svg extension="pupiltong" width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><surface d="M 0 L 1 L 2 L 3 Z" fill="#f2c14e"><path d="M 35 35 L 65 35"/><path d="M 35 35 L 65 35" transform="translateZ(30)"/><path d="M 35 35 L 65 35" transform="translate3d(0, 30, 30)"/><path d="M 35 35 L 65 35" transform="translate3d(0, 30, 0)"/></surface></svg>"##,
         )
         .with_camera({
             let mut c = Camera::facing(100, 100);
@@ -1359,7 +1359,7 @@ fn cases() -> Vec<Case> {
         // doesn't poison the rest of the scene.
         Case::square(
             "surface-degenerate-out-of-range",
-            r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><surface d="M 0 L 5" fill="#c14b2b"><path d="M 20 20 L 80 20"/><path d="M 20 20 L 80 20" transform="translateZ(40)"/></surface><cube cx="50" cy="50" cz="0" size="40" fill="#f2c14e"/></svg>"##,
+            r##"<svg extension="pupiltong" width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><surface d="M 0 L 5" fill="#c14b2b"><path d="M 20 20 L 80 20"/><path d="M 20 20 L 80 20" transform="translateZ(40)"/></surface><cube cx="50" cy="50" cz="0" size="40" fill="#f2c14e"/></svg>"##,
         ),
         // SPEC §5.4 — a torus (donut) tiled by EIGHT bicubic Coons
         // patches: 4 quarter-arcs of the major ring × 2 half-arcs of
@@ -1387,7 +1387,7 @@ fn cases() -> Vec<Case> {
         // so the 3D ring depth is visible alongside the annulus.
         Case::square(
             "surface-donut",
-            r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><surface fill="#f2c14e" d="P 0 10 4 8 P 1 12 5 10 P 2 14 6 12 P 3 8 7 14 P 4 11 0 9 P 5 13 1 11 P 6 15 2 13 P 7 9 3 15"><path d="M 83 50 C 83 68.225 68.225 83 50 83"/><path d="M 50 83 C 31.775 83 17 68.225 17 50"/><path d="M 17 50 C 17 31.775 31.775 17 50 17"/><path d="M 50 17 C 68.225 17 83 31.775 83 50"/><path d="M 67 50 C 67 59.389 59.389 67 50 67"/><path d="M 50 67 C 40.611 67 33 59.389 33 50"/><path d="M 33 50 C 33 40.611 40.611 33 50 33"/><path d="M 50 33 C 59.389 33 67 40.611 67 50"/><path d="M 8 0 C 8 10.667 -8 10.667 -8 0" transform="translate3d(75, 50, 0) rotateX(90)"/><path d="M -8 0 C -8 -10.667 8 -10.667 8 0" transform="translate3d(75, 50, 0) rotateX(90)"/><path d="M 8 0 C 8 10.667 -8 10.667 -8 0" transform="translate3d(50, 75, 0) rotateZ(90) rotateX(90)"/><path d="M -8 0 C -8 -10.667 8 -10.667 8 0" transform="translate3d(50, 75, 0) rotateZ(90) rotateX(90)"/><path d="M 8 0 C 8 10.667 -8 10.667 -8 0" transform="translate3d(25, 50, 0) rotateZ(180) rotateX(90)"/><path d="M -8 0 C -8 -10.667 8 -10.667 8 0" transform="translate3d(25, 50, 0) rotateZ(180) rotateX(90)"/><path d="M 8 0 C 8 10.667 -8 10.667 -8 0" transform="translate3d(50, 25, 0) rotateZ(270) rotateX(90)"/><path d="M -8 0 C -8 -10.667 8 -10.667 8 0" transform="translate3d(50, 25, 0) rotateZ(270) rotateX(90)"/></surface></svg>"##,
+            r##"<svg extension="pupiltong" width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><surface fill="#f2c14e" d="P 0 10 4 8 P 1 12 5 10 P 2 14 6 12 P 3 8 7 14 P 4 11 0 9 P 5 13 1 11 P 6 15 2 13 P 7 9 3 15"><path d="M 83 50 C 83 68.225 68.225 83 50 83"/><path d="M 50 83 C 31.775 83 17 68.225 17 50"/><path d="M 17 50 C 17 31.775 31.775 17 50 17"/><path d="M 50 17 C 68.225 17 83 31.775 83 50"/><path d="M 67 50 C 67 59.389 59.389 67 50 67"/><path d="M 50 67 C 40.611 67 33 59.389 33 50"/><path d="M 33 50 C 33 40.611 40.611 33 50 33"/><path d="M 50 33 C 59.389 33 67 40.611 67 50"/><path d="M 8 0 C 8 10.667 -8 10.667 -8 0" transform="translate3d(75, 50, 0) rotateX(90)"/><path d="M -8 0 C -8 -10.667 8 -10.667 8 0" transform="translate3d(75, 50, 0) rotateX(90)"/><path d="M 8 0 C 8 10.667 -8 10.667 -8 0" transform="translate3d(50, 75, 0) rotateZ(90) rotateX(90)"/><path d="M -8 0 C -8 -10.667 8 -10.667 8 0" transform="translate3d(50, 75, 0) rotateZ(90) rotateX(90)"/><path d="M 8 0 C 8 10.667 -8 10.667 -8 0" transform="translate3d(25, 50, 0) rotateZ(180) rotateX(90)"/><path d="M -8 0 C -8 -10.667 8 -10.667 8 0" transform="translate3d(25, 50, 0) rotateZ(180) rotateX(90)"/><path d="M 8 0 C 8 10.667 -8 10.667 -8 0" transform="translate3d(50, 25, 0) rotateZ(270) rotateX(90)"/><path d="M -8 0 C -8 -10.667 8 -10.667 8 0" transform="translate3d(50, 25, 0) rotateZ(270) rotateX(90)"/></surface></svg>"##,
         )
         .with_camera({
             let mut c = Camera::facing(100, 100);

@@ -26,8 +26,9 @@ publication. Issues are tracked at <https://github.com/PupilTong/svg3>.
 
 `svg3` extends SVG 1.1 with the ability to describe three-dimensional
 graphics. An `svg3` document is a well-formed XML document with an
-`'svg'` root element ([SVG11], §5.1), that may use the additional
-elements and attribute values defined in this specification.
+`'svg'` root element ([SVG11], §5.1) carrying
+`extension="pupiltong"`, that may use the additional elements and
+attribute values defined in this specification.
 Specifically, `svg3` adds:
 
 - A set of *three-dimensional graphics elements* (§5) — `'cube'`,
@@ -47,7 +48,9 @@ Specifically, `svg3` adds:
 The following document fragment is a minimal example:
 
 ```xml
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">
+<svg xmlns="http://www.w3.org/2000/svg"
+     extension="pupiltong"
+     viewBox="0 0 200 200">
   <cube cx="100" cy="100" cz="0" size="80"
         transform="rotateY(30deg) rotateX(20deg)" fill="orange"/>
 </svg>
@@ -55,13 +58,14 @@ The following document fragment is a minimal example:
 
 ### 1.2 Relationship to SVG 1.1
 
-`svg3` is an extension of SVG 1.1. Every conforming `svg3` document
-is also a well-formed SVG 1.1 document fragment. The elements and
-transform functions introduced here are foreign to SVG 1.1; in a
-user agent that implements only SVG 1.1, they are treated as
-unsupported elements or unrecognised transform functions and produce
-no visible rendering — see §2.4 ("Compatibility with SVG 1.1
-implementations").
+`svg3` is an opt-in extension of SVG 1.1. Every conforming `svg3`
+document is also a well-formed SVG 1.1 document fragment. The
+elements and transform functions introduced here are foreign to SVG
+1.1; in a user agent that implements only SVG 1.1, or in an `svg3`
+user agent when the root does not carry `extension="pupiltong"`,
+they are treated as unsupported elements or unrecognised transform
+functions and produce no visible rendering — see §2.4
+("Compatibility with SVG 1.1 implementations").
 
 This specification does **not** redefine, replace, or restrict any
 feature of SVG 1.1. All elements, attributes, properties, and
@@ -100,10 +104,12 @@ A document is a *conforming `svg3` document* if it satisfies all of
 the following:
 
 1. It is a conforming SVG 1.1 document fragment ([SVG11], §2.3).
-2. Every element from the set defined in §5 that appears in the
+2. The root `'svg'` element has an `'extension'` attribute whose
+   value is exactly `'pupiltong'`.
+3. Every element from the set defined in §5 that appears in the
    document complies with the syntax and attribute requirements of
    the corresponding subsection.
-3. Every occurrence of the additional transform functions defined in
+4. Every occurrence of the additional transform functions defined in
    §4 within a `'transform'` attribute value complies with the
    grammar in §4.1 and the function definitions in §4.2.
 
@@ -115,11 +121,17 @@ of the following:
 1. It is a conforming SVG 1.1 *dynamic interactive* or *static* user
    agent ([SVG11], §2.4) — that is, it implements SVG 1.1 in full
    for at least one of those profiles.
-2. It correctly processes every element defined in §5 according to
-   the rules in §§5–7.
-3. It correctly processes every additional transform function defined
-   in §4 according to §§4.2 and 4.3.
-4. It implements the rendering model in §7.
+2. For a document whose root has `extension="pupiltong"`, it
+   correctly processes every element defined in §5 according to the
+   rules in §§5–7.
+3. For a document whose root has `extension="pupiltong"`, it
+   correctly processes every additional transform function defined in
+   §4 according to §§4.2 and 4.3.
+4. For a document whose root omits `extension="pupiltong"`, it
+   processes the document as normal SVG 1.1: the elements in §5
+   produce no rendering and the additional transform functions in §4
+   invalidate only their containing `'transform'` attribute.
+5. It implements the rendering model in §7.
 
 The viewing transformation (camera) used to project three-dimensional
 content is implementation-defined (§7.1). A conforming user agent
@@ -130,7 +142,9 @@ transformation from the document.
 
 A user agent that implements SVG 1.1 but not `svg3` is expected to
 process an `svg3` document as follows, by virtue of SVG 1.1's own
-processing rules:
+processing rules. A conforming `svg3` user agent MUST use the same
+fallback behaviour whenever the root `'svg'` element does not carry
+`extension="pupiltong"`:
 
 - Each three-dimensional graphics element (§5) is an unrecognised
   element. Per [SVG11], §5.1, unrecognised elements produce no

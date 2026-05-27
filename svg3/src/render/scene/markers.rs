@@ -23,7 +23,6 @@ use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 use crate::dom::{Document, Element, ElementKind, NodeId};
-use crate::render::paint::PaintDefinitions;
 use crate::render::shapes::{self, stroke::MarkerKind};
 use crate::render::{Mesh, Viewport};
 
@@ -236,14 +235,13 @@ impl MarkerRefs {
 
 pub(super) fn append_marker_instances(
     document: &Document,
-    markers: &MarkerDefinitions,
-    paints: &PaintDefinitions,
+    context: &SceneContext<'_>,
     element: &Element,
     path: &lyon_tessellation::path::Path,
     stroke_width: f32,
     mesh: &mut Mesh,
 ) {
-    let refs = markers.marker_refs(document, element);
+    let refs = context.markers.marker_refs(document, element);
     if refs.is_empty() {
         return;
     }
@@ -262,12 +260,16 @@ pub(super) fn append_marker_instances(
         // surrounding scene's bias slot the marker reference consumed.
         let marker_context = SceneContext {
             viewport: marker_viewport,
-            markers,
-            paints,
+            markers: context.markers,
+            paints: context.paints,
+            svg3_extension_enabled: context.svg3_extension_enabled,
             twod_index: std::cell::Cell::new(0),
         };
         let mut marker_state = TraversalState::default();
-        let marker_frame = marker_state.enter_element(&document.node(marker.node).element);
+        let marker_frame = marker_state.enter_element(
+            &document.node(marker.node).element,
+            context.svg3_extension_enabled,
+        );
         // Marker subtrees render with marker expansion disabled. This keeps
         // authored marker references inside a marker from recursively
         // instancing other marker definitions.
