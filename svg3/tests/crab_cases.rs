@@ -149,88 +149,95 @@ pub const CRAB_FULL_SVG: &str = r##"<svg width="400" height="400" xmlns="http://
     </filter>
   </defs>
 
-  <!-- Cape: lower-left, two stacked red blobs flowing out behind. -->
-  <ellipsoid cx="110" cy="305" cz="0" rx="48" ry="60" rz="13"
-             fill="#c8242c" filter="url(#shade-soft)"/>
-  <ellipsoid cx="95" cy="265" cz="0" rx="32" ry="40" rz="9"
-             fill="#a01a22" filter="url(#shade-soft)"/>
-
-  <!-- Hammer head: gray cube floating above-left of the body. Pushed
-       back so its front face sits at z = -1, behind any 2D paths drawn
-       on top of it. -->
-  <cube cx="180" cy="70" cz="-30" size="58"
-        fill="#d8d8d8" filter="url(#shade-soft)"/>
-
-  <!-- Lightning-bolt decal: a 2D zigzag <path> on top of the hammer.
-       2D content's per-shape forward Z bias places it at z ≈ +0.X,
-       cleanly in front of the cube's front face at z = -1, so the
-       bolt reads as a yellow zigzag on the gray hammer face. -->
-  <path d="M 188 45 L 200 45 L 192 65 L 203 65 L 174 96 L 184 72 L 173 72 Z"
+  <!-- Big yellow lightning bolt BEHIND the body — the character's
+       signature "wielded charge" effect from the 2D reference. Drawn
+       FIRST so the body and head occlude its lower half, leaving the
+       top zigzag visible peeking out from behind. 9-vertex polygon
+       with thickness on both the top and bottom edges so the bolt
+       reads as a chunky Z, not a needle. -->
+  <path d="M 256 91 L 210 131 L 254 165 L 225 211 L 309 189 L 276 142 L 270 130 L 298 89 L 283 85 Z"
         fill="#f5d33a"/>
 
-  <!-- Body bulb: wide squat peach. Matte filter so it reads as the
-       soft gradient peach of the 2D reference, not glossy ceramic. -->
-  <ellipsoid cx="210" cy="245" cz="10" rx="118" ry="88" rz="85"
+  <!-- Cape: a flag-shaped 2D <path> on the lower-left, drawn behind
+       the body. Simpler than the previous stacked ellipsoids and
+       closer to the 2D reference's angular flowing cape. -->
+  <path d="M 90 280 L 110 290 L 110 360 L 60 365 L 50 285 Z"
+        fill="#c8242c"/>
+
+  <!-- Hammer head: gray cube at the top-LEFT (matches the 2D
+       reference's hammer position). Pushed back to cz = -45 so its
+       front face sits at z = -11, comfortably behind the 2D bolt path
+       at z ≈ +0.X. -->
+  <cube cx="130" cy="80" cz="-45" size="68"
+        fill="#d8d8d8" filter="url(#shade-soft)"/>
+
+  <!-- Hammer handle: short brown stub below the head. -->
+  <ellipsoid cx="135" cy="130" cz="-30" rx="9" ry="14" rz="9"
+             fill="#7a4a28" filter="url(#shade-soft)"/>
+
+  <!-- Small bolt decal on the hammer's face -->
+  <path d="M 138 56 L 150 56 L 142 78 L 153 78 L 122 110 L 134 84 L 122 84 Z"
+        fill="#f5d33a"/>
+
+  <!-- Body bulb: smaller and lower, leaving room for the big bolt and
+       the bigger hammer on the upper-left. -->
+  <ellipsoid cx="220" cy="270" cz="10" rx="102" ry="78" rz="78"
              fill="#f5a87a" filter="url(#shade-soft)"/>
 
   <!-- Bottom legs / pincer feet -->
-  <ellipsoid cx="175" cy="325" cz="20" rx="11" ry="8" rz="8"
+  <ellipsoid cx="190" cy="340" cz="20" rx="10" ry="7" rz="7"
              fill="#c8242c" filter="url(#shade-soft)"/>
-  <ellipsoid cx="245" cy="325" cz="20" rx="11" ry="8" rz="8"
+  <ellipsoid cx="250" cy="340" cz="20" rx="10" ry="7" rz="7"
              fill="#c8242c" filter="url(#shade-soft)"/>
 
-  <!-- Left arm + pincer claw (upper + lower halves of the split pincer) -->
-  <ellipsoid cx="108" cy="248" cz="25" rx="30" ry="24" rz="24"
+  <!-- Left arm + pincer claw -->
+  <ellipsoid cx="125" cy="275" cz="25" rx="26" ry="22" rz="22"
              fill="#f5a87a" filter="url(#shade-soft)"/>
-  <ellipsoid cx="72" cy="265" cz="30" rx="22" ry="13" rz="13"
+  <ellipsoid cx="92" cy="290" cz="30" rx="19" ry="12" rz="12"
              fill="#f5a87a" filter="url(#shade-soft)"/>
-  <ellipsoid cx="68" cy="285" cz="30" rx="20" ry="13" rz="13"
+  <ellipsoid cx="88" cy="312" cz="30" rx="17" ry="12" rz="12"
              fill="#f5a87a" filter="url(#shade-soft)"/>
 
   <!-- Right arm + pincer claw, mirrored -->
-  <ellipsoid cx="320" cy="245" cz="25" rx="30" ry="24" rz="24"
+  <ellipsoid cx="315" cy="275" cz="25" rx="26" ry="22" rz="22"
              fill="#f5a87a" filter="url(#shade-soft)"/>
-  <ellipsoid cx="360" cy="258" cz="35" rx="22" ry="13" rz="13"
+  <ellipsoid cx="352" cy="280" cz="35" rx="19" ry="12" rz="12"
              fill="#f5a87a" filter="url(#shade-soft)"/>
-  <ellipsoid cx="362" cy="288" cz="35" rx="22" ry="13" rz="13"
+  <ellipsoid cx="354" cy="310" cz="35" rx="19" ry="12" rz="12"
              fill="#f5a87a" filter="url(#shade-soft)"/>
 
   <!-- White bauble cradled in the right pincer, sitting in front -->
-  <ellipsoid cx="375" cy="275" cz="55" rx="15" ry="15" rz="14"
+  <ellipsoid cx="368" cy="297" cz="55" rx="14" ry="14" rz="13"
              fill="#ffffff" filter="url(#shade-glossy)"/>
 
-  <!-- Eyes: oval sclera, dominant brown iris, primary + secondary
-       catchlights. Glossy filter so the iris has the wet catchlight
-       look. Pushed close enough that the two eyes touch in screen
-       space — characteristic of the reference's "fused" look. -->
-  <ellipsoid cx="172" cy="210" cz="70" rx="44" ry="50" rz="44"
+  <!-- Eyes: oval sclera, dominant brown iris (flat-disc cylinder),
+       primary + secondary catchlights. -->
+  <ellipsoid cx="185" cy="232" cz="70" rx="42" ry="48" rz="42"
              fill="#ffffff" filter="url(#shade-glossy)"/>
-  <ellipsoid cx="252" cy="210" cz="70" rx="44" ry="50" rz="44"
+  <ellipsoid cx="265" cy="232" cz="70" rx="42" ry="48" rz="42"
              fill="#ffffff" filter="url(#shade-glossy)"/>
 
-  <!-- Iris: cylinder for a flatter disc look (matches the 2D's
-       essentially-flat iris fill) rather than a sphere bulge. -->
-  <cylinder cx="163" cy="225" cz="115" rx="29" ry="34" depth="14"
+  <cylinder cx="178" cy="247" cz="115" rx="27" ry="32" depth="14"
             fill="#3a2418" filter="url(#shade-glossy)"/>
-  <cylinder cx="261" cy="225" cz="115" rx="29" ry="34" depth="14"
+  <cylinder cx="270" cy="247" cz="115" rx="27" ry="32" depth="14"
             fill="#3a2418" filter="url(#shade-glossy)"/>
 
   <!-- Primary catchlights (upper-left of each iris) -->
-  <ellipsoid cx="154" cy="213" cz="140" rx="8" ry="10" rz="6"
+  <ellipsoid cx="170" cy="234" cz="140" rx="8" ry="10" rz="6"
              fill="#ffffff"/>
-  <ellipsoid cx="252" cy="213" cz="140" rx="8" ry="10" rz="6"
+  <ellipsoid cx="262" cy="234" cz="140" rx="8" ry="10" rz="6"
              fill="#ffffff"/>
   <!-- Secondary catchlights (smaller, lower-right of each iris) -->
-  <ellipsoid cx="172" cy="242" cz="140" rx="3" ry="3" rz="2"
+  <ellipsoid cx="186" cy="262" cz="140" rx="3" ry="3" rz="2"
              fill="#ffffff"/>
-  <ellipsoid cx="270" cy="242" cz="140" rx="3" ry="3" rz="2"
+  <ellipsoid cx="278" cy="262" cz="140" rx="3" ry="3" rz="2"
              fill="#ffffff"/>
 
   <!-- Mouth: wide thin dark "smile puck" pushed in front of the body's
-       front face at this screen position (body front ≈ z = 88). -->
-  <cylinder cx="210" cy="278" cz="115" rx="42" ry="13" depth="6"
+       front face. -->
+  <cylinder cx="225" cy="305" cz="115" rx="38" ry="12" depth="6"
             fill="#1f1209" filter="url(#shade-soft)"/>
   <!-- Tooth: small white block on the left of the mouth -->
-  <cube cx="188" cy="276" cz="125" size="11"
+  <cube cx="206" cy="304" cz="125" size="10"
         fill="#ffffff" filter="url(#shade-soft)"/>
 </svg>"##;
