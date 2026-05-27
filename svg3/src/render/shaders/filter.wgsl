@@ -281,12 +281,19 @@ const LIGHT_TYPE_SPOT: f32 = 2.0;
 fn light_vector(uv: vec2<f32>, surface_z: f32) -> vec3<f32> {
     let kind = filter_params.lighting.w;
     if (kind >= LIGHT_TYPE_POINT - 0.5) {
-        // Point and spot lights both store an x/y/z position; the light
-        // vector is the unit vector from the surface point toward the light.
-        let pos_x = filter_params.light.x * filter_params.texel_size.x;
-        let pos_y = filter_params.light.y * filter_params.texel_size.y;
-        let pos_z = filter_params.light.z;
-        let diff = vec3<f32>(pos_x - uv.x, pos_y - uv.y, pos_z - surface_z);
+        // Point and spot lights store an x/y/z position in filter-pixel
+        // space; the light vector is the unit vector from the surface
+        // point toward the light. SVG 1.1 §15.21: all three axes use the
+        // same length scale (filter pixels), so the diff must be evaluated
+        // in pixel space — converting `pos.xy` into UV and leaving `pos.z`
+        // in pixels would mix units and collapse the light vector toward
+        // +Z whenever `z` is large.
+        let surface_pixel = vec3<f32>(
+            uv.x / filter_params.texel_size.x,
+            uv.y / filter_params.texel_size.y,
+            surface_z,
+        );
+        let diff = filter_params.light.xyz - surface_pixel;
         return normalize(diff);
     }
     return normalize(filter_params.light.xyz);

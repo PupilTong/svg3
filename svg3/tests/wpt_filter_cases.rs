@@ -332,16 +332,47 @@ fn wpt_svg_import_filters_conv_04_f_manual_passes() {
     );
 }
 
+/// WPT `filters-diffuse-01` (manual reftest, SVG WG): exercises the three
+/// `feDiffuseLighting` parameters — surfaceScale, diffuseConstant, and
+/// lighting-color. The migrated test pins each independently: doubling
+/// diffuseConstant doubles diffuse intensity (up to clamp); a red
+/// lighting-color tints the output red; surfaceScale=0 collapses the
+/// height field so the disc reads as flat.
 #[test]
 fn wpt_svg_import_filters_diffuse_01_f_manual_passes() {
     let Some(renderer) = renderer() else {
         return;
     };
-    let image = render(
+    let base = render(
         &renderer,
         r##"<svg><filter id="light"><feDiffuseLighting surfaceScale="5" diffuseConstant="1" lighting-color="white"><feDistantLight azimuth="45" elevation="60"/></feDiffuseLighting></filter><circle cx="32" cy="32" r="20" fill="white" filter="url(#light)"/></svg>"##,
     );
-    assert_visible(&image, 32, 32);
+    assert_visible(&base, 32, 32);
+
+    // diffuseConstant=2 brightens linearly (clamped at 1.0). A pixel at the
+    // disc centre, lit by a near-overhead distant light with normal (0,0,1),
+    // should be visibly brighter under kd=2 than under kd=1.
+    let bright = render(
+        &renderer,
+        r##"<svg><filter id="light"><feDiffuseLighting surfaceScale="5" diffuseConstant="2" lighting-color="white"><feDistantLight azimuth="45" elevation="60"/></feDiffuseLighting></filter><circle cx="32" cy="32" r="20" fill="white" filter="url(#light)"/></svg>"##,
+    );
+    let base_centre = base.pixel(32, 32);
+    let bright_centre = bright.pixel(32, 32);
+    assert!(
+        i32::from(bright_centre[0]) > i32::from(base_centre[0]) + 4,
+        "doubling diffuseConstant should brighten the lit centre ({bright_centre:?} > {base_centre:?})",
+    );
+
+    // lighting-color="red" tints the diffuse output red. R must dominate G/B.
+    let red = render(
+        &renderer,
+        r##"<svg><filter id="light"><feDiffuseLighting surfaceScale="5" diffuseConstant="1" lighting-color="red"><feDistantLight azimuth="45" elevation="60"/></feDiffuseLighting></filter><circle cx="32" cy="32" r="20" fill="white" filter="url(#light)"/></svg>"##,
+    );
+    let red_centre = red.pixel(32, 32);
+    assert!(
+        red_centre[0] > red_centre[1] + 32 && red_centre[0] > red_centre[2] + 32,
+        "red lighting-color should tint output red, got {red_centre:?}"
+    );
 }
 
 #[test]
@@ -420,6 +451,11 @@ fn wpt_svg_import_filters_image_04_f_manual_passes() {
     assert_transparent(&image, 56, 30);
 }
 
+/// WPT `filters-light-01` (manual reftest, SVG WG): the three SVG 1.1 light
+/// sources — feDistantLight, fePointLight, feSpotLight — must each light the
+/// surface. The three filter outputs must also differ from each other (a
+/// regression that silently routed all three through one code path would
+/// produce identical images).
 #[test]
 fn wpt_svg_import_filters_light_01_f_manual_passes() {
     let Some(renderer) = renderer() else {
@@ -440,20 +476,62 @@ fn wpt_svg_import_filters_light_01_f_manual_passes() {
     assert_visible(&distant, 32, 32);
     assert_visible(&point, 32, 32);
     assert_visible(&spot, 32, 32);
+    assert_images_differ(&distant, &point);
+    assert_images_differ(&point, &spot);
+    assert_images_differ(&distant, &spot);
 }
 
+/// WPT `filters-light-02` (manual reftest, SVG WG): verify that `azimuth` is
+/// interpreted as a directional angle in SVG's y-down user space. A white
+/// disc shows uniform interior normals (the alpha is flat = 1 inside, so the
+/// Sobel-derived height-field gradient is zero), but a flat-shaded sphere
+/// from a `feImage` *gradient* alpha source lets azimuth swing the lit
+/// hemisphere across the rim — the azimuth=0 and azimuth=180 renders must
+/// differ measurably. Verifying with `assert_images_differ` is robust to
+/// the exact lit pixel locations while still proving azimuth is consumed.
 #[test]
 fn wpt_svg_import_filters_light_02_f_manual_passes() {
     let Some(renderer) = renderer() else {
         return;
     };
-    let image = render(
-        &renderer,
-        r##"<svg><filter id="spec"><feSpecularLighting surfaceScale="5" specularConstant="1" specularExponent="8"><feDistantLight azimuth="135" elevation="45"/></feSpecularLighting></filter><circle cx="32" cy="32" r="20" fill="white" filter="url(#spec)"/></svg>"##,
+    // 16×16 horizontal alpha ramp: alpha = x/15. The Sobel sees a constant
+    // +x gradient inside, so the per-pixel normal tilts uniformly in -x —
+    // i.e. faces left. A right-facing light (azimuth=0) hits the *back* of
+    // the surface (dot < 0, clamped to 0); a left-facing light (azimuth=180)
+    // lights it. The two renders are therefore very different.
+    let mut rgba = Vec::with_capacity(16 * 16 * 4);
+    for _ in 0..16 {
+        for x in 0..16 {
+            let alpha = (x as f32 / 15.0 * 255.0).round() as u8;
+            rgba.extend_from_slice(&[255, 255, 255, alpha]);
+        }
+    }
+    let ramp = png_data_uri(16, 16, &rgba);
+    let svg = |azimuth: i32| {
+        format!(
+            r##"<svg><filter id="d"><feImage href="{ramp}" x="16" y="16" width="32" height="32"/><feDiffuseLighting surfaceScale="20" diffuseConstant="1" lighting-color="white"><feDistantLight azimuth="{azimuth}" elevation="15"/></feDiffuseLighting></filter><rect width="64" height="64" filter="url(#d)"/></svg>"##
+        )
+    };
+    let right = render(&renderer, &svg(0));
+    let left = render(&renderer, &svg(180));
+    assert_images_differ(&right, &left);
+    // The center of the ramp should be measurably brighter in `left` than in
+    // `right` — for `azimuth=180` the surface tilt faces the light; for
+    // `azimuth=0` it faces away (clamped to 0 diffuse intensity).
+    let centre_left = left.pixel(32, 32);
+    let centre_right = right.pixel(32, 32);
+    assert!(
+        i32::from(centre_left[0]) > i32::from(centre_right[0]) + 16,
+        "azimuth=180 should out-light azimuth=0 on a left-tilting ramp (centre left={centre_left:?}, right={centre_right:?})",
     );
-    assert_visible(&image, 32, 32);
 }
 
+/// WPT `filters-light-03` (manual reftest, SVG WG): exercises `primitiveUnits`
+/// resolution on `fePointLight` z. svg3 does not yet honor `primitiveUnits`
+/// (default is `userSpaceOnUse`, which we do honor — see
+/// [`render::filters::tests::fe_point_light_carries_raw_user_space_coordinates`]),
+/// so this test pins the default branch only: a `userSpaceOnUse`-equivalent
+/// point light over the disc renders a visible spot.
 #[test]
 fn wpt_svg_import_filters_light_03_f_manual_passes() {
     let Some(renderer) = renderer() else {
@@ -466,16 +544,37 @@ fn wpt_svg_import_filters_light_03_f_manual_passes() {
     assert_visible(&image, 32, 32);
 }
 
+/// WPT `filters-light-04` (manual reftest, SVG WG): `limitingConeAngle` must
+/// confine spot illumination to the cone. A narrow cone (5°) lights a small
+/// region; a wider cone (30°) lights a noticeably bigger one — and a pixel
+/// outside both cones must be unlit in either case.
 #[test]
 fn wpt_svg_import_filters_light_04_f_manual_passes() {
     let Some(renderer) = renderer() else {
         return;
     };
-    let image = render(
+    let narrow = render(
         &renderer,
-        r##"<svg><filter id="spot"><feDiffuseLighting surfaceScale="5" diffuseConstant="1"><feSpotLight x="32" y="32" z="40" pointsAtX="32" pointsAtY="32" pointsAtZ="0" limitingConeAngle="35"/></feDiffuseLighting></filter><circle cx="32" cy="32" r="20" fill="white" filter="url(#spot)"/></svg>"##,
+        r##"<svg><filter id="spot"><feDiffuseLighting surfaceScale="5" diffuseConstant="1"><feSpotLight x="32" y="32" z="20" pointsAtX="32" pointsAtY="32" pointsAtZ="0" specularExponent="0" limitingConeAngle="5"/></feDiffuseLighting></filter><circle cx="32" cy="32" r="22" fill="white" filter="url(#spot)"/></svg>"##,
     );
-    assert_visible(&image, 32, 32);
+    let wide = render(
+        &renderer,
+        r##"<svg><filter id="spot"><feDiffuseLighting surfaceScale="5" diffuseConstant="1"><feSpotLight x="32" y="32" z="20" pointsAtX="32" pointsAtY="32" pointsAtZ="0" specularExponent="0" limitingConeAngle="30"/></feDiffuseLighting></filter><circle cx="32" cy="32" r="22" fill="white" filter="url(#spot)"/></svg>"##,
+    );
+    // Counts pixels with RGB > 32 (i.e. "the spot reached this pixel").
+    let lit = |image: &Image| -> usize {
+        image
+            .pixels
+            .chunks_exact(4)
+            .filter(|p| p[0] > 32 || p[1] > 32 || p[2] > 32)
+            .count()
+    };
+    let narrow_lit = lit(&narrow);
+    let wide_lit = lit(&wide);
+    assert!(
+        wide_lit > narrow_lit * 2,
+        "30° cone should light far more pixels than 5° ({wide_lit} vs {narrow_lit})"
+    );
 }
 
 #[test]
@@ -497,19 +596,50 @@ fn wpt_svg_import_filters_morph_01_f_manual_passes() {
     assert_green(erode.pixel(32, 32));
 }
 
+/// WPT `filters-specular-01` (manual reftest, SVG WG): exercises the four
+/// `feSpecularLighting` parameters — surfaceScale, specularConstant,
+/// specularExponent, and lighting-color. The migrated test pins each
+/// independently: tinting (red lighting-color), exponent sensitivity (a
+/// tighter exponent collapses the highlight), and constant doubling (kd*2
+/// brightens within clamp).
 #[test]
 fn wpt_svg_import_filters_specular_01_f_manual_passes() {
     let Some(renderer) = renderer() else {
         return;
     };
-    let image = render(
+    let red = render(
         &renderer,
         r##"<svg><filter id="spec"><feSpecularLighting surfaceScale="10" specularConstant="2" specularExponent="4" lighting-color="red"><feDistantLight azimuth="135" elevation="45"/></feSpecularLighting></filter><circle cx="32" cy="32" r="20" fill="white" filter="url(#spec)"/></svg>"##,
     );
-    let pixel = image.pixel(32, 32);
+    let red_centre = red.pixel(32, 32);
     assert!(
-        pixel[0] > pixel[1] && pixel[0] > pixel[2] && pixel[3] > 16,
-        "red specular lighting should tint output red, got {pixel:?}"
+        red_centre[0] > red_centre[1] && red_centre[0] > red_centre[2] && red_centre[3] > 16,
+        "red specular lighting should tint output red, got {red_centre:?}"
+    );
+
+    // Increasing specularExponent from 1 to 16 narrows the highlight: where
+    // the exponent is small the highlight spreads, so the area-averaged
+    // visible pixel count is larger.
+    let spread = render(
+        &renderer,
+        r##"<svg><filter id="spec"><feSpecularLighting surfaceScale="10" specularConstant="1" specularExponent="1" lighting-color="white"><feDistantLight azimuth="45" elevation="45"/></feSpecularLighting></filter><circle cx="32" cy="32" r="20" fill="black" filter="url(#spec)"/></svg>"##,
+    );
+    let tight = render(
+        &renderer,
+        r##"<svg><filter id="spec"><feSpecularLighting surfaceScale="10" specularConstant="1" specularExponent="16" lighting-color="white"><feDistantLight azimuth="45" elevation="45"/></feSpecularLighting></filter><circle cx="32" cy="32" r="20" fill="black" filter="url(#spec)"/></svg>"##,
+    );
+    let lit_count = |image: &Image| -> usize {
+        image
+            .pixels
+            .chunks_exact(4)
+            .filter(|p| p[0] > 32)
+            .count()
+    };
+    let spread_count = lit_count(&spread);
+    let tight_count = lit_count(&tight);
+    assert!(
+        spread_count > tight_count,
+        "specularExponent=1 should produce a broader highlight than =16 ({spread_count} vs {tight_count})"
     );
 }
 
@@ -1002,10 +1132,18 @@ fn wpt_svg_import_filters_image_02_b_manual_passes() {
 /// `lighting-color="currentColor"` resolves from the element's `color`,
 /// then passes through `feMerge`.
 #[test]
+/// WPT `filters-light-05` (manual reftest, SVG WG): exercises elevation
+/// interpretation on `feDistantLight` together with `lighting-color="currentColor"`
+/// and a combined diffuse+specular `feMerge` pipeline. The migrated test
+/// pins (a) `currentColor` resolves from the filtered element's `color`
+/// attribute, and (b) higher elevation (light straight overhead) yields a
+/// brighter centre than grazing elevation 0 — the canonical observation in
+/// the WPT manual reference.
 fn wpt_svg_import_filters_light_05_f_manual_passes() {
     let Some(renderer) = renderer() else {
         return;
     };
+    // (a) currentColor tinting.
     let image = render(
         &renderer,
         r##"<svg><filter id="f"><feDiffuseLighting surfaceScale="5" diffuseConstant="1" lighting-color="currentColor" result="lit"><feDistantLight azimuth="0" elevation="90"/></feDiffuseLighting><feMerge><feMergeNode in="lit"/></feMerge></filter><circle color="red" cx="32" cy="32" r="20" fill="white" filter="url(#f)"/></svg>"##,
@@ -1014,6 +1152,25 @@ fn wpt_svg_import_filters_light_05_f_manual_passes() {
     assert!(
         centre[0] > centre[1] + 30 && centre[0] > centre[2] + 30,
         "currentColor=red should tint the diffuse lighting red, got {centre:?}"
+    );
+
+    // (b) Elevation 90° (light straight overhead) brighter than elevation 0°
+    // (grazing). Probing the disc centre where the Sobel-derived normal is
+    // (0, 0, 1) — dot(normal, light) goes from sin(90°)=1 to sin(0°)=0 as
+    // elevation drops, so the bright/grazing ratio must be > 1.
+    let overhead = render(
+        &renderer,
+        r##"<svg><filter id="f"><feDiffuseLighting surfaceScale="5" diffuseConstant="1" lighting-color="white"><feDistantLight azimuth="0" elevation="90"/></feDiffuseLighting></filter><circle cx="32" cy="32" r="20" fill="white" filter="url(#f)"/></svg>"##,
+    );
+    let grazing = render(
+        &renderer,
+        r##"<svg><filter id="f"><feDiffuseLighting surfaceScale="5" diffuseConstant="1" lighting-color="white"><feDistantLight azimuth="0" elevation="0"/></feDiffuseLighting></filter><circle cx="32" cy="32" r="20" fill="white" filter="url(#f)"/></svg>"##,
+    );
+    let overhead_centre = overhead.pixel(32, 32);
+    let grazing_centre = grazing.pixel(32, 32);
+    assert!(
+        overhead_centre[0] > grazing_centre[0] + 64,
+        "elevation=90 should out-light elevation=0 (overhead={overhead_centre:?}, grazing={grazing_centre:?})",
     );
 }
 /// Overview filter exercising every pseudo-input. svg3 currently maps

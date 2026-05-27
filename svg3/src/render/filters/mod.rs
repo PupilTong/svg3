@@ -2143,4 +2143,238 @@ mod tests {
             })
         );
     }
+
+    /// Helper: extract the (single) lighting primitive from a freshly-parsed
+    /// `<filter>` definition referenced by `<rect filter="url(#id)"/>`.
+    fn lighting_from(svg: &str) -> Lighting {
+        let document = crate::dom::parse(svg).expect("svg parses");
+        let definitions = FilterDefinitions::collect(&document);
+        let referrer = document
+            .node(document.root())
+            .children
+            .iter()
+            .copied()
+            .find_map(|id| {
+                let element = document.element(id);
+                element
+                    .attributes
+                    .get("filter")
+                    .is_some()
+                    .then_some(element)
+            })
+            .expect("a referrer with filter=url(#…)");
+        let chain = definitions
+            .resolve(referrer)
+            .expect("filter resolves")
+            .chain();
+        match &chain[0].kind {
+            FilterPrimitiveKind::DiffuseLighting(l) | FilterPrimitiveKind::SpecularLighting(l) => {
+                *l
+            }
+            other => panic!("expected a lighting primitive, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fe_distant_light_azimuth_zero_elevation_zero_points_along_plus_x() {
+        // SVG 1.1 §15.21.1: azimuth is clockwise from +x (y-down), elevation
+        // is angle above the surface. So (0, 0) is the in-plane light vector
+        // pointing along +x (the right side of the surface).
+        let l = lighting_from(
+            r##"<svg><filter id="f"><feDiffuseLighting><feDistantLight azimuth="0" elevation="0"/></feDiffuseLighting></filter><rect filter="url(#f)"/></svg>"##,
+        );
+        let LightSource::Distant(dir) = l.light else {
+            panic!("expected a distant light, got {:?}", l.light);
+        };
+        assert!((dir[0] - 1.0).abs() < 1e-5, "x = {}", dir[0]);
+        assert!(dir[1].abs() < 1e-5, "y = {}", dir[1]);
+        assert!(dir[2].abs() < 1e-5, "z = {}", dir[2]);
+    }
+
+    #[test]
+    fn fe_distant_light_azimuth_90_points_along_negative_y_in_svg_frame() {
+        // SVG y-down: clockwise from +x by 90° lands on +y *in screen space*,
+        // which is the +y SVG (because clockwise *is* the +y direction when
+        // the y-axis points down). The parser stores the vector in svg3's
+        // internal right-handed math frame, so the y component here is the
+        // *negation* of the screen-y — i.e. negative.
+        let l = lighting_from(
+            r##"<svg><filter id="f"><feDiffuseLighting><feDistantLight azimuth="90" elevation="0"/></feDiffuseLighting></filter><rect filter="url(#f)"/></svg>"##,
+        );
+        let LightSource::Distant(dir) = l.light else {
+            panic!("expected distant, got {:?}", l.light);
+        };
+        assert!(dir[0].abs() < 1e-5, "x = {}", dir[0]);
+        assert!((dir[1] + 1.0).abs() < 1e-5, "y = {}", dir[1]);
+        assert!(dir[2].abs() < 1e-5, "z = {}", dir[2]);
+    }
+
+    #[test]
+    fn fe_distant_light_elevation_90_points_straight_up() {
+        // Elevation 90° means the light is straight above the surface, so
+        // the vector is +z regardless of azimuth.
+        let l = lighting_from(
+            r##"<svg><filter id="f"><feDiffuseLighting><feDistantLight azimuth="135" elevation="90"/></feDiffuseLighting></filter><rect filter="url(#f)"/></svg>"##,
+        );
+        let LightSource::Distant(dir) = l.light else {
+            panic!("expected distant, got {:?}", l.light);
+        };
+        assert!(dir[0].abs() < 1e-5, "x = {}", dir[0]);
+        assert!(dir[1].abs() < 1e-5, "y = {}", dir[1]);
+        assert!((dir[2] - 1.0).abs() < 1e-5, "z = {}", dir[2]);
+    }
+
+    #[test]
+    fn fe_point_light_carries_raw_user_space_coordinates() {
+        let l = lighting_from(
+            r##"<svg><filter id="f"><feDiffuseLighting><fePointLight x="50" y="75" z="200"/></feDiffuseLighting></filter><rect filter="url(#f)"/></svg>"##,
+        );
+        assert_eq!(l.light, LightSource::Point([50.0, 75.0, 200.0]));
+    }
+
+    #[test]
+    fn fe_spot_light_direction_normalizes_from_pos_to_points_at() {
+        // Position (10, 10, 10), pointsAt (20, 10, 10) — the cone axis is
+        // along +x with unit length.
+        let l = lighting_from(
+            r##"<svg><filter id="f"><feDiffuseLighting><feSpotLight x="10" y="10" z="10" pointsAtX="20" pointsAtY="10" pointsAtZ="10"/></feDiffuseLighting></filter><rect filter="url(#f)"/></svg>"##,
+        );
+        let LightSource::Spot {
+            position,
+            direction,
+            cone_exponent,
+            cos_limit,
+        } = l.light
+        else {
+            panic!("expected spot light, got {:?}", l.light);
+        };
+        assert_eq!(position, [10.0, 10.0, 10.0]);
+        assert!((direction[0] - 1.0).abs() < 1e-5, "dir.x = {}", direction[0]);
+        assert!(direction[1].abs() < 1e-5);
+        assert!(direction[2].abs() < 1e-5);
+        // No `specularExponent` → SVG default of 1.0.
+        assert!((cone_exponent - 1.0).abs() < 1e-5);
+        // No `limitingConeAngle` → sentinel -1 for "no cone limit".
+        assert!((cos_limit + 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn fe_spot_light_limiting_cone_angle_stored_as_cos() {
+        // 60° → cos 60° = 0.5.
+        let l = lighting_from(
+            r##"<svg><filter id="f"><feDiffuseLighting><feSpotLight x="0" y="0" z="10" pointsAtX="0" pointsAtY="0" pointsAtZ="0" limitingConeAngle="60"/></feDiffuseLighting></filter><rect filter="url(#f)"/></svg>"##,
+        );
+        let LightSource::Spot { cos_limit, .. } = l.light else {
+            panic!("expected spot, got {:?}", l.light);
+        };
+        assert!((cos_limit - 0.5).abs() < 1e-5, "cos_limit = {cos_limit}");
+    }
+
+    #[test]
+    fn fe_spot_light_negative_limiting_cone_angle_round_trips() {
+        // WPT `filters-light-04` exercises negative limitingConeAngle. SVG
+        // 1.1 treats cosine of a negative angle as cos(|angle|) by parity,
+        // so the cosine stored here equals cos(|−30°|) = cos(30°).
+        let l = lighting_from(
+            r##"<svg><filter id="f"><feDiffuseLighting><feSpotLight x="0" y="0" z="10" pointsAtX="0" pointsAtY="0" pointsAtZ="0" limitingConeAngle="-30"/></feDiffuseLighting></filter><rect filter="url(#f)"/></svg>"##,
+        );
+        let LightSource::Spot { cos_limit, .. } = l.light else {
+            panic!("expected spot, got {:?}", l.light);
+        };
+        let expected = (-30.0f32).to_radians().cos();
+        assert!(
+            (cos_limit - expected).abs() < 1e-5,
+            "cos_limit = {cos_limit}, expected {expected}"
+        );
+    }
+
+    #[test]
+    fn fe_spot_light_self_pointing_falls_back_to_plus_z_axis() {
+        // SVG 1.1 §15.21.1: when position == pointsAt the cone direction is
+        // undefined. svg3 picks +z so the cone still has a well-defined
+        // orientation and the renderer doesn't divide by zero.
+        let l = lighting_from(
+            r##"<svg><filter id="f"><feDiffuseLighting><feSpotLight x="5" y="5" z="5" pointsAtX="5" pointsAtY="5" pointsAtZ="5"/></feDiffuseLighting></filter><rect filter="url(#f)"/></svg>"##,
+        );
+        let LightSource::Spot { direction, .. } = l.light else {
+            panic!("expected spot, got {:?}", l.light);
+        };
+        assert_eq!(direction, [0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn lighting_defaults_match_svg_spec() {
+        // SVG 1.1 §15.21 / 15.22 default values, exercised by an
+        // attribute-less element to make missing attribute coverage explicit.
+        let l = lighting_from(
+            r##"<svg><filter id="f"><feDiffuseLighting><feDistantLight/></feDiffuseLighting></filter><rect filter="url(#f)"/></svg>"##,
+        );
+        assert_eq!(l.surface_scale, 1.0);
+        assert_eq!(l.constant, 1.0);
+        // Default specularExponent is 1.0; we always clamp to ≥1.0 per spec.
+        assert_eq!(l.specular_exponent, 1.0);
+        // SVG default lighting-color is `white`.
+        assert_eq!(l.lighting_color, [1.0, 1.0, 1.0, 1.0]);
+        assert!(!l.lighting_color_uses_current);
+    }
+
+    #[test]
+    fn lighting_specular_exponent_clamped_to_minimum_one() {
+        // SVG 1.1: specularExponent < 1.0 is clamped to 1.0. svg3 implements
+        // this in the parser so the GPU never sees an invalid value.
+        let l = lighting_from(
+            r##"<svg><filter id="f"><feSpecularLighting specularExponent="0.25"><feDistantLight azimuth="0" elevation="45"/></feSpecularLighting></filter><rect filter="url(#f)"/></svg>"##,
+        );
+        assert_eq!(l.specular_exponent, 1.0);
+    }
+
+    #[test]
+    fn lighting_color_currentcolor_is_flagged_for_resolution() {
+        // `lighting-color="currentColor"` is recognised but stored as a flag —
+        // scene.rs substitutes the filtered element's resolved `color` before
+        // the primitive runs.
+        let l = lighting_from(
+            r##"<svg><filter id="f"><feDiffuseLighting lighting-color="currentColor"><feDistantLight/></feDiffuseLighting></filter><rect filter="url(#f)"/></svg>"##,
+        );
+        assert!(l.lighting_color_uses_current);
+    }
+
+    #[test]
+    fn lighting_picks_first_child_light_source() {
+        // SVG 1.1: `feDiffuseLighting` / `feSpecularLighting` carry exactly
+        // one of the three light-source elements. svg3 picks the first
+        // recognised child so a document with multiple light children does
+        // not silently produce no light.
+        let l = lighting_from(
+            r##"<svg><filter id="f"><feDiffuseLighting><fePointLight x="3" y="4" z="5"/><feDistantLight azimuth="0" elevation="0"/></feDiffuseLighting></filter><rect filter="url(#f)"/></svg>"##,
+        );
+        assert_eq!(l.light, LightSource::Point([3.0, 4.0, 5.0]));
+    }
+
+    #[test]
+    fn lighting_without_light_source_falls_back_to_default_plus_z() {
+        // SVG 1.1 requires a child light source; svg3 still resolves a
+        // primitive whose child is missing or unsupported so the document
+        // renders rather than crashes. The default is a distant light along
+        // +z (i.e. straight overhead).
+        let l = lighting_from(
+            r##"<svg><filter id="f"><feDiffuseLighting/></filter><rect filter="url(#f)"/></svg>"##,
+        );
+        assert_eq!(l.light, LightSource::Distant([0.0, 0.0, 1.0]));
+    }
+
+    #[test]
+    fn diffuse_constant_and_specular_constant_are_independent() {
+        // `feDiffuseLighting` reads `diffuseConstant`; `feSpecularLighting`
+        // reads `specularConstant`. A document that sets only the matching
+        // attribute on each primitive must not pick up the other's value.
+        let d = lighting_from(
+            r##"<svg><filter id="f"><feDiffuseLighting diffuseConstant="0.5" specularConstant="3"><feDistantLight/></feDiffuseLighting></filter><rect filter="url(#f)"/></svg>"##,
+        );
+        assert_eq!(d.constant, 0.5);
+        let s = lighting_from(
+            r##"<svg><filter id="f"><feSpecularLighting diffuseConstant="0.5" specularConstant="3"><feDistantLight/></feSpecularLighting></filter><rect filter="url(#f)"/></svg>"##,
+        );
+        assert_eq!(s.constant, 3.0);
+    }
 }

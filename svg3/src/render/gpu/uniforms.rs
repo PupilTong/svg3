@@ -235,23 +235,58 @@ pub(super) fn turbulence_uniform(extent: wgpu::Extent3d, t: Turbulence) -> Filte
 
 pub(super) fn lighting_uniform(
     extent: wgpu::Extent3d,
+    viewport: crate::render::Viewport,
     l: Lighting,
     specular: bool,
 ) -> FilterUniform {
     // `lighting.w` encodes the light source kind: 0 = distant, 1 = point,
     // 2 = spot. Must stay in sync with `LIGHT_TYPE_*` constants in
     // `filter.wgsl`.
+    //
+    // Light positions are stored in user-space coordinates per SVG 1.1
+    // §15.21.2 (default `primitiveUnits="userSpaceOnUse"`). The filter
+    // shader operates in filter-pixel space (the source texture is sized
+    // to `extent`), so all three position axes must be scaled by the
+    // user-space → pixel ratio. With a non-trivial `viewBox` (e.g.
+    // `viewBox="0 0 220 220"` on a 200×200 canvas) the scale is not 1.0
+    // and an unscaled pixel-space evaluation would put the light at the
+    // wrong fraction of the canvas.
+    //
+    // The two axes scale independently when `viewBox` and the canvas
+    // disagree on aspect ratio. The `z` axis has no separate viewBox
+    // dimension; SVG 1.1 keeps it in the same length scale as `x`/`y`,
+    // so we use the geometric mean of the per-axis scales for an
+    // aspect-preserving compromise that matches Firefox / Chromium for
+    // the (common) uniform case.
     let mut uniform = FilterUniform::empty(extent.width, extent.height);
     uniform.color = l.lighting_color;
     let is_specular = if specular { 1.0 } else { 0.0 };
+    let scale_x = if viewport.width > 0.0 {
+        extent.width as f32 / viewport.width
+    } else {
+        1.0
+    };
+    let scale_y = if viewport.height > 0.0 {
+        extent.height as f32 / viewport.height
+    } else {
+        1.0
+    };
+    let scale_z = (scale_x * scale_y).sqrt();
     match l.light {
         LightSource::Distant(dir) => {
+            // Distant-light is a direction, not a position — no length
+            // scaling needed. The vector is already unit length.
             uniform.light = [dir[0], dir[1], dir[2], l.specular_exponent];
             uniform.lighting = [l.surface_scale, l.constant, is_specular, 0.0];
         }
         LightSource::Point(pos) => {
-            uniform.light = [pos[0], pos[1], pos[2], l.specular_exponent];
-            uniform.lighting = [l.surface_scale, l.constant, is_specular, 1.0];
+            uniform.light = [
+                pos[0] * scale_x,
+                pos[1] * scale_y,
+                pos[2] * scale_z,
+                l.specular_exponent,
+            ];
+            uniform.lighting = [l.surface_scale * scale_z, l.constant, is_specular, 1.0];
         }
         LightSource::Spot {
             position,
@@ -259,12 +294,18 @@ pub(super) fn lighting_uniform(
             cone_exponent,
             cos_limit,
         } => {
-            uniform.light = [position[0], position[1], position[2], l.specular_exponent];
+            uniform.light = [
+                position[0] * scale_x,
+                position[1] * scale_y,
+                position[2] * scale_z,
+                l.specular_exponent,
+            ];
             // `light_dir.xyz` carries the cone axis (light -> pointsAt);
             // `light_dir.w` carries `cos(limitingConeAngle)` or `-1.0` if
-            // the user did not constrain the cone.
+            // the user did not constrain the cone. The cone axis is a unit
+            // direction and stays unscaled.
             uniform.light_dir = [direction[0], direction[1], direction[2], cos_limit];
-            uniform.lighting = [l.surface_scale, l.constant, is_specular, 2.0];
+            uniform.lighting = [l.surface_scale * scale_z, l.constant, is_specular, 2.0];
             // `extra.x` is reused as the cone-falloff exponent — distinct
             // from the surface Phong exponent stored in `light.w`.
             uniform.extra[0] = cone_exponent;
@@ -438,5 +479,156 @@ mod tests {
             std::mem::size_of::<ImageUniform>(),
             (16 + 4) * std::mem::size_of::<f32>()
         );
+    }
+
+    fn extent(w: u32, h: u32) -> wgpu::Extent3d {
+        wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        }
+    }
+
+    fn lighting_with_point(pos: [f32; 3]) -> Lighting {
+        Lighting {
+            surface_scale: 1.0,
+            constant: 1.0,
+            specular_exponent: 1.0,
+            lighting_color: [1.0; 4],
+            lighting_color_uses_current: false,
+            light: LightSource::Point(pos),
+        }
+    }
+
+    #[test]
+    fn lighting_uniform_distant_light_skips_pixel_scaling() {
+        // Distant light is a unit direction, not a position — no length
+        // scaling needed. The encoded `light.xyz` must equal the input
+        // direction byte-for-byte regardless of viewport.
+        let l = Lighting {
+            surface_scale: 1.0,
+            constant: 1.0,
+            specular_exponent: 1.0,
+            lighting_color: [1.0; 4],
+            lighting_color_uses_current: false,
+            light: LightSource::Distant([0.6, 0.0, 0.8]),
+        };
+        let uniform = lighting_uniform(
+            extent(200, 200),
+            crate::render::Viewport {
+                width: 220.0,
+                height: 220.0,
+            },
+            l,
+            false,
+        );
+        assert_eq!(uniform.light[0], 0.6);
+        assert_eq!(uniform.light[1], 0.0);
+        assert_eq!(uniform.light[2], 0.8);
+    }
+
+    #[test]
+    fn lighting_uniform_point_light_scales_xy_by_pixel_ratio() {
+        // User-space (50, 75, 200) on a viewBox=220 / canvas=200 document
+        // must be rewritten to canvas-pixel coordinates so the shader's
+        // `surface_pixel - light_pixel` evaluates in a single unit.
+        // ratio = 200/220 = 0.909, applied per axis.
+        let uniform = lighting_uniform(
+            extent(200, 200),
+            crate::render::Viewport {
+                width: 220.0,
+                height: 220.0,
+            },
+            lighting_with_point([50.0, 75.0, 200.0]),
+            true,
+        );
+        let ratio = 200.0 / 220.0;
+        assert!((uniform.light[0] - 50.0 * ratio).abs() < 1e-4);
+        assert!((uniform.light[1] - 75.0 * ratio).abs() < 1e-4);
+        // z scales by geometric-mean of per-axis ratios (uniform case = ratio).
+        assert!((uniform.light[2] - 200.0 * ratio).abs() < 1e-4);
+    }
+
+    #[test]
+    fn lighting_uniform_point_light_at_unit_viewport_is_identity() {
+        // The 1:1 case (viewport == extent) is the common WPT-test geometry.
+        // The scaling must collapse to the identity so existing pixel-space
+        // light positions stay unchanged.
+        let uniform = lighting_uniform(
+            extent(64, 64),
+            crate::render::Viewport {
+                width: 64.0,
+                height: 64.0,
+            },
+            lighting_with_point([32.0, 32.0, 40.0]),
+            false,
+        );
+        assert_eq!(uniform.light[0], 32.0);
+        assert_eq!(uniform.light[1], 32.0);
+        assert_eq!(uniform.light[2], 40.0);
+    }
+
+    #[test]
+    fn lighting_uniform_zero_viewport_falls_back_to_identity() {
+        // A degenerate (zero-width) viewport must not divide by zero. The
+        // fallback scale is 1.0, preserving the caller's coordinates.
+        let uniform = lighting_uniform(
+            extent(100, 100),
+            crate::render::Viewport {
+                width: 0.0,
+                height: 0.0,
+            },
+            lighting_with_point([10.0, 20.0, 30.0]),
+            false,
+        );
+        assert_eq!(uniform.light[0], 10.0);
+        assert_eq!(uniform.light[1], 20.0);
+        assert_eq!(uniform.light[2], 30.0);
+    }
+
+    #[test]
+    fn lighting_uniform_encodes_specular_flag_and_light_kind_tag() {
+        // `lighting.z` is the specular toggle (0 = diffuse, 1 = specular)
+        // and `lighting.w` is the light-source kind tag the WGSL shader
+        // dispatches on (0 = distant, 1 = point, 2 = spot). Pin them so a
+        // future refactor doesn't quietly desync the Rust→WGSL ABI.
+        let point = lighting_uniform(
+            extent(64, 64),
+            crate::render::Viewport {
+                width: 64.0,
+                height: 64.0,
+            },
+            lighting_with_point([0.0, 0.0, 1.0]),
+            true,
+        );
+        assert_eq!(point.lighting[2], 1.0); // specular = true
+        assert_eq!(point.lighting[3], 1.0); // LIGHT_TYPE_POINT
+
+        let spot = lighting_uniform(
+            extent(64, 64),
+            crate::render::Viewport {
+                width: 64.0,
+                height: 64.0,
+            },
+            Lighting {
+                surface_scale: 1.0,
+                constant: 1.0,
+                specular_exponent: 1.0,
+                lighting_color: [1.0; 4],
+                lighting_color_uses_current: false,
+                light: LightSource::Spot {
+                    position: [10.0, 20.0, 30.0],
+                    direction: [0.0, 0.0, 1.0],
+                    cone_exponent: 2.0,
+                    cos_limit: 0.5,
+                },
+            },
+            false,
+        );
+        assert_eq!(spot.lighting[2], 0.0); // specular = false (diffuse)
+        assert_eq!(spot.lighting[3], 2.0); // LIGHT_TYPE_SPOT
+        // Spot cos_limit and cone_exponent must reach the shader unchanged.
+        assert_eq!(spot.light_dir[3], 0.5);
+        assert_eq!(spot.extra[0], 2.0);
     }
 }
