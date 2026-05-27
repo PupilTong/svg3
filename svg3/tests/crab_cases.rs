@@ -150,29 +150,27 @@ pub const CRAB_FULL_SVG: &str = r##"<svg width="400" height="400" xmlns="http://
   </defs>
 
   <!-- Big yellow lightning bolt BEHIND the body — the character's
-       signature "wielded charge" effect from the 2D reference. Drawn
-       FIRST so the body and head occlude its lower half, leaving the
-       top zigzag visible peeking out from behind. 9-vertex polygon
-       with thickness on both the top and bottom edges so the bolt
-       reads as a chunky Z, not a needle. -->
-  <path d="M 256 91 L 210 131 L 254 165 L 225 211 L 309 189 L 276 142 L 270 130 L 298 89 L 283 85 Z"
+       signature "wielded charge" effect. Larger and more dramatic
+       than the previous version, with a dark cartoon outline from a
+       same-shape darker path drawn underneath. -->
+  <path d="M 258 65 L 195 130 L 250 160 L 200 240 L 320 200 L 270 140 L 268 125 L 318 75 L 285 60 Z"
+        fill="#3a2418"/>
+  <path d="M 258 70 L 202 132 L 252 160 L 208 232 L 312 198 L 266 142 L 264 128 L 312 80 L 285 67 Z"
         fill="#f5d33a"/>
 
-  <!-- Cape: a flag-shaped 2D <path> on the lower-left, drawn behind
-       the body. Simpler than the previous stacked ellipsoids and
-       closer to the 2D reference's angular flowing cape. -->
-  <path d="M 90 280 L 110 290 L 110 360 L 60 365 L 50 285 Z"
-        fill="#c8242c"/>
+  <!-- Cape: a flowing 2D <path> on the lower-left, drawn behind the
+       body. Stroke gives it the cartoon outline of the 2D reference. -->
+  <path d="M 95 275 Q 115 285 115 320 Q 118 350 105 365 Q 85 370 70 365 Q 50 360 48 340 Q 45 310 55 290 Q 70 275 95 275 Z"
+        fill="#c8242c" stroke="#3a2418" stroke-width="3"/>
 
-  <!-- Hammer head: gray cube at the top-LEFT. Pushed back to cz = -45
-       so its front face sits at z = -11, comfortably behind the 2D
-       bolt path at z ≈ +0.X. -->
+  <!-- Hammer head outline + cube. 2D <rect> drawn first as a thin
+       dark rim extending slightly outside the cube's silhouette. -->
+  <rect x="94" y="44" width="72" height="72" fill="#3a2418"/>
   <cube cx="130" cy="80" cz="-45" size="68"
         fill="#d8d8d8" filter="url(#shade-soft)"/>
 
-  <!-- Hammer pommel / grip: a darker gray cube on TOP of the head
-       (matches the small tab/pommel visible at the top of the 2D
-       reference's hammer, not a long handle below). -->
+  <!-- Hammer pommel / grip: a darker gray cube on TOP of the head. -->
+  <rect x="120" y="28" width="20" height="20" fill="#3a2418"/>
   <cube cx="130" cy="38" cz="-40" size="18"
         fill="#a8a8a8" filter="url(#shade-soft)"/>
 
@@ -180,41 +178,57 @@ pub const CRAB_FULL_SVG: &str = r##"<svg width="400" height="400" xmlns="http://
   <path d="M 138 56 L 150 56 L 142 78 L 153 78 L 122 110 L 134 84 L 122 84 Z"
         fill="#f5d33a"/>
 
+  <!-- Body outline: dark 2D ellipse slightly larger than the body
+       ellipsoid's screen silhouette, drawn before the body so just a
+       thin dark rim peeks out around the edge — cartoon outline. -->
+  <ellipse cx="220" cy="270" rx="106" ry="82" fill="#3a2418"/>
+
   <!-- Body bulb: smaller and lower, leaving room for the big bolt and
        the bigger hammer on the upper-left. -->
   <ellipsoid cx="220" cy="270" cz="10" rx="102" ry="78" rz="78"
              fill="#f5a87a" filter="url(#shade-soft)"/>
 
-  <!-- Bottom legs / pincer feet -->
+  <!-- Bottom legs / pincer feet — outline + filled -->
+  <ellipse cx="190" cy="340" rx="13" ry="10" fill="#3a2418"/>
   <ellipsoid cx="190" cy="340" cz="20" rx="10" ry="7" rz="7"
              fill="#c8242c" filter="url(#shade-soft)"/>
+  <ellipse cx="250" cy="340" rx="13" ry="10" fill="#3a2418"/>
   <ellipsoid cx="250" cy="340" cz="20" rx="10" ry="7" rz="7"
              fill="#c8242c" filter="url(#shade-soft)"/>
 
-  <!-- Left arm + pincer claw -->
+  <!-- Left arm + pincer claw, each with a dark outline behind. -->
+  <ellipse cx="125" cy="275" rx="29" ry="25" fill="#3a2418"/>
   <ellipsoid cx="125" cy="275" cz="25" rx="26" ry="22" rz="22"
              fill="#f5a87a" filter="url(#shade-soft)"/>
+  <ellipse cx="92" cy="290" rx="22" ry="15" fill="#3a2418"/>
   <ellipsoid cx="92" cy="290" cz="30" rx="19" ry="12" rz="12"
              fill="#f5a87a" filter="url(#shade-soft)"/>
+  <ellipse cx="88" cy="312" rx="20" ry="15" fill="#3a2418"/>
   <ellipsoid cx="88" cy="312" cz="30" rx="17" ry="12" rz="12"
              fill="#f5a87a" filter="url(#shade-soft)"/>
 
-  <!-- Right arm + pincer claw, mirrored -->
+  <!-- Right arm + pincer claw, mirrored, with outlines. -->
+  <ellipse cx="315" cy="275" rx="29" ry="25" fill="#3a2418"/>
   <ellipsoid cx="315" cy="275" cz="25" rx="26" ry="22" rz="22"
              fill="#f5a87a" filter="url(#shade-soft)"/>
+  <ellipse cx="352" cy="280" rx="22" ry="15" fill="#3a2418"/>
   <ellipsoid cx="352" cy="280" cz="35" rx="19" ry="12" rz="12"
              fill="#f5a87a" filter="url(#shade-soft)"/>
+  <ellipse cx="354" cy="310" rx="22" ry="15" fill="#3a2418"/>
   <ellipsoid cx="354" cy="310" cz="35" rx="19" ry="12" rz="12"
              fill="#f5a87a" filter="url(#shade-soft)"/>
 
-  <!-- White bauble cradled in the right pincer, sitting in front -->
+  <!-- White bauble cradled in the right pincer, with outline. -->
+  <ellipse cx="368" cy="297" rx="17" ry="17" fill="#3a2418"/>
   <ellipsoid cx="368" cy="297" cz="55" rx="14" ry="14" rz="13"
              fill="#ffffff" filter="url(#shade-glossy)"/>
 
-  <!-- Eyes: oval sclera, dominant brown iris (flat-disc cylinder),
-       primary + secondary catchlights. -->
+  <!-- Eyes: oval sclera with dark outline, dominant brown iris (flat-
+       disc cylinder), primary + secondary catchlights. -->
+  <ellipse cx="185" cy="232" rx="45" ry="51" fill="#3a2418"/>
   <ellipsoid cx="185" cy="232" cz="70" rx="42" ry="48" rz="42"
              fill="#ffffff" filter="url(#shade-glossy)"/>
+  <ellipse cx="265" cy="232" rx="45" ry="51" fill="#3a2418"/>
   <ellipsoid cx="265" cy="232" cz="70" rx="42" ry="48" rz="42"
              fill="#ffffff" filter="url(#shade-glossy)"/>
 
@@ -234,11 +248,13 @@ pub const CRAB_FULL_SVG: &str = r##"<svg width="400" height="400" xmlns="http://
   <ellipsoid cx="278" cy="262" cz="140" rx="3" ry="3" rz="2"
              fill="#ffffff"/>
 
-  <!-- Mouth: wide thin dark "smile puck" pushed in front of the body's
-       front face. -->
+  <!-- Mouth outline + smile puck. The dark outline behind serves
+       double duty as both an outline AND deepens the mouth color. -->
+  <ellipse cx="225" cy="305" rx="42" ry="15" fill="#3a2418"/>
   <cylinder cx="225" cy="305" cz="115" rx="38" ry="12" depth="6"
             fill="#1f1209" filter="url(#shade-soft)"/>
-  <!-- Tooth: small white block on the left of the mouth -->
+  <!-- Tooth: small white block on the left of the mouth, with outline. -->
+  <rect x="200" y="298" width="12" height="13" fill="#3a2418"/>
   <cube cx="206" cy="304" cz="125" size="10"
         fill="#ffffff" filter="url(#shade-soft)"/>
 </svg>"##;
