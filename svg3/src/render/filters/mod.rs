@@ -2156,11 +2156,7 @@ mod tests {
             .copied()
             .find_map(|id| {
                 let element = document.element(id);
-                element
-                    .attributes
-                    .get("filter")
-                    .is_some()
-                    .then_some(element)
+                element.attributes.contains_key("filter").then_some(element)
             })
             .expect("a referrer with filter=url(#…)");
         let chain = definitions
@@ -2249,7 +2245,11 @@ mod tests {
             panic!("expected spot light, got {:?}", l.light);
         };
         assert_eq!(position, [10.0, 10.0, 10.0]);
-        assert!((direction[0] - 1.0).abs() < 1e-5, "dir.x = {}", direction[0]);
+        assert!(
+            (direction[0] - 1.0).abs() < 1e-5,
+            "dir.x = {}",
+            direction[0]
+        );
         assert!(direction[1].abs() < 1e-5);
         assert!(direction[2].abs() < 1e-5);
         // No `specularExponent` → SVG default of 1.0.

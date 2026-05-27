@@ -628,13 +628,8 @@ fn wpt_svg_import_filters_specular_01_f_manual_passes() {
         &renderer,
         r##"<svg><filter id="spec"><feSpecularLighting surfaceScale="10" specularConstant="1" specularExponent="16" lighting-color="white"><feDistantLight azimuth="45" elevation="45"/></feSpecularLighting></filter><circle cx="32" cy="32" r="20" fill="black" filter="url(#spec)"/></svg>"##,
     );
-    let lit_count = |image: &Image| -> usize {
-        image
-            .pixels
-            .chunks_exact(4)
-            .filter(|p| p[0] > 32)
-            .count()
-    };
+    let lit_count =
+        |image: &Image| -> usize { image.pixels.chunks_exact(4).filter(|p| p[0] > 32).count() };
     let spread_count = lit_count(&spread);
     let tight_count = lit_count(&tight);
     assert!(

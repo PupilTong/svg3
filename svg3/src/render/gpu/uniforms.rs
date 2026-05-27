@@ -625,8 +625,9 @@ mod tests {
             },
             false,
         );
-        assert_eq!(spot.lighting[2], 0.0); // specular = false (diffuse)
-        assert_eq!(spot.lighting[3], 2.0); // LIGHT_TYPE_SPOT
+        // Specular flag = 0 (diffuse), light kind tag = 2 (LIGHT_TYPE_SPOT).
+        assert_eq!(spot.lighting[2], 0.0);
+        assert_eq!(spot.lighting[3], 2.0);
         // Spot cos_limit and cone_exponent must reach the shader unchanged.
         assert_eq!(spot.light_dir[3], 0.5);
         assert_eq!(spot.extra[0], 2.0);
