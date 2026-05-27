@@ -3,7 +3,7 @@
 //! Each case parses an svg3 document — the SVG WPT `shapes/rect-*`,
 //! `shapes/circle-*`, `shapes/ellipse-*`, and `shapes/polygon-*` reference
 //! tests, plus polyline fill, stroked shapes, line, path, markers, SVG paint
-//! servers, the svg3 3D `<cube>` primitive, Gaussian blur and image filters,
+//! servers, the svg3 3D primitives, Gaussian blur and image filters,
 //! mixed-shape, and canonical SVG samples — renders
 //! it headlessly with
 //! [`Renderer::render_to_image`], and compares the result against a committed
@@ -1265,6 +1265,39 @@ fn cases() -> Vec<Case> {
         Case::square(
             "ellipsoid-in-front-of-2d-rect",
             r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><rect x="30" y="30" width="40" height="40" fill="#c14b2b"/><ellipsoid cx="50" cy="50" cz="25" r="20" fill="#f2c14e"/></svg>"##,
+        ),
+        // SPEC §5.5 `<cylinder>` through the orthographic default. With
+        // `r` and no explicit `depth`, the cap radii are `r` and depth is
+        // the diameter, so the silhouette is the front circular cap.
+        Case::square(
+            "cylinder-orthographic",
+            r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><cylinder cx="50" cy="50" cz="0" r="28" fill="#f2c14e"/></svg>"##,
+        ),
+        // Explicit `rx`/`ry`/`depth` produce an elliptical cylinder. The
+        // orthographic default shows the elliptical cap and validates the
+        // independent cap radii.
+        Case::square(
+            "cylinder-anisotropic",
+            r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><cylinder cx="50" cy="50" cz="0" rx="38" ry="18" depth="34" fill="#c14b2b"/></svg>"##,
+        ),
+        // Through the camera the side wall becomes visible. The background
+        // rect at `z = 0` occludes the back half, leaving the front cap and
+        // front side-wall silhouette.
+        Case::square(
+            "cylinder-camera-angled",
+            r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><cylinder cx="50" cy="50" cz="0" r="24" depth="42" fill="#f2c14e"/></svg>"##,
+        )
+        .with_camera({
+            let mut c = Camera::facing(100, 100);
+            c.eye.x += 60.0;
+            c
+        }),
+        // 2D-3D depth occlusion with `<cylinder>`. The cylinder lies fully
+        // behind the rect plane (cz = -30, depth = 40 → z in [-50, -10]),
+        // so the rect at z = 0 hides it completely at the overlap.
+        Case::square(
+            "cylinder-occluded-by-2d-rect",
+            r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><rect x="30" y="30" width="40" height="40" fill="#c14b2b"/><cylinder cx="50" cy="50" cz="-30" r="20" depth="40" fill="#f2c14e"/></svg>"##,
         ),
         // SPEC §5.4 `<surface>` — degree-1 Bezier between two parallel
         // child paths produces a ruled quad strip. Sweeping a horizontal

@@ -21,7 +21,7 @@
 //! column's Bezier control point. All referenced children must produce
 //! the same polyline vertex count and the same open/closed state — if
 //! not, the element is in error and produces no geometry, matching
-//! `<cube>`/`<ellipsoid>`'s SPEC §5 error behaviour.
+//! the other 3D primitives' SPEC §5 error behaviour.
 //!
 //! Each child `<path>` may carry its own `'transform'` attribute (see
 //! [`crate::render::transform`]) lifting its local `z = 0` polyline into 3D. The

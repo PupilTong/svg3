@@ -3,7 +3,7 @@
 //!
 //! Each submodule — [`rect`], [`circle`], [`ellipse`], [`polygon`],
 //! [`polyline`], [`line`], and [`path`] for SVG 1.1 basic shapes, plus
-//! [`cube`], [`ellipsoid`], and [`surface`] for svg3's 3D primitives —
+//! [`cube`], [`ellipsoid`], [`cylinder`], and [`surface`] for svg3's 3D primitives —
 //! resolves one element's attributes into geometry and tessellates it into a
 //! [`Mesh`]. They share paint resolution and the mesh [`Vertex`] constructors —
 //! and, for the `<length>`-based shapes, the SVG length grammar — collected
@@ -17,6 +17,7 @@
 
 pub(crate) mod circle;
 pub(crate) mod cube;
+pub(crate) mod cylinder;
 pub(crate) mod ellipse;
 pub(crate) mod ellipsoid;
 pub(crate) mod line;

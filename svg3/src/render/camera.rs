@@ -12,10 +12,10 @@ use glam::{Mat4, Vec3};
 ///
 /// 2D content lies in the plane `z = 0`, so any value safely above 1 leaves
 /// the existing flat rendering unchanged; the headroom is what lets svg3 3D
-/// primitives (`<cube>`, `<ellipsoid>`) extend into ±Z without being clipped
-/// against the near/far planes at practical sizes. `100_000` matches the far
-/// plane of the perspective [`Camera::view_proj`] so the two defaults agree
-/// on the addressable depth range.
+/// primitives extend into ±Z without being clipped against the near/far
+/// planes at practical sizes. `100_000` matches the far plane of the
+/// perspective [`Camera::view_proj`] so the two defaults agree on the
+/// addressable depth range.
 const ORTHO_Z_RANGE: f32 = 100_000.0;
 
 /// Target-surface configuration for a render pass.
@@ -55,11 +55,11 @@ impl RenderConfig {
     /// (finite) for a zero-sized config.
     ///
     /// The orthographic depth range is wide enough to accommodate svg3's 3D
-    /// primitives (`<cube>`, `<ellipsoid>`) without clipping at practical
-    /// authoring sizes: 2D content in the plane `z = 0` maps to the middle
-    /// of the NDC depth range, with ±[`ORTHO_Z_RANGE`] user units of head-
-    /// room on either side. The choice of default viewing transformation
-    /// for Z is implementation-defined per [SPEC.md](../../SPEC.md) §7.1.
+    /// primitives without clipping at practical authoring sizes: 2D content
+    /// in the plane `z = 0` maps to the middle of the NDC depth range, with
+    /// ±[`ORTHO_Z_RANGE`] user units of headroom on either side. The choice
+    /// of default viewing transformation for Z is implementation-defined
+    /// per [SPEC.md](../../SPEC.md) §7.1.
     ///
     /// Assumes 1 user unit = 1 device pixel. The outer `<svg>`'s
     /// `width`/`height` drive the document viewport used for percentage

@@ -2483,6 +2483,77 @@ mod tests {
     }
 
     #[test]
+    fn render_to_image_draws_cylinder_orthographic() {
+        let document = crate::dom::parse(
+            r#"<svg width="64" height="64"><cylinder cx="32" cy="32" cz="0" r="16" fill="blue"/></svg>"#,
+        )
+        .unwrap();
+        let config = RenderConfig {
+            width: 64,
+            height: 64,
+            ..RenderConfig::default()
+        };
+        let Some(renderer) = skip_or_renderer("render_to_image_draws_cylinder_orthographic") else {
+            return;
+        };
+        let image = renderer
+            .render_to_image(&document, config)
+            .expect("headless render failed");
+        let centre = image.pixel(32, 32);
+        assert!(
+            centre[2] > 200 && centre[0] < 60 && centre[1] < 60,
+            "cylinder centre pixel not blue: {centre:?}"
+        );
+        assert_eq!(image.pixel(2, 2)[3], 0, "background should be transparent");
+    }
+
+    #[test]
+    fn render_to_image_draws_cylinder_through_camera() {
+        let document = crate::dom::parse(
+            r#"<svg width="64" height="64"><cylinder cx="32" cy="32" cz="0" r="14" depth="28" fill="blue"/></svg>"#,
+        )
+        .unwrap();
+        let config = RenderConfig {
+            width: 64,
+            height: 64,
+            camera: Some(Camera::facing(64, 64)),
+            ..RenderConfig::default()
+        };
+        let Some(renderer) = skip_or_renderer("render_to_image_draws_cylinder_through_camera")
+        else {
+            return;
+        };
+        let image = renderer
+            .render_to_image(&document, config)
+            .expect("headless render failed");
+        let centre = image.pixel(32, 32);
+        assert!(
+            centre[2] > 200 && centre[0] < 60 && centre[1] < 60,
+            "cylinder centre pixel not blue: {centre:?}"
+        );
+    }
+
+    #[test]
+    fn render_to_image_skips_degenerate_cylinder() {
+        let document = crate::dom::parse(
+            r#"<svg width="64" height="64"><cylinder cx="32" cy="32" r="16" depth="0" fill="blue"/></svg>"#,
+        )
+        .unwrap();
+        let config = RenderConfig {
+            width: 64,
+            height: 64,
+            ..RenderConfig::default()
+        };
+        let Some(renderer) = skip_or_renderer("render_to_image_skips_degenerate_cylinder") else {
+            return;
+        };
+        let image = renderer
+            .render_to_image(&document, config)
+            .expect("headless render failed");
+        assert_eq!(image.pixel(32, 32)[3], 0);
+    }
+
+    #[test]
     fn render_to_image_2d_rect_occludes_ellipsoid_fully_behind_z0() {
         let document = crate::dom::parse(
             r#"<svg width="64" height="64"><rect x="16" y="16" width="32" height="32" fill="red"/><ellipsoid cx="32" cy="32" cz="-20" r="15" fill="blue"/></svg>"#,
