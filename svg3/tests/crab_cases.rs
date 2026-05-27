@@ -164,16 +164,17 @@ pub const CRAB_FULL_SVG: &str = r##"<svg width="400" height="400" xmlns="http://
   <path d="M 90 280 L 110 290 L 110 360 L 60 365 L 50 285 Z"
         fill="#c8242c"/>
 
-  <!-- Hammer head: gray cube at the top-LEFT (matches the 2D
-       reference's hammer position). Pushed back to cz = -45 so its
-       front face sits at z = -11, comfortably behind the 2D bolt path
-       at z ≈ +0.X. -->
+  <!-- Hammer head: gray cube at the top-LEFT. Pushed back to cz = -45
+       so its front face sits at z = -11, comfortably behind the 2D
+       bolt path at z ≈ +0.X. -->
   <cube cx="130" cy="80" cz="-45" size="68"
         fill="#d8d8d8" filter="url(#shade-soft)"/>
 
-  <!-- Hammer handle: short brown stub below the head. -->
-  <ellipsoid cx="135" cy="130" cz="-30" rx="9" ry="14" rz="9"
-             fill="#7a4a28" filter="url(#shade-soft)"/>
+  <!-- Hammer pommel / grip: a darker gray cube on TOP of the head
+       (matches the small tab/pommel visible at the top of the 2D
+       reference's hammer, not a long handle below). -->
+  <cube cx="130" cy="38" cz="-40" size="18"
+        fill="#a8a8a8" filter="url(#shade-soft)"/>
 
   <!-- Small bolt decal on the hammer's face -->
   <path d="M 138 56 L 150 56 L 142 78 L 153 78 L 122 110 L 134 84 L 122 84 Z"
