@@ -1031,6 +1031,9 @@ impl Renderer {
             &uniform,
             "svg3 nested viewport clip apply",
         );
+        // The source depth texture still contains the clipped-away geometry's
+        // depths. This render op is only emitted for normal 2D SVG mode, where
+        // later painter-biased shapes advance in front of those stale depths.
         self.encode_composite_pass(
             encoder,
             &source.view,

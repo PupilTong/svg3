@@ -711,18 +711,14 @@ fn nested_svg_overflow_clips(element: &Element) -> bool {
         .get("style")
         .and_then(|style| inline_style_property(style, "overflow"))
         .or_else(|| element.attributes.get("overflow").map(String::as_str));
-    match overflow.map(str::trim) {
-        Some(value) if value.eq_ignore_ascii_case("visible") => false,
-        Some(value) if value.eq_ignore_ascii_case("hidden") => true,
-        Some(value) if value.eq_ignore_ascii_case("clip") => true,
-        Some(value) if value.eq_ignore_ascii_case("scroll") => true,
-        Some(value) if value.eq_ignore_ascii_case("auto") => true,
-        Some(_) | None => true,
-    }
+    !matches!(
+        overflow.map(str::trim),
+        Some(value) if value.eq_ignore_ascii_case("visible")
+    )
 }
 
 fn inline_style_property<'a>(style: &'a str, property: &str) -> Option<&'a str> {
-    style.split(';').find_map(|declaration| {
+    style.split(';').rev().find_map(|declaration| {
         let (name, value) = declaration.split_once(':')?;
         name.trim()
             .eq_ignore_ascii_case(property)
@@ -743,17 +739,25 @@ fn viewport_clip(transform: Mat4, rect: Rect, root_viewport: Viewport) -> Option
     let e = m[3][0];
     let f = m[3][1];
     let det = a * d - b * c;
-    if !(det.abs() > 1e-6 && det.is_finite()) {
+    if !(det != 0.0 && det.is_finite()) {
         return None;
     }
     let inv_det = 1.0 / det;
+    let inverse_rows = [
+        [d * inv_det, -c * inv_det, (c * f - d * e) * inv_det],
+        [-b * inv_det, a * inv_det, (b * e - a * f) * inv_det],
+    ];
+    if !inverse_rows
+        .iter()
+        .flatten()
+        .all(|component| component.is_finite())
+    {
+        return None;
+    }
     Some(ViewportClip {
         root_viewport,
         rect: [rect.x, rect.y, rect.width, rect.height],
-        inverse_rows: [
-            [d * inv_det, -c * inv_det, (c * f - d * e) * inv_det],
-            [-b * inv_det, a * inv_det, (b * e - a * f) * inv_det],
-        ],
+        inverse_rows,
     })
 }
 
@@ -1690,6 +1694,18 @@ mod tests {
     fn render_plan_keeps_nested_svg_overflow_visible_in_direct_mesh() {
         let document = crate::dom::parse(
             r##"<svg width="100" height="100"><svg width="50" height="40" style="overflow: visible"><rect width="100" height="100" fill="blue"/></svg></svg>"##,
+        )
+        .unwrap();
+        let plan = build_render_plan(&document, vp());
+
+        assert_eq!(plan.len(), 1);
+        assert!(matches!(plan[0], RenderOp::Mesh(_)));
+    }
+
+    #[test]
+    fn nested_svg_overflow_uses_last_inline_style_declaration() {
+        let document = crate::dom::parse(
+            r##"<svg width="100" height="100"><svg width="50" height="40" style="overflow: hidden; overflow: visible"><rect width="100" height="100" fill="blue"/></svg></svg>"##,
         )
         .unwrap();
         let plan = build_render_plan(&document, vp());

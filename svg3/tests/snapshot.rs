@@ -432,6 +432,12 @@ fn cases() -> Vec<Case> {
             "nested-svg-preserve-aspect-ratio-none",
             r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><svg x="18" y="26" width="64" height="36" viewBox="0 0 20 20" preserveAspectRatio="none"><circle cx="10" cy="10" r="9" fill="#f2c14e"/><rect x="9" y="2" width="2" height="16" fill="#2563eb"/></svg></svg>"##,
         ),
+        // SVG 1.1 `preserveAspectRatio="xMaxYMid slice"` scales the
+        // viewBox until it covers the viewport, then aligns the right edge.
+        Case::square(
+            "nested-svg-preserve-aspect-ratio-xmax-slice",
+            r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><svg x="30" y="20" width="40" height="60" viewBox="0 0 20 10" preserveAspectRatio="xMaxYMid slice"><rect width="20" height="10" fill="#f2c14e"/><rect x="0" width="4" height="10" fill="#2563eb"/><rect x="16" width="4" height="10" fill="#c14b2b"/></svg></svg>"##,
+        ),
         // SVG paint servers: `<linearGradient>` with user-space coordinates
         // and three `<stop>` entries, sampled per fragment in the shape
         // shader.

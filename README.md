@@ -60,7 +60,9 @@ svg3 XML   ──►  svg3::dom   ──►  svg3::style  ──►  svg3::rende
 > (roadmap items 3 and 4), using root `<svg width>` / `<svg height>` as the
 > initial percentage viewport. In normal 2D SVG mode, nested `<svg>` elements
 > establish child viewports with `x`/`y`, `width`/`height`, `viewBox`,
-> `preserveAspectRatio`, and default overflow clipping. The svg3 3D `<ellipsoid>` primitive (SPEC §5.3)
+> `preserveAspectRatio`, and default overflow clipping. Filters and
+> `clip-path` inside a clipped nested viewport are currently flattened as raw
+> geometry until nested render-plan composition lands. The svg3 3D `<ellipsoid>` primitive (SPEC §5.3)
 > tessellates the implicit surface to a UV-parameterised mesh, and
 > `<cylinder>` (SPEC §5.5) tessellates cap and side-wall triangles alongside
 > `<cube>`.
