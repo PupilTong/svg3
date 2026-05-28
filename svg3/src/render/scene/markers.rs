@@ -258,12 +258,14 @@ pub(super) fn append_marker_instances(
         // Markers render with a fresh painter-bias counter so the marker's
         // internal 2D content layers within itself, independent of the
         // surrounding scene's bias slot the marker reference consumed.
+        let marker_twod_index = std::cell::Cell::new(0);
         let marker_context = SceneContext {
+            root_viewport: marker_viewport,
             viewport: marker_viewport,
             markers: context.markers,
             paints: context.paints,
             svg3_extension_enabled: context.svg3_extension_enabled,
-            twod_index: std::cell::Cell::new(0),
+            twod_index: &marker_twod_index,
         };
         let mut marker_state = TraversalState::default();
         let marker_frame = marker_state.enter_element(

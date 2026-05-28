@@ -3,7 +3,9 @@
 //! [`build_scene`] turns a parsed [`Document`] into one combined [`Mesh`] by
 //! dispatching every supported SVG element to its [`crate::render::shapes`]
 //! tessellator, and [`document_viewport`] resolves the root `<svg>` sizing
-//! that percentage lengths resolve against.
+//! that percentage lengths resolve against. In normal 2D SVG mode, nested
+//! `<svg>` elements establish child viewports, viewBox transforms, and
+//! default overflow clips.
 //!
 //! `<marker>` resolution — the start/mid/end definition collection and
 //! per-placement instancing — lives in the [`markers`] submodule.
@@ -15,6 +17,7 @@ use std::cell::Cell;
 use std::collections::BTreeMap;
 
 use crate::dom::{Document, Element, ElementKind, NodeId};
+use svgtypes::ViewBox as SvgViewBox;
 
 use crate::render::filters::{
     ClipPathDefinitions, FilterDefinitions, FilterInput, FilterPrimitive, FilterPrimitiveKind,
@@ -32,6 +35,15 @@ use markers::{append_marker_instances, MarkerDefinitions};
 pub(crate) enum RenderOp {
     /// Draw a mesh directly into the destination target.
     Mesh(Mesh),
+    /// Draw a mesh into an offscreen target, clip that target to the
+    /// supplied nested viewport, then composite it into the
+    /// destination target in painter order.
+    Clip {
+        /// The geometry that produces the clipped source graphic.
+        mesh: Mesh,
+        /// Nested viewport clip resolved for the GPU clip pass.
+        clip: ViewportClip,
+    },
     /// Draw a mesh into an offscreen target, run the filter primitive chain
     /// through ping/pong GPU passes, then composite the result into the
     /// destination target.
@@ -124,6 +136,7 @@ fn apply_painter_bias(mesh: &mut Mesh, start: usize, bias: f32) {
 }
 
 struct SceneContext<'a> {
+    root_viewport: Viewport,
     viewport: Viewport,
     markers: &'a MarkerDefinitions,
     paints: &'a PaintDefinitions,
@@ -131,7 +144,20 @@ struct SceneContext<'a> {
     /// Monotonic counter for the next 2D shape's painter-order Z bias
     /// slot. [`Cell`] so the immutable `&SceneContext` plumbing already
     /// established here can mutate it as we walk.
-    twod_index: std::cell::Cell<u32>,
+    twod_index: &'a Cell<u32>,
+}
+
+impl<'a> SceneContext<'a> {
+    fn with_viewport(&self, viewport: Viewport) -> Self {
+        Self {
+            root_viewport: self.root_viewport,
+            viewport,
+            markers: self.markers,
+            paints: self.paints,
+            svg3_extension_enabled: self.svg3_extension_enabled,
+            twod_index: self.twod_index,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -159,6 +185,64 @@ struct TraversalFrame {
 struct RenderDefinitions<'a> {
     filters: &'a FilterDefinitions,
     clips: &'a ClipPathDefinitions,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct NestedSvgViewport {
+    viewport: Viewport,
+    content_transform: Mat4,
+    clip: Option<ViewportClip>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Rect {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+}
+
+/// A nested `<svg>` viewport clip in normal 2D SVG mode.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ViewportClip {
+    pub(crate) root_viewport: Viewport,
+    pub(crate) rect: [f32; 4],
+    pub(crate) inverse_rows: [[f32; 3]; 2],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AspectAlign {
+    None,
+    XMinYMin,
+    XMidYMin,
+    XMaxYMin,
+    XMinYMid,
+    XMidYMid,
+    XMaxYMid,
+    XMinYMax,
+    XMidYMax,
+    XMaxYMax,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AspectScale {
+    Meet,
+    Slice,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PreserveAspectRatio {
+    align: AspectAlign,
+    scale: AspectScale,
+}
+
+impl Default for PreserveAspectRatio {
+    fn default() -> Self {
+        Self {
+            align: AspectAlign::XMidYMid,
+            scale: AspectScale::Meet,
+        }
+    }
 }
 
 impl TraversalState {
@@ -215,6 +299,16 @@ impl TraversalState {
             attributes,
         })
     }
+
+    fn push_transform(&mut self, local: Mat4) -> Mat4 {
+        let previous = self.transform;
+        self.transform = self.transform.mul(&local);
+        previous
+    }
+
+    fn restore_transform(&mut self, previous: Mat4) {
+        self.transform = previous;
+    }
 }
 
 /// Walk `document` and tessellate every supported 2D SVG shape into one
@@ -226,20 +320,25 @@ impl TraversalState {
 /// appended in document order, so a later shape paints over an earlier one. A
 /// shape that is not rendered — a degenerate size, `fill="none"`, or a
 /// missing/`none` stroke on stroke-only geometry — contributes nothing.
-/// `<g>` and root-level inherited presentation attributes are applied to
-/// descendants, and `transform` attributes compose down the tree.
+/// `<g>`, root-level, and nested-`<svg>` inherited presentation attributes
+/// are applied to descendants; nested plain-SVG `<svg>` viewports establish
+/// child percentage bases and `viewBox` transforms; and `transform`
+/// attributes compose down the tree. Viewport overflow clipping is represented
+/// by [`build_render_plan`] rather than this flat mesh API.
 /// svg3-only 3D elements and 3D transform functions are enabled only when
 /// the root `<svg>` has `extension="pupiltong"`; otherwise they are ignored
 /// so the document renders as normal SVG.
 pub fn build_scene(document: &Document, viewport: Viewport) -> Mesh {
     let markers = MarkerDefinitions::default();
     let paints = PaintDefinitions::default();
+    let twod_index = Cell::new(0);
     let context = SceneContext {
+        root_viewport: viewport,
         viewport,
         markers: &markers,
         paints: &paints,
         svg3_extension_enabled: document.svg3_extension_enabled(),
-        twod_index: Cell::new(0),
+        twod_index: &twod_index,
     };
     let mut mesh = Mesh::default();
     let mut state = TraversalState::default();
@@ -255,7 +354,8 @@ pub fn build_scene(document: &Document, viewport: Viewport) -> Mesh {
 }
 
 /// Build headless render operations that preserve SVG painter's order while
-/// isolating filtered subtrees into their own GPU post-process pass.
+/// isolating filtered subtrees and clipped nested SVG viewports into their
+/// own GPU post-process passes.
 pub(crate) fn build_render_plan(document: &Document, viewport: Viewport) -> Vec<RenderOp> {
     let filters = FilterDefinitions::collect(document);
     let clips = ClipPathDefinitions::collect(document);
@@ -265,12 +365,14 @@ pub(crate) fn build_render_plan(document: &Document, viewport: Viewport) -> Vec<
     };
     let markers = MarkerDefinitions::default();
     let paints = PaintDefinitions::default();
+    let twod_index = Cell::new(0);
     let context = SceneContext {
+        root_viewport: viewport,
         viewport,
         markers: &markers,
         paints: &paints,
         svg3_extension_enabled: document.svg3_extension_enabled(),
-        twod_index: Cell::new(0),
+        twod_index: &twod_index,
     };
     let mut plan = Vec::new();
     let mut pending_mesh = Mesh::default();
@@ -312,6 +414,58 @@ fn append_render_ops(
         return;
     }
     let frame = state.enter_element(&node.element, context.svg3_extension_enabled);
+
+    if id != document.root()
+        && node.element.kind == ElementKind::Svg
+        && !context.svg3_extension_enabled
+    {
+        let Some(scope) = resolve_nested_svg_viewport(&node.element, context, state.transform)
+        else {
+            state.exit_element(frame);
+            return;
+        };
+        let child_context = context.with_viewport(scope.viewport);
+        let previous_transform = state.push_transform(scope.content_transform);
+        if let Some(clip) = scope.clip {
+            flush_mesh(pending_mesh, plan);
+            let mut clipped_mesh = Mesh::default();
+            for child in node.children.iter().copied() {
+                // Nested filters need their own render plan encoded into
+                // this offscreen clip scope. Until that lands, the clipped
+                // nested-SVG path mirrors filtered-subtree source capture and
+                // treats descendants as raw geometry.
+                append_subtree_mesh(
+                    document,
+                    child,
+                    &child_context,
+                    state,
+                    true,
+                    &mut clipped_mesh,
+                );
+            }
+            if !clipped_mesh.is_empty() {
+                plan.push(RenderOp::Clip {
+                    mesh: clipped_mesh,
+                    clip,
+                });
+            }
+        } else {
+            for child in node.children.iter().copied() {
+                append_render_ops(
+                    document,
+                    child,
+                    definitions,
+                    &child_context,
+                    state,
+                    pending_mesh,
+                    plan,
+                );
+            }
+        }
+        state.restore_transform(previous_transform);
+        state.exit_element(frame);
+        return;
+    }
 
     // Resolve clip-path before filter (SVG 2 render order). When the
     // element references a clip-path, the filter's source texture is
@@ -422,6 +576,187 @@ fn resolve_current_color(element: &Element) -> [f32; 4] {
         .unwrap_or([0.0, 0.0, 0.0, 1.0])
 }
 
+fn resolve_nested_svg_viewport(
+    element: &Element,
+    context: &SceneContext<'_>,
+    element_transform: Mat4,
+) -> Option<NestedSvgViewport> {
+    let x = resolve_viewport_length(element, "x", context.viewport.width).unwrap_or(0.0);
+    let y = resolve_viewport_length(element, "y", context.viewport.height).unwrap_or(0.0);
+    let width = resolve_viewport_length(element, "width", context.viewport.width)
+        .unwrap_or(context.viewport.width);
+    let height = resolve_viewport_length(element, "height", context.viewport.height)
+        .unwrap_or(context.viewport.height);
+
+    if width <= 0.0 || height <= 0.0 {
+        return None;
+    }
+
+    let viewport = Viewport { width, height };
+    let viewport_rect = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
+    let content_transform = nested_svg_content_transform(element, viewport_rect);
+    let clip = nested_svg_overflow_clips(element)
+        .then(|| viewport_clip(element_transform, viewport_rect, context.root_viewport))
+        .flatten();
+
+    Some(NestedSvgViewport {
+        viewport,
+        content_transform,
+        clip,
+    })
+}
+
+fn resolve_viewport_length(element: &Element, name: &str, basis: f32) -> Option<f32> {
+    element
+        .attributes
+        .get(name)
+        .and_then(|value| shapes::Length::parse(value))
+        .map(|length| length.resolve(basis))
+        .filter(|value| value.is_finite())
+}
+
+fn nested_svg_content_transform(element: &Element, viewport: Rect) -> Mat4 {
+    let Some(view_box) = element
+        .attributes
+        .get("viewBox")
+        .and_then(|value| value.parse::<SvgViewBox>().ok())
+    else {
+        return Mat4::translation(viewport.x, viewport.y, 0.0);
+    };
+
+    let preserve = element
+        .attributes
+        .get("preserveAspectRatio")
+        .and_then(|value| parse_preserve_aspect_ratio(value))
+        .unwrap_or_default();
+
+    let vb_x = view_box.x as f32;
+    let vb_y = view_box.y as f32;
+    let vb_w = view_box.w as f32;
+    let vb_h = view_box.h as f32;
+    let scale_x = viewport.width / vb_w;
+    let scale_y = viewport.height / vb_h;
+
+    if preserve.align == AspectAlign::None {
+        return Mat4::translation(
+            viewport.x - vb_x * scale_x,
+            viewport.y - vb_y * scale_y,
+            0.0,
+        )
+        .mul(&Mat4::scaling(scale_x, scale_y, 1.0));
+    }
+
+    let scale = match preserve.scale {
+        AspectScale::Meet => scale_x.min(scale_y),
+        AspectScale::Slice => scale_x.max(scale_y),
+    };
+    let extra_x = viewport.width - vb_w * scale;
+    let extra_y = viewport.height - vb_h * scale;
+    let align_x = match preserve.align {
+        AspectAlign::XMinYMin | AspectAlign::XMinYMid | AspectAlign::XMinYMax => 0.0,
+        AspectAlign::XMidYMin | AspectAlign::XMidYMid | AspectAlign::XMidYMax => 0.5,
+        AspectAlign::XMaxYMin | AspectAlign::XMaxYMid | AspectAlign::XMaxYMax => 1.0,
+        AspectAlign::None => 0.0,
+    };
+    let align_y = match preserve.align {
+        AspectAlign::XMinYMin | AspectAlign::XMidYMin | AspectAlign::XMaxYMin => 0.0,
+        AspectAlign::XMinYMid | AspectAlign::XMidYMid | AspectAlign::XMaxYMid => 0.5,
+        AspectAlign::XMinYMax | AspectAlign::XMidYMax | AspectAlign::XMaxYMax => 1.0,
+        AspectAlign::None => 0.0,
+    };
+
+    Mat4::translation(
+        viewport.x + extra_x * align_x - vb_x * scale,
+        viewport.y + extra_y * align_y - vb_y * scale,
+        0.0,
+    )
+    .mul(&Mat4::scaling(scale, scale, 1.0))
+}
+
+fn parse_preserve_aspect_ratio(value: &str) -> Option<PreserveAspectRatio> {
+    let mut tokens = value.split_ascii_whitespace();
+    let mut first = tokens.next()?;
+    if first.eq_ignore_ascii_case("defer") {
+        first = tokens.next()?;
+    }
+    let align = match first {
+        "none" => AspectAlign::None,
+        "xMinYMin" => AspectAlign::XMinYMin,
+        "xMidYMin" => AspectAlign::XMidYMin,
+        "xMaxYMin" => AspectAlign::XMaxYMin,
+        "xMinYMid" => AspectAlign::XMinYMid,
+        "xMidYMid" => AspectAlign::XMidYMid,
+        "xMaxYMid" => AspectAlign::XMaxYMid,
+        "xMinYMax" => AspectAlign::XMinYMax,
+        "xMidYMax" => AspectAlign::XMidYMax,
+        "xMaxYMax" => AspectAlign::XMaxYMax,
+        _ => return None,
+    };
+    let scale = match tokens.next() {
+        Some("slice") => AspectScale::Slice,
+        Some("meet") | None => AspectScale::Meet,
+        Some(_) => return None,
+    };
+    Some(PreserveAspectRatio { align, scale })
+}
+
+fn nested_svg_overflow_clips(element: &Element) -> bool {
+    let overflow = element
+        .attributes
+        .get("style")
+        .and_then(|style| inline_style_property(style, "overflow"))
+        .or_else(|| element.attributes.get("overflow").map(String::as_str));
+    match overflow.map(str::trim) {
+        Some(value) if value.eq_ignore_ascii_case("visible") => false,
+        Some(value) if value.eq_ignore_ascii_case("hidden") => true,
+        Some(value) if value.eq_ignore_ascii_case("clip") => true,
+        Some(value) if value.eq_ignore_ascii_case("scroll") => true,
+        Some(value) if value.eq_ignore_ascii_case("auto") => true,
+        Some(_) | None => true,
+    }
+}
+
+fn inline_style_property<'a>(style: &'a str, property: &str) -> Option<&'a str> {
+    style.split(';').find_map(|declaration| {
+        let (name, value) = declaration.split_once(':')?;
+        name.trim()
+            .eq_ignore_ascii_case(property)
+            .then(|| value.trim().trim_end_matches("!important").trim())
+    })
+}
+
+fn viewport_clip(transform: Mat4, rect: Rect, root_viewport: Viewport) -> Option<ViewportClip> {
+    if root_viewport.width <= 0.0 || root_viewport.height <= 0.0 {
+        return None;
+    }
+
+    let m = &transform.0;
+    let a = m[0][0];
+    let b = m[0][1];
+    let c = m[1][0];
+    let d = m[1][1];
+    let e = m[3][0];
+    let f = m[3][1];
+    let det = a * d - b * c;
+    if !(det.abs() > 1e-6 && det.is_finite()) {
+        return None;
+    }
+    let inv_det = 1.0 / det;
+    Some(ViewportClip {
+        root_viewport,
+        rect: [rect.x, rect.y, rect.width, rect.height],
+        inverse_rows: [
+            [d * inv_det, -c * inv_det, (c * f - d * e) * inv_det],
+            [-b * inv_det, a * inv_det, (b * e - a * f) * inv_det],
+        ],
+    })
+}
+
 fn append_subtree_mesh(
     document: &Document,
     id: NodeId,
@@ -452,6 +787,29 @@ fn append_entered_subtree_mesh(
 ) {
     let node = document.node(id);
     if is_svg3_3d_element(&node.element.kind) && !context.svg3_extension_enabled {
+        return;
+    }
+    if id != document.root()
+        && node.element.kind == ElementKind::Svg
+        && !context.svg3_extension_enabled
+    {
+        let Some(scope) = resolve_nested_svg_viewport(&node.element, context, state.transform)
+        else {
+            return;
+        };
+        let child_context = context.with_viewport(scope.viewport);
+        let previous_transform = state.push_transform(scope.content_transform);
+        for child in node.children.iter().copied() {
+            append_subtree_mesh(
+                document,
+                child,
+                &child_context,
+                state,
+                include_markers,
+                mesh,
+            );
+        }
+        state.restore_transform(previous_transform);
         return;
     }
     append_element_mesh_biased(document, id, context, state, include_markers, mesh);
@@ -1114,6 +1472,31 @@ mod tests {
         );
     }
 
+    fn assert_bounds(mesh: &Mesh, expected: [f32; 4]) {
+        let actual = mesh.vertices.iter().fold(
+            [
+                f32::INFINITY,
+                f32::INFINITY,
+                f32::NEG_INFINITY,
+                f32::NEG_INFINITY,
+            ],
+            |[min_x, min_y, max_x, max_y], vertex| {
+                [
+                    min_x.min(vertex.position[0]),
+                    min_y.min(vertex.position[1]),
+                    max_x.max(vertex.position[0]),
+                    max_y.max(vertex.position[1]),
+                ]
+            },
+        );
+        for (actual_component, expected_component) in actual.into_iter().zip(expected) {
+            assert!(
+                (actual_component - expected_component).abs() < 1e-4,
+                "expected bounds {expected:?}, got {actual:?}"
+            );
+        }
+    }
+
     #[test]
     fn build_scene_tessellates_each_rect_in_document() {
         // Two rects: one renderable, one zero-width and skipped
@@ -1247,6 +1630,30 @@ mod tests {
     }
 
     #[test]
+    fn build_scene_applies_nested_svg_viewport_in_plain_svg_mode() {
+        let document = crate::dom::parse(
+            r##"<svg width="100" height="100"><svg x="20" y="30" width="40" height="20"><rect width="100%" height="100%" fill="blue"/></svg></svg>"##,
+        )
+        .unwrap();
+        let mesh = build_scene(&document, vp());
+
+        assert_eq!(mesh.vertices.len(), 4);
+        assert_bounds(&mesh, [20.0, 30.0, 60.0, 50.0]);
+    }
+
+    #[test]
+    fn build_scene_leaves_nested_svg_as_container_in_svg3_mode() {
+        let document = crate::dom::parse(
+            r##"<svg extension="pupiltong" width="100" height="100"><svg x="20" y="30" width="40" height="20"><rect width="100%" height="100%" fill="blue"/></svg></svg>"##,
+        )
+        .unwrap();
+        let mesh = build_scene(&document, vp());
+
+        assert_eq!(mesh.vertices.len(), 4);
+        assert_bounds(&mesh, [0.0, 0.0, 100.0, 100.0]);
+    }
+
+    #[test]
     fn render_plan_isolates_filtered_subtree_in_painter_order() {
         let document = crate::dom::parse(
             r##"<svg><rect width="10" height="10" fill="blue"/><filter id="soft"><feGaussianBlur stdDeviation="3"/></filter><g filter="url(#soft)"><rect x="20" width="10" height="10" fill="red"/></g><rect x="40" width="10" height="10" fill="green"/></svg>"##,
@@ -1258,6 +1665,37 @@ mod tests {
         assert!(matches!(plan[0], RenderOp::Mesh(_)));
         assert!(matches!(plan[1], RenderOp::Filter { .. }));
         assert!(matches!(plan[2], RenderOp::Mesh(_)));
+    }
+
+    #[test]
+    fn render_plan_clips_nested_svg_default_overflow() {
+        let document = crate::dom::parse(
+            r##"<svg width="100" height="100"><svg width="50" height="40"><rect width="100" height="100" fill="blue"/></svg></svg>"##,
+        )
+        .unwrap();
+        let plan = build_render_plan(&document, vp());
+
+        assert_eq!(plan.len(), 1);
+        let RenderOp::Clip { mesh, clip } = &plan[0] else {
+            panic!("expected nested <svg> to isolate a clipped render op");
+        };
+        assert_eq!(mesh.vertices.len(), 4);
+        assert_eq!(clip.rect, [0.0, 0.0, 50.0, 40.0]);
+        assert_eq!(clip.root_viewport.width, 100.0);
+        assert_eq!(clip.root_viewport.height, 100.0);
+        assert_eq!(clip.inverse_rows, [[1.0, -0.0, 0.0], [-0.0, 1.0, 0.0]]);
+    }
+
+    #[test]
+    fn render_plan_keeps_nested_svg_overflow_visible_in_direct_mesh() {
+        let document = crate::dom::parse(
+            r##"<svg width="100" height="100"><svg width="50" height="40" style="overflow: visible"><rect width="100" height="100" fill="blue"/></svg></svg>"##,
+        )
+        .unwrap();
+        let plan = build_render_plan(&document, vp());
+
+        assert_eq!(plan.len(), 1);
+        assert!(matches!(plan[0], RenderOp::Mesh(_)));
     }
 
     #[test]

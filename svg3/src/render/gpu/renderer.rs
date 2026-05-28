@@ -32,7 +32,7 @@ use crate::render::filters::{
     FilterImage, FilterPrimitive, FilterPrimitiveKind, Merge, PrimitiveSubregion,
 };
 use crate::render::mesh::PaintServer;
-use crate::render::scene::{build_render_plan, RenderOp};
+use crate::render::scene::{build_render_plan, RenderOp, ViewportClip};
 use crate::render::{document_viewport, Mesh, RenderConfig, Viewport};
 
 use super::clear::{clear_depth, clear_target, DepthTexture, DEPTH_FORMAT};
@@ -48,8 +48,8 @@ use super::uniforms::{
     blend_uniform, color_matrix_uniform, component_transfer_uniform, convolve_uniform,
     displacement_uniform, drop_shadow_alpha_uniform, fe_composite_uniform, flood_uniform,
     lighting_uniform, morphology_uniform, offset_uniform, resolve_input, resolve_input_uv,
-    subregion_clip_uniform, tile_uniform, turbulence_uniform, FilterUniform, ImageUniform,
-    TransformUniform,
+    subregion_clip_uniform, tile_uniform, turbulence_uniform, viewport_clip_uniform, FilterUniform,
+    ImageUniform, TransformUniform,
 };
 
 /// Texture format the headless renderer draws into. sRGB-encoded so linear
@@ -117,6 +117,7 @@ pub struct Renderer {
     merge_step_pipeline: wgpu::RenderPipeline,
     tile_pipeline: wgpu::RenderPipeline,
     subregion_clip_pipeline: wgpu::RenderPipeline,
+    viewport_clip_pipeline: wgpu::RenderPipeline,
     filter_sampler: wgpu::Sampler,
     image_sampler: wgpu::Sampler,
     image_cache: Mutex<BTreeMap<String, Arc<GpuImage>>>,
@@ -320,6 +321,15 @@ impl Renderer {
             None,
             None,
         );
+        let viewport_clip_pipeline = build_filter_pipeline(
+            &device,
+            format,
+            &filter_bind_group_layout,
+            "svg3 nested viewport clip pipeline",
+            "fs_svg_viewport_clip",
+            None,
+            None,
+        );
         let filter_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("svg3 filter sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -381,6 +391,7 @@ impl Renderer {
             merge_step_pipeline,
             tile_pipeline,
             subregion_clip_pipeline,
+            viewport_clip_pipeline,
             filter_sampler,
             image_sampler,
             image_cache: Mutex::new(BTreeMap::new()),
@@ -666,6 +677,17 @@ impl Renderer {
                         );
                     }
                 }
+                RenderOp::Clip { mesh, clip } => {
+                    self.encode_viewport_clip(
+                        encoder,
+                        target,
+                        &depth.view,
+                        mesh,
+                        *clip,
+                        view_projection,
+                        target_extent,
+                    );
+                }
                 RenderOp::Filter {
                     mesh,
                     primitives,
@@ -928,6 +950,90 @@ impl Renderer {
         self.encode_composite_pass(
             encoder,
             final_view,
+            &source.view,
+            &source_depth.view,
+            target,
+            target_depth,
+            extent,
+            view_projection,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encode_viewport_clip(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        target_depth: &wgpu::TextureView,
+        mesh: &Mesh,
+        clip: ViewportClip,
+        view_projection: Mat4,
+        extent: wgpu::Extent3d,
+    ) {
+        let source = self.create_filter_texture(extent, "svg3 nested viewport source");
+        let source_depth = self.create_depth_texture(extent, "svg3 nested viewport source depth");
+        clear_depth(
+            encoder,
+            &source_depth.view,
+            "svg3 nested viewport source depth clear",
+        );
+
+        if let Some(scene) = self.create_scene(mesh, view_projection) {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("svg3 nested viewport source pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &source.view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &source_depth.view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                ..Default::default()
+            });
+            self.draw(&mut pass, &scene);
+        } else {
+            clear_target(
+                encoder,
+                &source.view,
+                wgpu::Color::TRANSPARENT,
+                "svg3 nested viewport empty source clear",
+            );
+        }
+
+        let scratch = self.create_filter_texture(extent, "svg3 nested viewport clip scratch");
+        let passthrough = FilterUniform::passthrough(extent.width, extent.height);
+        self.encode_filter_pass(
+            encoder,
+            &self.color_matrix_pipeline,
+            &source.view,
+            &source.view,
+            &scratch.view,
+            &passthrough,
+            "svg3 nested viewport source stage",
+        );
+        let uniform = viewport_clip_uniform(extent, clip);
+        self.encode_filter_pass(
+            encoder,
+            &self.viewport_clip_pipeline,
+            &scratch.view,
+            &scratch.view,
+            &source.view,
+            &uniform,
+            "svg3 nested viewport clip apply",
+        );
+        self.encode_composite_pass(
+            encoder,
+            &source.view,
             &source.view,
             &source_depth.view,
             target,

@@ -37,10 +37,11 @@ svg3 XML   ──►  svg3::dom   ──►  svg3::style  ──►  svg3::rende
 > filled/stroked `<rect>` / `<circle>` / `<ellipse>` / `<polygon>` /
 > `<polyline>` / stroked `<line>` / filled/stroked `<path>` 2D geometry
 > plus the svg3 3D `<cube>`, `<ellipsoid>`, `<cylinder>`, and `<surface>`
-> primitives when the root has `extension="pupiltong"`. Click the window, or press Command+O / Command+I, to edit
+> primitives when the root has `extension="pupiltong"`, plus nested plain-SVG
+> `<svg>` viewports in normal 2D mode. Click the window, or press Command+O / Command+I, to edit
 > the SVG input again.
 > `svg3::dom` parses svg3 XML into an element tree with raw attributes
-> (roadmap item 2) — currently the `<svg>` root, `<g>`, `<defs>`, `<rect>`,
+> (roadmap item 2) — currently outer and nested `<svg>`, `<g>`, `<defs>`, `<rect>`,
 > `<circle>`, `<ellipse>`, `<polygon>`, `<polyline>`, `<line>`, `<path>`,
 > `<filter>`, every supported `<fe…>` primitive (`feGaussianBlur`, `feImage`,
 > `feColorMatrix`, `feTurbulence`, `feSpecularLighting`, `feDiffuseLighting`,
@@ -57,7 +58,9 @@ svg3 XML   ──►  svg3::dom   ──►  svg3::style  ──►  svg3::rende
 > `<radialGradient>`, and rectangular-child `<pattern>` tiles), plus svg3's
 > 3D primitives only for documents whose root has `extension="pupiltong"`, then rasterises them headlessly to an image
 > (roadmap items 3 and 4), using root `<svg width>` / `<svg height>` as the
-> percentage viewport. The svg3 3D `<ellipsoid>` primitive (SPEC §5.3)
+> initial percentage viewport. In normal 2D SVG mode, nested `<svg>` elements
+> establish child viewports with `x`/`y`, `width`/`height`, `viewBox`,
+> `preserveAspectRatio`, and default overflow clipping. The svg3 3D `<ellipsoid>` primitive (SPEC §5.3)
 > tessellates the implicit surface to a UV-parameterised mesh, and
 > `<cylinder>` (SPEC §5.5) tessellates cap and side-wall triangles alongside
 > `<cube>`.
@@ -93,7 +96,7 @@ cargo bench --workspace                      # criterion benches (codspeed-instr
 
 1. **(done)** winit event loop + wgpu surface — the `app-macos` crate opens a native window, accepts SVG text, and renders supported 2D shapes.
 2. **(done)** SVG/svg3 XML parsing → element tree (`<svg>` root with `<g>`, `<cube>`, `<ellipsoid>`, `<cylinder>`, and `<surface>`; svg3 3D rendering requires root `extension="pupiltong"` per [SPEC.md](SPEC.md)).
-3. **(done)** 2D basic shapes — tessellate fills and strokes for `<rect>`, `<circle>`, `<ellipse>`, `<polygon>`, `<polyline>`, and `<path>`, plus stroke-only `<line>` geometry (with percentage lengths, caps, joins, dashes, `pathLength` dash calibration, opacity attributes, and referenced markers), apply referenced `<filter>` chains composed from any of `feGaussianBlur`, `feImage`, `feColorMatrix`, `feTurbulence`, `feSpecularLighting`, `feDiffuseLighting`, `feMorphology`, `feFlood`, `feDropShadow`, `feDisplacementMap`, `feConvolveMatrix`, and `feComponentTransfer` (GPU-only for rendering; PNG data-URL `feImage` sources decode/upload lazily when used), and render the result headlessly to an image (`svg3::render`).
+3. **(done)** 2D basic shapes — tessellate fills and strokes for `<rect>`, `<circle>`, `<ellipse>`, `<polygon>`, `<polyline>`, and `<path>`, plus stroke-only `<line>` geometry (with percentage lengths, nested `<svg>` viewports, caps, joins, dashes, `pathLength` dash calibration, opacity attributes, and referenced markers), apply referenced `<filter>` chains composed from any of `feGaussianBlur`, `feImage`, `feColorMatrix`, `feTurbulence`, `feSpecularLighting`, `feDiffuseLighting`, `feMorphology`, `feFlood`, `feDropShadow`, `feDisplacementMap`, `feConvolveMatrix`, and `feComponentTransfer` (GPU-only for rendering; PNG data-URL `feImage` sources decode/upload lazily when used), and render the result headlessly to an image (`svg3::render`).
 4. **(done)** 3D primitive mesh generation. `<cube>` is tessellated to six rectangular faces (12 triangles, 8 corners), `<ellipsoid>` to a UV-parameterised mesh (16 latitude bands × 32 longitude segments) of its implicit surface, and `<cylinder>` to segmented caps and a side wall; all render through a unified depth-aware (`LessEqual`) shape pipeline so per SPEC §7.3 spatial Z resolves occlusion between 2D and 3D content. 2D shapes are biased forward by a tiny per-shape Z stride so coplanar 2D content stays painter-ordered without z-fighting; 3D content keeps its authored world Z. SDF shapes discard transparent fragments so their bounding-quad corners don't write spurious depth. Filtered content participates in depth too — the composite shader samples the filter source's per-pixel depth and writes it as `frag_depth`, so a filtered rect at `z = 0` correctly occludes a 3D primitive behind it and a 3D primitive in front of `z = 0` paints over a later filtered rect. Stylo-driven materials remain.
 5. Real Stylo integration (computed styles drive material/transform).
 6. Multi-platform native demos (Windows, Linux) + Linux/Windows CI.
