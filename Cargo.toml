@@ -17,9 +17,6 @@ winit = "0.30"            # 0.30 stable; 0.31 is beta — avoid
 pollster = "0.4"
 bytemuck = "1"
 
-# Style resolution
-stylo = "0.17"            # latest Stylo (Paws referenced 0.13; this repo tracks latest)
-
 # Math
 glam = "0.32"
 

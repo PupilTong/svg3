@@ -10,9 +10,6 @@ base64.workspace = true
 quick-xml.workspace = true
 svgtypes.workspace = true
 
-# Style
-stylo.workspace = true
-
 # Rendering
 wgpu.workspace = true
 pollster.workspace = true

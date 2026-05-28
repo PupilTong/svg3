@@ -1,47 +1,36 @@
 //! `svg3` — an extended SVG renderer for 3D models.
 //!
-//! The crate is split into three layers:
+//! The crate is split into two layers:
 //!
 //! - [`dom`] — parse SVG3 XML into an element tree.
-//! - [`style`] — resolve computed styles via Stylo (scaffolding).
-//! - [`render`] — paint the styled scene with wgpu.
+//! - [`render`] — paint the parsed scene with wgpu.
 //!
-//! Status: early scaffolding. [`render_str`] wires the layers. [`dom`]
-//! parsing and [`render`]'s supported shape path are implemented, but
-//! [`style`] is still a skeleton, so `render_str` currently surfaces the
-//! style stage's "not implemented" error. To render supported geometry
-//! today, use [`render::build_scene`] / [`render::Renderer::render_to_image`]
-//! directly.
+//! Styling currently reads SVG 1.1 presentation attributes and inline
+//! `style="..."` declarations directly inside [`render`]; a full CSS cascade
+//! (the historical Stylo direction) is a paused roadmap item.
 
 pub mod dom;
 pub mod render;
-pub mod style;
 
 use thiserror::Error;
 
-/// A top-level error from the parse → style → render pipeline.
+/// A top-level error from the parse → render pipeline.
 #[derive(Debug, Error)]
 pub enum Error {
     /// Document parsing failed.
     #[error(transparent)]
     Parse(#[from] dom::ParseError),
-    /// Style resolution failed.
-    #[error(transparent)]
-    Style(#[from] style::StyleError),
     /// Rendering failed.
     #[error(transparent)]
     Render(#[from] render::RenderError),
 }
 
-/// Parse, style and render an SVG3 document from XML text.
+/// Parse and render an SVG3 document from XML text.
 ///
-/// This is the intended public entry point. The parse and render stages are
-/// implemented, but style resolution is still a scaffold, so the full
-/// pipeline currently returns [`style::StyleError::NotImplemented`].
+/// This is the intended public entry point: it parses `input`, then runs the
+/// headless renderer and returns the resulting image.
 pub fn render_str(input: &str, config: render::RenderConfig) -> Result<render::Image, Error> {
     let document = dom::parse(input)?;
-    let styles = style::StyleEngine::new();
-    styles.resolve(&document)?;
     let image = render::Renderer::headless()?.render_to_image(&document, config)?;
     Ok(image)
 }
@@ -51,22 +40,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pipeline_surfaces_style_not_implemented() {
-        // Parsing now succeeds for valid svg3 XML (svg3 inherits SVG 1.1's
-        // `<svg>` root); the pipeline fails at the next stage that is still
-        // a skeleton (style resolution).
-        let err = render_str("<svg/>", render::RenderConfig::default()).unwrap_err();
-        assert!(matches!(
-            err,
-            Error::Style(style::StyleError::NotImplemented)
-        ));
+    fn render_str_renders_trivial_document() {
+        // The full parse → render pipeline must succeed end-to-end on a
+        // minimal valid document; this guards against the entry point
+        // regressing back to "always errors before reaching the renderer".
+        let image = render_str(
+            "<svg width=\"4\" height=\"4\"/>",
+            render::RenderConfig::default(),
+        )
+        .expect("render_str should succeed on a trivial <svg/> document");
+        assert!(image.width > 0 && image.height > 0);
     }
 
     #[test]
     fn build_scene_renders_rect_across_layers() {
-        // The render stage works without the (still-skeleton) style stage:
-        // parse a `<rect>` and tessellate it through the re-exported render
-        // API, exercising the dom -> render path end to end.
+        // The render stage works through the re-exported render API too:
+        // parse a `<rect>` and tessellate it, exercising the dom -> render
+        // path end to end.
         let document = dom::parse(r#"<svg><rect width="20" height="10"/></svg>"#).unwrap();
         let mesh = render::build_scene(
             &document,

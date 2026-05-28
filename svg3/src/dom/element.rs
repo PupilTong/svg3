@@ -112,8 +112,7 @@ pub enum ElementKind {
 impl ElementKind {
     /// Map an XML tag name to an [`ElementKind`]. Unrecognised tags are
     /// preserved verbatim so SVG 1.1 markup that svg3 has not implemented
-    /// yet (text, masks, …) still round-trips through the DOM; the planned
-    /// Stylo cascade can match selectors on the raw tag name regardless.
+    /// yet (text, masks, …) still round-trips through the DOM.
     pub fn from_tag(tag: &str) -> Self {
         match tag {
             "svg" => Self::Svg,
