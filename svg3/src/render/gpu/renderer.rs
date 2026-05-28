@@ -452,7 +452,7 @@ impl Renderer {
     /// `TextureStore` over this when the document references textures; the
     /// stand-alone draw path picks up the dummy and ignores it.
     pub fn create_scene(&self, mesh: &Mesh, view_projection: Mat4) -> Option<GpuScene> {
-        let empty_store = TextureStore::empty(&self.device);
+        let empty_store = TextureStore::empty(&self.device, self.format);
         self.create_scene_with_textures(mesh, view_projection, &empty_store)
     }
 
@@ -740,6 +740,7 @@ impl Renderer {
             encoder,
             document,
             &texture_node_ids,
+            self.format,
             |encoder, layer_view, node_id, layer_viewport, layer_view_projection, layer_side| {
                 self.rasterize_texture_layer(
                     encoder,
@@ -831,7 +832,7 @@ impl Renderer {
         // cannot itself reference another defs-svg paint server because
         // 3D primitives aren't allowed inside it (gated off in
         // `build_texture_subtree_scene`).
-        let empty_store = TextureStore::empty(&self.device);
+        let empty_store = TextureStore::empty(&self.device, self.format);
         let Some(scene) =
             self.create_scene_with_textures(&mesh, layer_view_projection, &empty_store)
         else {

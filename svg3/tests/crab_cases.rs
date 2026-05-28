@@ -121,158 +121,327 @@ pub const CRAB_FACE_SVG: &str = r##"<svg extension="pupiltong" width="300" heigh
 /// Render size (square) for [`CRAB_FULL_SVG`].
 pub const CRAB_FULL_SIZE: u32 = 400;
 
-/// The full character. Composition reads roughly like the 2D reference:
-/// cape flowing out on the lower-left, hammer floating above-left of the
-/// head, body bulb filling the lower-middle, oval eyes with dominant
-/// brown irises and bright catchlights, wide cartoon mouth with one
-/// visible tooth, two pincer-claw arms (two ellipsoids each for the
-/// split pincer), and a small white bauble cradled in the right claw.
+/// The full character — re-authored to actually match the 2D
+/// reference asset's anatomy (review feedback round 3).
+///
+/// **What the reviewer flagged in the previous pass:**
+///
+/// - The two pincers were symmetric and tiny. In the reference one
+///   claw is *massive* and nearly the size of the body — it's also
+///   where the hammer rests. The other side just has a small claw.
+/// - The body was too flat / horizontally stretched. It should read
+///   as a chubby, near-spherical bean.
+/// - Two tiny red stubs at the bottom are not "legs"; the reference
+///   has 3 distinct pointed crab legs on each side.
+/// - The hammer floated in the air. It needs a visible handle going
+///   down into the giant claw.
+/// - The eyes were two separate plastic spheres staring straight
+///   ahead. The reference has them as interlocking vertical ovals
+///   with pupils gazing up-and-to-the-left.
+/// - The open-mouth-with-tooth read as "shocked"; the reference is
+///   a subtle off-centre smirk line.
+/// - The shading was too plastic / glossy. The reference is soft
+///   cel-shading.
+///
+/// **This pass:**
+///
+/// - **Giant left claw** (viewer's left = character's right): an
+///   ellipsoid roughly as big as the body, painted from `t-body` so
+///   the silhouette merges into the body.
+/// - **Small right claw** with a pincer tip on the opposite side.
+/// - **Hammer** sits on top of the giant claw, connected by a thin
+///   dark **handle cube** going down into the claw's centre. The
+///   hammer head's nested-`<svg>` paint server still paints the
+///   yellow lightning-bolt decal directly onto the cube faces.
+/// - **Body** reshaped to be near-spherical (`rx≈ry≈rz`) and plump.
+/// - **6 crab legs** (3 on each side) as tall narrow ellipsoids
+///   sticking down from under the body.
+/// - **Lightning bolt** repositioned to grow up from behind the
+///   head, the lower tip rooted near the right eye.
+/// - **Cape** repositioned to flow back-and-down behind the giant
+///   claw, anchored at the claw's upper edge.
+/// - **Eyes** authored as interlocking vertical ovals — the inner
+///   edges overlap so the eye silhouettes touch in the middle. The
+///   iris cylinders are shifted up-and-left within each eye so the
+///   pupils gaze up-left like the reference.
+/// - **Smirk mouth**: a single curved stroked path on the body.
+///   The cylinder + tooth open-mouth set-up is gone.
+/// - **Softened filters**: matte and gloss both have lower
+///   `diffuseConstant` / `specularConstant`, more bump blur, and a
+///   higher light elevation so the surfaces stop looking like
+///   moulded plastic. Eye sclera moved off `gloss` onto `matte` so
+///   the eyes don't read as ceramic eyeballs.
+///
+/// Hammer and mouth textures still use multi-element nested-`<svg>`
+/// paint servers (§6.1.1) per the original feedback round.
 pub const CRAB_FULL_SVG: &str = r##"<svg extension="pupiltong" width="400" height="400" xmlns="http://www.w3.org/2000/svg">
   <defs>
-    <!-- Soft / matte: diffuse only, no specular highlight. Used for
-         the body, arms, legs, cape — the 2D reference has a soft peach
-         gradient on the body, not a glossy ceramic highlight. -->
-    <filter id="shade-soft">
-      <feGaussianBlur in="SourceAlpha" stdDeviation="5" result="bump"/>
-      <feDiffuseLighting in="bump" surfaceScale="14" diffuseConstant="1.05"
-                         lighting-color="#fff1d6" result="diffuse">
-        <feDistantLight azimuth="135" elevation="55"/>
+    <!-- Softened matte filter: bigger bump blur, lower diffuse
+         constant, light moved overhead so the body reads as soft
+         cel-shading rather than glossy plastic. -->
+    <filter id="matte">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="8" result="bump"/>
+      <feDiffuseLighting in="bump" surfaceScale="10" diffuseConstant="0.95"
+                         lighting-color="#fff4dc" result="diff">
+        <feDistantLight azimuth="120" elevation="65"/>
       </feDiffuseLighting>
-      <feComposite in="diffuse" in2="SourceGraphic" operator="arithmetic"
+      <feComposite in="diff" in2="SourceGraphic" operator="arithmetic"
                    k1="1" k2="0" k3="0" k4="0"/>
     </filter>
 
-    <!-- Glossy: diffuse + tight specular catchlight. Used for the
-         eye spheres, iris, and the bauble — the wet/shiny parts of
-         the reference. -->
-    <filter id="shade-glossy">
-      <feGaussianBlur in="SourceAlpha" stdDeviation="5" result="bump"/>
-      <feDiffuseLighting in="bump" surfaceScale="14" diffuseConstant="1"
-                         lighting-color="#fff1d6" result="diffuse">
-        <feDistantLight azimuth="135" elevation="55"/>
+    <!-- Softened gloss filter: same diffuse base as matte, with a
+         smaller / tighter specular highlight. Used only on the
+         iris + bauble — eye scleras now use `matte` so the eyeballs
+         stop looking like ceramic. -->
+    <filter id="gloss">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="8" result="bump"/>
+      <feDiffuseLighting in="bump" surfaceScale="10" diffuseConstant="0.95"
+                         lighting-color="#fff4dc" result="diff">
+        <feDistantLight azimuth="120" elevation="65"/>
       </feDiffuseLighting>
-      <feComposite in="diffuse" in2="SourceGraphic" operator="arithmetic"
+      <feComposite in="diff" in2="SourceGraphic" operator="arithmetic"
                    k1="1" k2="0" k3="0" k4="0" result="shaded"/>
-      <feSpecularLighting in="bump" surfaceScale="14" specularConstant="0.9"
-                          specularExponent="22" lighting-color="#ffffff"
-                          result="specular">
-        <feDistantLight azimuth="135" elevation="55"/>
+      <feSpecularLighting in="bump" surfaceScale="10" specularConstant="0.45"
+                          specularExponent="30" lighting-color="#ffffff"
+                          result="spec">
+        <feDistantLight azimuth="120" elevation="65"/>
       </feSpecularLighting>
-      <feComposite in="specular" in2="SourceGraphic" operator="in"
+      <feComposite in="spec" in2="SourceGraphic" operator="in"
                    result="spec-in"/>
       <feComposite in="spec-in" in2="shaded" operator="arithmetic"
                    k1="0" k2="1" k3="1" k4="0"/>
     </filter>
+
+    <!-- Outer-level gradients. Warmer peach palette for the body
+         and limbs (`#FFD0B0 → #FF8A6C`) so the gradient stops feel
+         more like the reference's airbrushed peach-to-orange. -->
+
+    <linearGradient id="g-body" x1="15" y1="15" x2="85" y2="100"
+                    gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFD0B0"/>
+      <stop offset="0.5" stop-color="#FFAB8E"/>
+      <stop offset="1" stop-color="#FF8A6C"/>
+    </linearGradient>
+
+    <linearGradient id="g-arm" x1="10" y1="10" x2="90" y2="90"
+                    gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FBC38C"/>
+      <stop offset="0.3" stop-color="#F19675"/>
+      <stop offset="0.7" stop-color="#F0876A"/>
+      <stop offset="1" stop-color="#ED8870"/>
+    </linearGradient>
+
+    <radialGradient id="g-iris" cx="50" cy="50" r="55"
+                    gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1f1209"/>
+      <stop offset="0.35" stop-color="#3a2418"/>
+      <stop offset="0.8" stop-color="#564341"/>
+      <stop offset="1" stop-color="#845750"/>
+    </radialGradient>
+
+    <radialGradient id="g-eye" cx="50" cy="45" r="55"
+                    gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="0.8" stop-color="#fbeee8"/>
+      <stop offset="1" stop-color="#f0d8cc"/>
+    </radialGradient>
+
+    <radialGradient id="g-bauble" cx="40" cy="35" r="55"
+                    gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="0.6" stop-color="#FFF9CE"/>
+      <stop offset="1" stop-color="#f0e7b8"/>
+    </radialGradient>
+
+    <linearGradient id="g-hammer" x1="0" y1="0" x2="100" y2="100"
+                    gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#D6D6D6"/>
+      <stop offset="0.5" stop-color="#B6B6B6"/>
+      <stop offset="1" stop-color="#7D7C7D"/>
+    </linearGradient>
+
+    <linearGradient id="g-handle" x1="0" y1="0" x2="100" y2="100"
+                    gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#564341"/>
+      <stop offset="1" stop-color="#3a2418"/>
+    </linearGradient>
+
+    <linearGradient id="g-mouth" x1="0" y1="0" x2="0" y2="100"
+                    gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1f1209"/>
+      <stop offset="1" stop-color="#3a2418"/>
+    </linearGradient>
+
+    <!-- Simple gradient-swatch paint servers. -->
+    <svg id="t-body" viewBox="0 0 100 100">
+      <rect width="100" height="100" fill="url(#g-body)"/>
+    </svg>
+    <svg id="t-arm" viewBox="0 0 100 100">
+      <rect width="100" height="100" fill="url(#g-arm)"/>
+    </svg>
+    <svg id="t-iris" viewBox="0 0 100 100">
+      <rect width="100" height="100" fill="url(#g-iris)"/>
+    </svg>
+    <svg id="t-eye" viewBox="0 0 100 100">
+      <rect width="100" height="100" fill="url(#g-eye)"/>
+    </svg>
+    <svg id="t-bauble" viewBox="0 0 100 100">
+      <rect width="100" height="100" fill="url(#g-bauble)"/>
+    </svg>
+    <svg id="t-handle" viewBox="0 0 100 100">
+      <rect width="100" height="100" fill="url(#g-handle)"/>
+    </svg>
+
+    <!-- Multi-element textures (kept from the previous round).
+
+         `t-hammer`: gray gradient panel + yellow lightning-bolt
+         decal with its own dark cartoon outline. -->
+    <svg id="t-hammer" viewBox="0 0 100 100">
+      <rect width="100" height="100" fill="url(#g-hammer)"/>
+      <path d="M 56 14 L 72 14 L 60 42 L 80 42 L 28 86 L 50 52 L 30 52 Z"
+            fill="#FFE768" stroke="#3a2418" stroke-width="3"
+            stroke-linejoin="round"/>
+    </svg>
   </defs>
 
-  <!-- Big yellow lightning bolt BEHIND the body — the character's
-       signature "wielded charge" effect. Larger and more dramatic
-       than the previous version, with a dark cartoon outline from a
-       same-shape darker path drawn underneath. -->
-  <path d="M 258 65 L 195 130 L 250 160 L 200 240 L 320 200 L 270 140 L 268 125 L 318 75 L 285 60 Z"
+  <!-- ============== BACKGROUND ============== -->
+
+  <!-- Big yellow lightning bolt rooted into the upper-right of the
+       head and growing up-and-back. Drawn first so the eyes and
+       body cover its lower portion, leaving just the jagged top
+       half visible as a stylised crest. -->
+  <path d="M 310 30 L 245 130 L 305 130 L 260 220 L 380 130 L 320 130 L 365 30 Z"
         fill="#3a2418"/>
-  <path d="M 258 70 L 202 132 L 252 160 L 208 232 L 312 198 L 266 142 L 264 128 L 312 80 L 285 67 Z"
-        fill="#f5d33a"/>
+  <path d="M 310 38 L 252 130 L 305 132 L 268 210 L 372 130 L 322 132 L 360 38 Z"
+        fill="#FFE768"/>
 
-  <!-- Cape: a flowing flag-shaped 2D <path> on the lower-left, drawn
-       behind the body. Anchor at upper-right, curved bulge in the
-       middle, tail point at the lower-left — closer to a flowing
-       cloak silhouette than the previous round blob. -->
-  <path d="M 115 275 C 125 310, 110 350, 75 370 L 45 355 C 50 325, 60 295, 80 280 Z"
-        fill="#c8242c" stroke="#3a2418" stroke-width="3" stroke-linejoin="round"/>
+  <!-- Red cape: a flowing flag silhouette anchored at the upper-back
+       of the giant left claw, curling out to the lower-left corner.
+       Drawn behind the giant claw so only the outer half shows; the
+       visible cape "tail" reads as fabric flowing behind and below
+       the character. -->
+  <path d="M 130 195 C 135 260, 80 360, 0 398 L 0 280 C 5 235, 35 195, 95 175 Z"
+        fill="#c8242c" stroke="#3a2418" stroke-width="4" stroke-linejoin="round"/>
 
-  <!-- Hammer head outline + cube. 2D <rect> drawn first as a thin
-       dark rim extending slightly outside the cube's silhouette. -->
-  <rect x="94" y="44" width="72" height="72" fill="#3a2418"/>
-  <cube cx="130" cy="80" cz="-45" size="68"
-        fill="#d8d8d8" filter="url(#shade-soft)"/>
+  <!-- ============== GIANT LEFT CLAW + HAMMER ============== -->
 
-  <!-- Hammer pommel / grip: a darker gray cube on TOP of the head. -->
-  <rect x="120" y="28" width="20" height="20" fill="#3a2418"/>
-  <cube cx="130" cy="38" cz="-40" size="18"
-        fill="#a8a8a8" filter="url(#shade-soft)"/>
+  <!-- Giant claw on the viewer's left, nearly as big as the body
+       (the asymmetric pincer the reviewer called out). Painted from
+       `t-body` so it shares the body's peach palette and the
+       silhouette merges with the body's. -->
+  <ellipse cx="95" cy="250" rx="92" ry="88" fill="#3a2418"/>
+  <ellipsoid cx="95" cy="250" cz="15" rx="88" ry="84" rz="84"
+             fill="url(#t-body)" filter="url(#matte)"/>
 
-  <!-- Small bolt decal on the hammer's face -->
-  <path d="M 138 56 L 150 56 L 142 78 L 153 78 L 122 110 L 134 84 L 122 84 Z"
-        fill="#f5d33a"/>
+  <!-- A small dark pincer cleft hinting at the claw's split — a
+       thin tilted ellipse in the lower-left of the claw. -->
+  <ellipse cx="55" cy="285" rx="22" ry="6" fill="#3a2418"
+           transform="rotate(-18 55 285)"/>
 
-  <!-- Body outline: dark 2D ellipse slightly larger than the body
-       ellipsoid's screen silhouette, drawn before the body so just a
-       thin dark rim peeks out around the edge — cartoon outline. -->
-  <ellipse cx="220" cy="270" rx="106" ry="82" fill="#3a2418"/>
+  <!-- Hammer handle: a short thick dark stub between the hammer
+       head and the claw top. Sized so only a small handle portion
+       is visible above the claw; the rest of the handle disappears
+       into the claw silhouette. -->
+  <rect x="83" y="155" width="30" height="40" fill="#3a2418"/>
+  <cube cx="98" cy="178" cz="22" width="26" height="44" depth="22"
+        fill="url(#t-handle)" filter="url(#matte)"/>
 
-  <!-- Body bulb: smaller and lower, leaving room for the big bolt and
-       the bigger hammer on the upper-left. -->
-  <ellipsoid cx="220" cy="270" cz="10" rx="102" ry="78" rz="78"
-             fill="#f5a87a" filter="url(#shade-soft)"/>
+  <!-- Hammer head: wide Mjolnir-shaped brick sitting just above the
+       claw with the handle reaching into it. The yellow bolt decal
+       lives inside `t-hammer`, so the face paints itself — no
+       separate 2D <path> on top. -->
+  <rect x="40" y="98" width="124" height="80" fill="#3a2418"/>
+  <cube cx="102" cy="138" cz="28" width="118" height="74" depth="62"
+        fill="url(#t-hammer)" filter="url(#matte)"/>
 
-  <!-- Bottom legs / pincer feet — outline + filled -->
-  <ellipse cx="190" cy="340" rx="13" ry="10" fill="#3a2418"/>
-  <ellipsoid cx="190" cy="340" cz="20" rx="10" ry="7" rz="7"
-             fill="#c8242c" filter="url(#shade-soft)"/>
-  <ellipse cx="250" cy="340" rx="13" ry="10" fill="#3a2418"/>
-  <ellipsoid cx="250" cy="340" cz="20" rx="10" ry="7" rz="7"
-             fill="#c8242c" filter="url(#shade-soft)"/>
+  <!-- ============== BODY ============== -->
 
-  <!-- Left arm + pincer claw, each with a dark outline behind. -->
-  <ellipse cx="125" cy="275" rx="29" ry="25" fill="#3a2418"/>
-  <ellipsoid cx="125" cy="275" cz="25" rx="26" ry="22" rz="22"
-             fill="#f5a87a" filter="url(#shade-soft)"/>
-  <ellipse cx="92" cy="290" rx="22" ry="15" fill="#3a2418"/>
-  <ellipsoid cx="92" cy="290" cz="30" rx="19" ry="12" rz="12"
-             fill="#f5a87a" filter="url(#shade-soft)"/>
-  <ellipse cx="88" cy="312" rx="20" ry="15" fill="#3a2418"/>
-  <ellipsoid cx="88" cy="312" cz="30" rx="17" ry="12" rz="12"
-             fill="#f5a87a" filter="url(#shade-soft)"/>
+  <!-- Body: chubby, near-spherical bulb (rx≈ry≈rz). Sits behind the
+       giant claw and to the right; the silhouettes merge into one
+       bean. -->
+  <ellipse cx="240" cy="270" rx="115" ry="108" fill="#3a2418"/>
+  <ellipsoid cx="240" cy="270" cz="10" rx="110" ry="103" rz="103"
+             fill="url(#t-body)" filter="url(#matte)"/>
 
-  <!-- Right arm + pincer claw, mirrored, with outlines. -->
-  <ellipse cx="315" cy="275" rx="29" ry="25" fill="#3a2418"/>
-  <ellipsoid cx="315" cy="275" cz="25" rx="26" ry="22" rz="22"
-             fill="#f5a87a" filter="url(#shade-soft)"/>
-  <ellipse cx="352" cy="280" rx="22" ry="15" fill="#3a2418"/>
-  <ellipsoid cx="352" cy="280" cz="35" rx="19" ry="12" rz="12"
-             fill="#f5a87a" filter="url(#shade-soft)"/>
-  <ellipse cx="354" cy="310" rx="22" ry="15" fill="#3a2418"/>
-  <ellipsoid cx="354" cy="310" cz="35" rx="19" ry="12" rz="12"
-             fill="#f5a87a" filter="url(#shade-soft)"/>
+  <!-- ============== CRAB LEGS (3 each side) ============== -->
 
-  <!-- White bauble cradled in the right pincer, with outline. -->
-  <ellipse cx="368" cy="297" rx="17" ry="17" fill="#3a2418"/>
-  <ellipsoid cx="368" cy="297" cz="55" rx="14" ry="14" rz="13"
-             fill="#ffffff" filter="url(#shade-glossy)"/>
+  <!-- Tall narrow ellipsoids sticking down from under the body so
+       the crab actually reads as a crab. Each has a slightly
+       larger 2D outline ellipse behind for the cartoon rim. -->
+  <ellipse cx="155" cy="370" rx="9" ry="20" fill="#3a2418"/>
+  <ellipsoid cx="155" cy="370" cz="15" rx="7" ry="17" rz="7"
+             fill="url(#t-arm)" filter="url(#matte)"/>
+  <ellipse cx="185" cy="378" rx="9" ry="18" fill="#3a2418"/>
+  <ellipsoid cx="185" cy="378" cz="15" rx="7" ry="15" rz="7"
+             fill="url(#t-arm)" filter="url(#matte)"/>
+  <ellipse cx="215" cy="383" rx="9" ry="16" fill="#3a2418"/>
+  <ellipsoid cx="215" cy="383" cz="15" rx="7" ry="13" rz="7"
+             fill="url(#t-arm)" filter="url(#matte)"/>
 
-  <!-- Eyes: oval sclera with dark outline, dominant brown iris (flat-
-       disc cylinder), primary + secondary catchlights. -->
-  <ellipse cx="185" cy="232" rx="45" ry="51" fill="#3a2418"/>
-  <ellipsoid cx="185" cy="232" cz="70" rx="42" ry="48" rz="42"
-             fill="#ffffff" filter="url(#shade-glossy)"/>
-  <ellipse cx="265" cy="232" rx="45" ry="51" fill="#3a2418"/>
-  <ellipsoid cx="265" cy="232" cz="70" rx="42" ry="48" rz="42"
-             fill="#ffffff" filter="url(#shade-glossy)"/>
+  <ellipse cx="262" cy="383" rx="9" ry="16" fill="#3a2418"/>
+  <ellipsoid cx="262" cy="383" cz="15" rx="7" ry="13" rz="7"
+             fill="url(#t-arm)" filter="url(#matte)"/>
+  <ellipse cx="292" cy="378" rx="9" ry="18" fill="#3a2418"/>
+  <ellipsoid cx="292" cy="378" cz="15" rx="7" ry="15" rz="7"
+             fill="url(#t-arm)" filter="url(#matte)"/>
+  <ellipse cx="322" cy="370" rx="9" ry="20" fill="#3a2418"/>
+  <ellipsoid cx="322" cy="370" cz="15" rx="7" ry="17" rz="7"
+             fill="url(#t-arm)" filter="url(#matte)"/>
 
-  <cylinder cx="178" cy="247" cz="115" rx="27" ry="32" depth="14"
-            fill="#3a2418" filter="url(#shade-glossy)"/>
-  <cylinder cx="270" cy="247" cz="115" rx="27" ry="32" depth="14"
-            fill="#3a2418" filter="url(#shade-glossy)"/>
+  <!-- ============== SMALL RIGHT CLAW + BAUBLE ============== -->
 
-  <!-- Primary catchlights (upper-left of each iris) -->
-  <ellipsoid cx="170" cy="234" cz="140" rx="8" ry="10" rz="6"
+  <!-- Smaller right claw with a pincer tip, on the opposite side
+       from the giant left claw. -->
+  <ellipse cx="365" cy="285" rx="32" ry="30" fill="#3a2418"/>
+  <ellipsoid cx="365" cy="285" cz="20" rx="29" ry="27" rz="27"
+             fill="url(#t-arm)" filter="url(#matte)"/>
+  <ellipse cx="392" cy="310" rx="15" ry="12" fill="#3a2418"/>
+  <ellipsoid cx="392" cy="310" cz="25" rx="12" ry="9" rz="9"
+             fill="url(#t-arm)" filter="url(#matte)"/>
+
+  <!-- White bauble cradled inside the small right claw. -->
+  <ellipse cx="395" cy="280" rx="16" ry="16" fill="#3a2418"/>
+  <ellipsoid cx="395" cy="280" cz="45" rx="13" ry="13" rz="12"
+             fill="url(#t-bauble)" filter="url(#gloss)"/>
+
+  <!-- ============== EYES (interlocking, looking up-left) ============== -->
+
+  <!-- Two tall vertical-oval eyes that touch in the middle. The
+       sclera ellipsoids use `matte` (not `gloss`) so the eyeballs
+       stop looking like ceramic — the catchlights and the iris
+       carry the wet/shiny read instead. -->
+  <ellipse cx="200" cy="225" rx="52" ry="68" fill="#3a2418"/>
+  <ellipsoid cx="200" cy="225" cz="70" rx="48" ry="64" rz="48"
+             fill="url(#t-eye)" filter="url(#matte)"/>
+  <ellipse cx="288" cy="225" rx="52" ry="68" fill="#3a2418"/>
+  <ellipsoid cx="288" cy="225" cz="70" rx="48" ry="64" rz="48"
+             fill="url(#t-eye)" filter="url(#matte)"/>
+
+  <!-- Irises shifted up-and-left from each eye centre so the pupils
+       gaze up-left like the reference. They stay glossy so the
+       brown reads as wet. -->
+  <cylinder cx="190" cy="208" cz="115" rx="34" ry="42" depth="12"
+            fill="url(#t-iris)" filter="url(#gloss)"/>
+  <cylinder cx="278" cy="208" cz="115" rx="34" ry="42" depth="12"
+            fill="url(#t-iris)" filter="url(#gloss)"/>
+
+  <!-- Catchlights: a big bright primary up-and-left of each iris,
+       a small secondary glint lower-right. -->
+  <ellipsoid cx="170" cy="186" cz="140" rx="14" ry="18" rz="8"
              fill="#ffffff"/>
-  <ellipsoid cx="262" cy="234" cz="140" rx="8" ry="10" rz="6"
+  <ellipsoid cx="258" cy="186" cz="140" rx="14" ry="18" rz="8"
              fill="#ffffff"/>
-  <!-- Secondary catchlights (smaller, lower-right of each iris) -->
-  <ellipsoid cx="186" cy="262" cz="140" rx="3" ry="3" rz="2"
+  <ellipsoid cx="202" cy="230" cz="140" rx="5" ry="5" rz="3"
              fill="#ffffff"/>
-  <ellipsoid cx="278" cy="262" cz="140" rx="3" ry="3" rz="2"
+  <ellipsoid cx="290" cy="230" cz="140" rx="5" ry="5" rz="3"
              fill="#ffffff"/>
 
-  <!-- Mouth outline + smile puck. The dark outline behind serves
-       double duty as both an outline AND deepens the mouth color. -->
-  <ellipse cx="225" cy="305" rx="42" ry="15" fill="#3a2418"/>
-  <cylinder cx="225" cy="305" cz="115" rx="38" ry="12" depth="6"
-            fill="#1f1209" filter="url(#shade-soft)"/>
-  <!-- Tooth: small white block on the left of the mouth, with outline. -->
-  <rect x="200" y="298" width="12" height="13" fill="#3a2418"/>
-  <cube cx="206" cy="304" cz="125" size="10"
-        fill="#ffffff" filter="url(#shade-soft)"/>
+  <!-- ============== SMIRK MOUTH ============== -->
+
+  <!-- A single curved stroked path on the body — the reference's
+       subtle smirk. Replaces the open cylinder cavity + tooth cube
+       that was making the previous fixture look gormless. -->
+  <path d="M 215 310 Q 245 326 280 312"
+        stroke="#3a2418" stroke-width="5" stroke-linecap="round"
+        fill="none"/>
 </svg>"##;
