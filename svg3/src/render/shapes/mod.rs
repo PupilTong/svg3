@@ -140,6 +140,7 @@ pub(crate) fn vertex(x: f32, y: f32, color: [f32; 4]) -> Vertex {
         params: [0.0; 4],
         kind: KIND_SOLID,
         paint_id: 0,
+        uv: [0.0, 0.0],
     }
 }
 
@@ -160,6 +161,7 @@ pub(crate) fn sdf_vertex(
         params,
         kind,
         paint_id: 0,
+        uv: [0.0, 0.0],
     }
 }
 

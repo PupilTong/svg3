@@ -22,6 +22,7 @@ mod image_decode;
 mod pipeline;
 mod readback;
 mod renderer;
+mod texture_store;
 mod uniforms;
 
 pub use clear::{clear_target, DEPTH_FORMAT};

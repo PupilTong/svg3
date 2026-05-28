@@ -111,47 +111,119 @@ pub(crate) fn resolve_cylinder(element: &Element, viewport: Viewport) -> Option<
 
 /// Tessellate a resolved cylinder into filled cap and side triangles.
 ///
-/// Produces two cap centres plus duplicated front/back ring vertices for
-/// [`RADIAL_SEGMENTS`] segments, all tagged [`KIND_SOLID`]. The front cap is
-/// at `cz + depth / 2` and the back cap at `cz - depth / 2`, following
-/// svg3's +Z-toward-viewer convention.
+/// Three regions share the geometry but carry independent UV spans for a
+/// texture paint server:
+///
+/// - **Side wall** — duplicated `(front, back)` ring rows, `u = φ / 2π`
+///   wrapping around, `v` from `0` at the back cap to `1` at the front cap.
+/// - **Top cap** (front, `z = z_max`) — polar disk projection: cap centre →
+///   texture centre `(0.5, 0.5)`, cap rim → texture edges. The disk's `+X`
+///   on the cap goes to the texture's `+u`; SVG `+Y` (down) goes to texture
+///   `+v` (so `v = 0.5 − 0.5 · y'`).
+/// - **Bottom cap** (back, `z = z_min`) — same polar disk with `x` flipped so
+///   the texture reads upright when viewed from `-Z` (looking up at the
+///   back cap mirrors looking down at the front cap).
+///
+/// Cap centres and ring vertices are *not* shared between the cap and side
+/// regions: each ring vertex is duplicated so the cap row can carry its
+/// disk UV while the side row carries its wrap UV. All vertices are tagged
+/// [`KIND_SOLID`]. The front cap is at `cz + depth / 2` and the back cap at
+/// `cz - depth / 2`, following svg3's +Z-toward-viewer convention.
 pub(crate) fn tessellate_cylinder(geo: &CylinderGeometry, color: [f32; 4]) -> Mesh {
     let front_z = geo.cz + geo.depth * 0.5;
     let back_z = geo.cz - geo.depth * 0.5;
 
-    let mut vertices = Vec::with_capacity((2 + (RADIAL_SEGMENTS + 1) * 2) as usize);
-    vertices.push(vertex([geo.cx, geo.cy, front_z], color));
-    vertices.push(vertex([geo.cx, geo.cy, back_z], color));
+    // Layout: 2 cap centres + 2 cap rings + 2 side rings, each
+    // `RADIAL_SEGMENTS + 1` long.
+    let ring_len = (RADIAL_SEGMENTS + 1) as usize;
+    let mut vertices = Vec::with_capacity(2 + 4 * ring_len);
+    // 0: front cap centre.
+    vertices.push(textured_vertex(
+        [geo.cx, geo.cy, front_z],
+        color,
+        [0.5, 0.5],
+    ));
+    // 1: back cap centre.
+    vertices.push(textured_vertex([geo.cx, geo.cy, back_z], color, [0.5, 0.5]));
 
+    let front_ring_base = vertices.len() as u32;
+    // Cap rings — UV is the polar disk projection of the rim point.
     for segment in 0..=RADIAL_SEGMENTS {
         let phi = (segment as f32 / RADIAL_SEGMENTS as f32) * std::f32::consts::TAU;
         let (sin_phi, cos_phi) = phi.sin_cos();
         let x = geo.cx + geo.rx * cos_phi;
         let y = geo.cy + geo.ry * sin_phi;
-        vertices.push(vertex([x, y, front_z], color));
-        vertices.push(vertex([x, y, back_z], color));
+        // Polar disk: `x' = cos_phi`, `y' = sin_phi` (the unit-rim point on
+        // the cap-local frame). Front-cap UV maps `+x' → +u`, `+y' → +v`
+        // (SVG y is already screen-down).
+        let front_u = 0.5 + 0.5 * cos_phi;
+        let front_v = 0.5 + 0.5 * sin_phi;
+        vertices.push(textured_vertex([x, y, front_z], color, [front_u, front_v]));
+    }
+    let back_ring_base = vertices.len() as u32;
+    for segment in 0..=RADIAL_SEGMENTS {
+        let phi = (segment as f32 / RADIAL_SEGMENTS as f32) * std::f32::consts::TAU;
+        let (sin_phi, cos_phi) = phi.sin_cos();
+        let x = geo.cx + geo.rx * cos_phi;
+        let y = geo.cy + geo.ry * sin_phi;
+        // Back cap UV mirrors `x'` so the texture reads upright when the
+        // cylinder is viewed from `-Z`.
+        let back_u = 0.5 - 0.5 * cos_phi;
+        let back_v = 0.5 + 0.5 * sin_phi;
+        vertices.push(textured_vertex([x, y, back_z], color, [back_u, back_v]));
+    }
+    // Side wall rings — UV is the equirectangular wrap (`u = φ / 2π`,
+    // `v ∈ {0, 1}` for back / front).
+    let side_front_base = vertices.len() as u32;
+    for segment in 0..=RADIAL_SEGMENTS {
+        let segment_t = segment as f32 / RADIAL_SEGMENTS as f32;
+        let phi = segment_t * std::f32::consts::TAU;
+        let (sin_phi, cos_phi) = phi.sin_cos();
+        let x = geo.cx + geo.rx * cos_phi;
+        let y = geo.cy + geo.ry * sin_phi;
+        // Side-wall front row: `v = 1.0` (front cap edge maps to `v = 1`).
+        vertices.push(textured_vertex([x, y, front_z], color, [segment_t, 1.0]));
+    }
+    let side_back_base = vertices.len() as u32;
+    for segment in 0..=RADIAL_SEGMENTS {
+        let segment_t = segment as f32 / RADIAL_SEGMENTS as f32;
+        let phi = segment_t * std::f32::consts::TAU;
+        let (sin_phi, cos_phi) = phi.sin_cos();
+        let x = geo.cx + geo.rx * cos_phi;
+        let y = geo.cy + geo.ry * sin_phi;
+        // Side-wall back row: `v = 0.0`.
+        vertices.push(textured_vertex([x, y, back_z], color, [segment_t, 0.0]));
     }
 
-    let front = |segment: u32| 2 + segment * 2;
-    let back = |segment: u32| front(segment) + 1;
     let mut indices = Vec::with_capacity((RADIAL_SEGMENTS * 12) as usize);
     for segment in 0..RADIAL_SEGMENTS {
         let next = segment + 1;
-        let front_a = front(segment);
-        let front_b = front(next);
-        let back_a = back(segment);
-        let back_b = back(next);
-
+        let front_a = front_ring_base + segment;
+        let front_b = front_ring_base + next;
+        let back_a = back_ring_base + segment;
+        let back_b = back_ring_base + next;
         // Cap windings: front cap normal +Z; back cap normal -Z.
         indices.extend_from_slice(&[0, front_a, front_b, 1, back_b, back_a]);
-        // Side wall winding: outward radial normal.
-        indices.extend_from_slice(&[front_a, back_a, front_b, front_b, back_a, back_b]);
+
+        // Side wall uses its own ring vertices to carry the wrap UV.
+        let side_front_a = side_front_base + segment;
+        let side_front_b = side_front_base + next;
+        let side_back_a = side_back_base + segment;
+        let side_back_b = side_back_base + next;
+        indices.extend_from_slice(&[
+            side_front_a,
+            side_back_a,
+            side_front_b,
+            side_front_b,
+            side_back_a,
+            side_back_b,
+        ]);
     }
 
     Mesh::new(vertices, indices)
 }
 
-fn vertex(position: [f32; 3], color: [f32; 4]) -> Vertex {
+fn textured_vertex(position: [f32; 3], color: [f32; 4], uv: [f32; 2]) -> Vertex {
     Vertex {
         position,
         color,
@@ -159,6 +231,7 @@ fn vertex(position: [f32; 3], color: [f32; 4]) -> Vertex {
         params: [0.0; 4],
         kind: KIND_SOLID,
         paint_id: 0,
+        uv,
     }
 }
 
@@ -351,7 +424,10 @@ mod tests {
             depth: 30.0,
         };
         let mesh = tessellate_cylinder(&geo, [0.0, 0.0, 1.0, 1.0]);
-        assert_eq!(mesh.vertices.len(), 2 + (RADIAL_SEGMENTS as usize + 1) * 2);
+        // Each region carries its own ring so cap and side wall can hold
+        // independent UVs: 2 cap centres + 4 rings of (RADIAL_SEGMENTS + 1).
+        let ring_len = RADIAL_SEGMENTS as usize + 1;
+        assert_eq!(mesh.vertices.len(), 2 + 4 * ring_len);
         assert_eq!(mesh.indices.len(), RADIAL_SEGMENTS as usize * 12);
         assert!(mesh
             .indices

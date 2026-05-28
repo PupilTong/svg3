@@ -27,12 +27,14 @@ use glam::Mat4;
 use thiserror::Error;
 use wgpu::util::DeviceExt;
 
-use crate::dom::Document;
+use crate::dom::{Document, NodeId};
 use crate::render::filters::{
     FilterImage, FilterPrimitive, FilterPrimitiveKind, MaskMode, Merge, PrimitiveSubregion,
 };
-use crate::render::mesh::PaintServer;
-use crate::render::scene::{build_render_plan, MaskRender, RenderOp, ViewportClip};
+use crate::render::mesh::{PaintServer, PAINT_SVG_TEXTURE};
+use crate::render::scene::{
+    build_render_plan, build_texture_subtree_scene, MaskRender, RenderOp, ViewportClip,
+};
 use crate::render::{document_viewport, Mesh, RenderConfig, Viewport};
 
 use super::clear::{clear_depth, clear_target, DepthTexture, DEPTH_FORMAT};
@@ -44,6 +46,7 @@ use super::pipeline::{
     target_filter_depth_stencil,
 };
 use super::readback::{read_back, Image};
+use super::texture_store::{collect_texture_node_ids, texture_layer_depth, TextureStore};
 use super::uniforms::{
     alpha_mask_uniform, blend_uniform, color_matrix_uniform, component_transfer_uniform,
     convolve_uniform, displacement_uniform, drop_shadow_alpha_uniform, fe_composite_uniform,
@@ -68,6 +71,11 @@ pub struct GpuScene {
     index_buffer: wgpu::Buffer,
     transform_buffer: wgpu::Buffer,
     transform_bind_group: wgpu::BindGroup,
+    /// Bind group for the shape pipeline's `group(1)` texture array +
+    /// sampler. Built per-scene so a stand-alone caller (e.g. `draw`) can
+    /// supply a dummy texture without forcing the renderer to maintain a
+    /// store across calls.
+    texture_bind_group: wgpu::BindGroup,
     index_count: u32,
 }
 
@@ -88,6 +96,10 @@ pub struct Renderer {
     queue: wgpu::Queue,
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
+    /// Bind-group layout for the shape pipeline's `group(1)` — the SVG
+    /// texture array + sampler. Used per-encode to build a fresh bind group
+    /// against a [`TextureStore`] view + sampler.
+    texture_bind_group_layout: wgpu::BindGroupLayout,
     filter_bind_group_layout: wgpu::BindGroupLayout,
     /// Composite-specific bind-group layout — extends the filter layout
     /// with the source depth texture so the composite shader can write
@@ -151,7 +163,7 @@ impl Renderer {
         queue: wgpu::Queue,
         format: wgpu::TextureFormat,
     ) -> Self {
-        let pipeline = build_pipeline(&device, format);
+        let (pipeline, texture_bind_group_layout) = build_pipeline(&device, format);
         let bind_group_layout = pipeline.get_bind_group_layout(0);
         let filter_bind_group_layout = build_filter_bind_group_layout(&device);
         let composite_bind_group_layout = build_composite_bind_group_layout(&device);
@@ -378,6 +390,7 @@ impl Renderer {
             queue,
             pipeline,
             bind_group_layout,
+            texture_bind_group_layout,
             filter_bind_group_layout,
             composite_bind_group_layout,
             composite_depth_sampler,
@@ -433,7 +446,22 @@ impl Renderer {
     /// `view_projection` matrix, which
     /// [`update_view_projection`](Renderer::update_view_projection) can later
     /// rewrite.
+    ///
+    /// Binds an empty (1×1 transparent) SVG-texture array to the scene's
+    /// `group(1)`. The internal document-encode path layers a populated
+    /// `TextureStore` over this when the document references textures; the
+    /// stand-alone draw path picks up the dummy and ignores it.
     pub fn create_scene(&self, mesh: &Mesh, view_projection: Mat4) -> Option<GpuScene> {
+        let empty_store = TextureStore::empty(&self.device);
+        self.create_scene_with_textures(mesh, view_projection, &empty_store)
+    }
+
+    fn create_scene_with_textures(
+        &self,
+        mesh: &Mesh,
+        view_projection: Mat4,
+        textures: &TextureStore,
+    ) -> Option<GpuScene> {
         if mesh.is_empty() {
             return None;
         }
@@ -449,7 +477,18 @@ impl Renderer {
         // Paint id 0 is reserved for inline solid vertex colour. The dummy
         // first entry keeps non-zero ids aligned with their storage index.
         paint_servers.push(PaintServer::zeroed());
-        paint_servers.extend_from_slice(mesh.paint_servers());
+        paint_servers.extend(mesh.paint_servers().iter().map(|server| {
+            // `meta[1]` of an SVG-texture paint server holds a node-id
+            // placeholder at scene-build time; the renderer rewrites it to
+            // the actual layer index just before upload so the shader sees
+            // a direct array-index reference.
+            let mut rewritten = *server;
+            if rewritten.meta[0] == PAINT_SVG_TEXTURE {
+                let node_id = NodeId::from_index(rewritten.meta[1] as usize);
+                rewritten.meta[1] = textures.layer_for(node_id);
+            }
+            rewritten
+        }));
         let paint_buffer = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -468,6 +507,20 @@ impl Renderer {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: paint_buffer.as_entire_binding(),
+                },
+            ],
+        });
+        let texture_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("svg3 shape texture bind group"),
+            layout: &self.texture_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(textures.view()),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(textures.sampler()),
                 },
             ],
         });
@@ -490,6 +543,7 @@ impl Renderer {
             index_buffer,
             transform_buffer,
             transform_bind_group,
+            texture_bind_group,
             index_count: mesh.indices.len() as u32,
         })
     }
@@ -522,6 +576,7 @@ impl Renderer {
     pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>, scene: &GpuScene) {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &scene.transform_bind_group, &[]);
+        pass.set_bind_group(1, &scene.texture_bind_group, &[]);
         pass.set_vertex_buffer(0, scene.vertex_buffer.slice(..));
         pass.set_index_buffer(scene.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
         pass.draw_indexed(0..scene.index_count, 0, 0..1);
@@ -675,10 +730,35 @@ impl Renderer {
         clear_depth(encoder, &depth.view, "svg3 target depth clear");
 
         let plan = build_render_plan(document, viewport);
+
+        // Collect every `<defs><svg>` referenced as a `PAINT_SVG_TEXTURE`
+        // paint server across the plan, rasterize each into its own layer,
+        // and bind the resulting array as the shape pipeline's group(1).
+        let texture_node_ids = collect_texture_node_ids(&plan);
+        let textures = TextureStore::new(
+            &self.device,
+            encoder,
+            document,
+            &texture_node_ids,
+            |encoder, layer_view, node_id, layer_viewport, layer_view_projection, layer_side| {
+                self.rasterize_texture_layer(
+                    encoder,
+                    document,
+                    node_id,
+                    layer_view,
+                    layer_viewport,
+                    layer_view_projection,
+                    layer_side,
+                );
+            },
+        );
+
         for op in &plan {
             match op {
                 RenderOp::Mesh(mesh) => {
-                    if let Some(scene) = self.create_scene(mesh, view_projection) {
+                    if let Some(scene) =
+                        self.create_scene_with_textures(mesh, view_projection, &textures)
+                    {
                         self.encode_scene_draw(
                             encoder,
                             target,
@@ -697,6 +777,7 @@ impl Renderer {
                         *clip,
                         view_projection,
                         target_extent,
+                        &textures,
                     );
                 }
                 RenderOp::Filter {
@@ -716,10 +797,69 @@ impl Renderer {
                         viewport,
                         view_projection,
                         target_extent,
+                        &textures,
                     );
                 }
             }
         }
+    }
+
+    /// Rasterize the `<defs><svg>` subtree rooted at `node_id` into
+    /// `layer_view` using the existing 2D shape path. Uses a sub-encode of
+    /// the shape pipeline driven by the same `create_scene_with_textures`
+    /// machinery, with a fresh per-layer depth buffer.
+    #[allow(clippy::too_many_arguments)]
+    fn rasterize_texture_layer(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        document: &Document,
+        node_id: NodeId,
+        layer_view: &wgpu::TextureView,
+        layer_viewport: Viewport,
+        layer_view_projection: Mat4,
+        layer_side: u32,
+    ) {
+        let mesh = build_texture_subtree_scene(document, node_id, layer_viewport);
+        if mesh.is_empty() {
+            // The subtree had no renderable content — the layer stays
+            // transparent from the pre-pass clear, which matches SVG 1.1
+            // (an empty `<svg>` viewport is transparent).
+            return;
+        }
+        // The texture rasterize is always flat 2D — no 3D primitives — so
+        // an empty (1×1) texture store suffices: the rasterized subtree
+        // cannot itself reference another defs-svg paint server because
+        // 3D primitives aren't allowed inside it (gated off in
+        // `build_texture_subtree_scene`).
+        let empty_store = TextureStore::empty(&self.device);
+        let Some(scene) =
+            self.create_scene_with_textures(&mesh, layer_view_projection, &empty_store)
+        else {
+            return;
+        };
+        let depth = texture_layer_depth(&self.device, encoder, layer_side);
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("svg3 texture layer rasterize"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: layer_view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &depth.view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            ..Default::default()
+        });
+        self.draw(&mut pass, &scene);
     }
 
     fn encode_scene_draw(
@@ -767,6 +907,7 @@ impl Renderer {
         viewport: Viewport,
         view_projection: Mat4,
         extent: wgpu::Extent3d,
+        textures: &TextureStore,
     ) {
         // SVG filter graphs are DAGs, not linear chains: a primitive's `in` /
         // `in2` can reference SourceGraphic, SourceAlpha, or an earlier
@@ -789,7 +930,7 @@ impl Renderer {
             "svg3 filter source depth clear",
         );
 
-        if let Some(scene) = self.create_scene(mesh, view_projection) {
+        if let Some(scene) = self.create_scene_with_textures(mesh, view_projection, textures) {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("svg3 filtered shape pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -828,7 +969,14 @@ impl Renderer {
         // SVG 2 render order: clip-path applies BEFORE filter, so apply the
         // rendered clip alpha to SourceGraphic ahead of every primitive pass.
         if let Some(clip_mesh) = clip {
-            self.encode_alpha_effect(encoder, &source.view, clip_mesh, view_projection, extent);
+            self.encode_alpha_effect(
+                encoder,
+                &source.view,
+                clip_mesh,
+                view_projection,
+                extent,
+                textures,
+            );
         }
 
         // SourceAlpha = (0, 0, 0, src.a). Derive it through the colour-matrix
@@ -952,6 +1100,7 @@ impl Renderer {
                 mask,
                 view_projection,
                 extent,
+                textures,
             );
             &masked.view
         } else {
@@ -980,6 +1129,7 @@ impl Renderer {
         clip: ViewportClip,
         view_projection: Mat4,
         extent: wgpu::Extent3d,
+        textures: &TextureStore,
     ) {
         let source = self.create_filter_texture(extent, "svg3 nested viewport source");
         let source_depth = self.create_depth_texture(extent, "svg3 nested viewport source depth");
@@ -989,7 +1139,7 @@ impl Renderer {
             "svg3 nested viewport source depth clear",
         );
 
-        if let Some(scene) = self.create_scene(mesh, view_projection) {
+        if let Some(scene) = self.create_scene_with_textures(mesh, view_projection, textures) {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("svg3 nested viewport source pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1293,6 +1443,7 @@ impl Renderer {
         mask_mesh: &Mesh,
         view_projection: Mat4,
         extent: wgpu::Extent3d,
+        textures: &TextureStore,
     ) {
         let mask = self.encode_mask_mesh(
             encoder,
@@ -1300,6 +1451,7 @@ impl Renderer {
             view_projection,
             extent,
             "svg3 clip-path",
+            textures,
         );
         let scratch = self.create_filter_texture(extent, "svg3 alpha effect scratch");
         let passthrough = FilterUniform::passthrough(extent.width, extent.height);
@@ -1324,6 +1476,7 @@ impl Renderer {
         );
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn encode_masked_output(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -1332,9 +1485,16 @@ impl Renderer {
         mask: &MaskRender,
         view_projection: Mat4,
         extent: wgpu::Extent3d,
+        textures: &TextureStore,
     ) {
-        let mask_texture =
-            self.encode_mask_mesh(encoder, &mask.mesh, view_projection, extent, "svg3 mask");
+        let mask_texture = self.encode_mask_mesh(
+            encoder,
+            &mask.mesh,
+            view_projection,
+            extent,
+            "svg3 mask",
+            textures,
+        );
         let uniform = alpha_mask_uniform(extent, mask.mode);
         self.encode_filter_pass(
             encoder,
@@ -1354,12 +1514,13 @@ impl Renderer {
         view_projection: Mat4,
         extent: wgpu::Extent3d,
         label_prefix: &str,
+        textures: &TextureStore,
     ) -> FilterTexture {
         let target = self.create_filter_texture(extent, label_prefix);
         let depth = self.create_depth_texture(extent, "svg3 mask depth");
         clear_depth(encoder, &depth.view, "svg3 mask depth clear");
 
-        if let Some(scene) = self.create_scene(mesh, view_projection) {
+        if let Some(scene) = self.create_scene_with_textures(mesh, view_projection, textures) {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("svg3 mask draw"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {

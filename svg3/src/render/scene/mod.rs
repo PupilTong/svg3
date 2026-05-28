@@ -364,6 +364,87 @@ pub fn build_scene(document: &Document, viewport: Viewport) -> Mesh {
     mesh
 }
 
+/// Content viewport of a `<defs><svg>` texture paint server's subtree. The
+/// renderer uses this both to size the rasterized texture and to set up the
+/// orthographic projection for the rasterize pass. Returns `None` when the
+/// element resolves to a non-positive content rect (no rasterizable area).
+pub(crate) fn texture_subtree_viewport(document: &Document, root: NodeId) -> Option<Viewport> {
+    let element = &document.node(root).element;
+    let fallback = Viewport {
+        width: 100.0,
+        height: 100.0,
+    };
+    let width = resolve_viewport_length(element, "width", fallback.width).unwrap_or(0.0);
+    let height = resolve_viewport_length(element, "height", fallback.height).unwrap_or(0.0);
+    let view_box = element
+        .attributes
+        .get("viewBox")
+        .and_then(|value| value.parse::<SvgViewBox>().ok());
+
+    let (final_w, final_h) = match (view_box, width > 0.0 && height > 0.0) {
+        (Some(vb), _) if vb.w > 0.0 && vb.h > 0.0 => (vb.w as f32, vb.h as f32),
+        (_, true) => (width, height),
+        _ => return None,
+    };
+    Some(Viewport {
+        width: final_w,
+        height: final_h,
+    })
+}
+
+/// Build a [`Mesh`] for the subtree rooted at a `<defs><svg>` texture paint
+/// server, treated as the root of a 2D-only document. `viewport` is the
+/// content rect resolved by [`texture_subtree_viewport`]; the renderer's
+/// orthographic projection maps that rect to NDC for the rasterize pass.
+///
+/// 3D primitives inside the subtree are skipped (the texture root has no
+/// `extension` attribute of its own, so `svg3_extension_enabled` is `false`
+/// here regardless of the outer document's mode). This matches SPEC §2.2.
+pub(crate) fn build_texture_subtree_scene(
+    document: &Document,
+    root: NodeId,
+    viewport: Viewport,
+) -> Mesh {
+    let markers = MarkerDefinitions::default();
+    let paints = PaintDefinitions::default();
+    let twod_index = Cell::new(0);
+    let context = SceneContext {
+        root_viewport: viewport,
+        viewport,
+        markers: &markers,
+        paints: &paints,
+        svg3_extension_enabled: false,
+        twod_index: &twod_index,
+    };
+
+    // Apply a `viewBox` content transform if the root carries one, so the
+    // subtree's user-space coordinates land where the texture's content rect
+    // expects them. With no viewBox, the children are already authored in
+    // the same coordinates we project, so the transform is identity.
+    let texture_node = document.node(root);
+    let view_box_transform = texture_node.element.attributes.get("viewBox").map(|_| {
+        let rect = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: viewport.width,
+            height: viewport.height,
+        };
+        nested_svg_content_transform(&texture_node.element, rect)
+    });
+
+    let mut mesh = Mesh::default();
+    let mut state = TraversalState::default();
+    if let Some(transform) = view_box_transform {
+        state.transform = transform;
+    }
+    let frame = state.enter_element(&texture_node.element, false);
+    for child in texture_node.children.iter().copied() {
+        append_subtree_mesh(document, child, &context, &mut state, true, &mut mesh);
+    }
+    state.exit_element(frame);
+    mesh
+}
+
 /// Build headless render operations that preserve SVG painter's order while
 /// isolating filtered subtrees and clipped nested SVG viewports into their
 /// own GPU post-process passes.
