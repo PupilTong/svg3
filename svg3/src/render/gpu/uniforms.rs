@@ -19,6 +19,7 @@ use crate::render::filters::{
     Blend, ColorMatrix, ComponentTransfer, Composite, ConvolveMatrix, DisplacementMap, DropShadow,
     FilterInput, Flood, ImageRect, LightSource, Lighting, Morphology, Offset, Turbulence,
 };
+use crate::render::scene::ViewportClip;
 
 use std::collections::BTreeMap;
 
@@ -524,6 +525,30 @@ pub(super) fn tile_uniform(extent: wgpu::Extent3d, source_uv: [f32; 4]) -> Filte
 pub(super) fn subregion_clip_uniform(extent: wgpu::Extent3d, uv: [f32; 4]) -> FilterUniform {
     let mut uniform = FilterUniform::empty(extent.width, extent.height);
     uniform.extra = uv;
+    uniform
+}
+
+pub(super) fn viewport_clip_uniform(extent: wgpu::Extent3d, clip: ViewportClip) -> FilterUniform {
+    let mut uniform = FilterUniform::empty(extent.width, extent.height);
+    uniform.extra = [
+        clip.root_viewport.width,
+        clip.root_viewport.height,
+        clip.rect[0],
+        clip.rect[1],
+    ];
+    uniform.lighting = [clip.rect[2], clip.rect[3], 0.0, 0.0];
+    uniform.matrix_r0 = [
+        clip.inverse_rows[0][0],
+        clip.inverse_rows[0][1],
+        clip.inverse_rows[0][2],
+        0.0,
+    ];
+    uniform.matrix_r1 = [
+        clip.inverse_rows[1][0],
+        clip.inverse_rows[1][1],
+        clip.inverse_rows[1][2],
+        0.0,
+    ];
     uniform
 }
 

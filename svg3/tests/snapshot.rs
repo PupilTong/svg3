@@ -3,7 +3,7 @@
 //! Each case parses an svg3 document — the SVG WPT `shapes/rect-*`,
 //! `shapes/circle-*`, `shapes/ellipse-*`, and `shapes/polygon-*` reference
 //! tests, plus polyline fill, stroked shapes, line, path, markers, SVG paint
-//! servers, the svg3 3D primitives, Gaussian blur and image filters,
+//! servers, nested plain-SVG viewports, the svg3 3D primitives, Gaussian blur and image filters,
 //! mixed-shape, and canonical SVG samples — renders
 //! it headlessly with
 //! [`Renderer::render_to_image`], and compares the result against a committed
@@ -401,6 +401,42 @@ fn cases() -> Vec<Case> {
         Case::square(
             "group-transform-inherited-paint",
             r##"<svg><rect width="100%" height="100%" fill="#13294b"/><g fill="#f2c14e" stroke="#2563eb" stroke-width="5" transform="translate(8, 6) rotate(8, 50, 50)"><rect x="18" y="18" width="26" height="42"/><circle cx="62" cy="40" r="17" fill="#c14b2b"/><line x1="22" y1="74" x2="78" y2="70" fill="none"/></g></svg>"##,
+        ),
+        // WPT `svg/struct/reftests/inner-svg-transform.svg`: an inner
+        // `<svg>` establishes a viewport at `x`/`y`, and its `transform`
+        // applies like an equivalent wrapper group.
+        Case::square(
+            "nested-svg-transform-viewport",
+            r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><svg x="12" y="14" width="42" height="34" transform="translate(8, 4) scale(1.25)"><rect width="100%" height="100%" fill="#f2c14e"/><circle cx="50%" cy="50%" r="25%" fill="#2563eb"/></svg></svg>"##,
+        ),
+        // WPT `svg/struct/reftests/inner-svg-transform-and-viewbox.svg`:
+        // `viewBox` maps child user coordinates into the nested viewport.
+        Case::square(
+            "nested-svg-viewbox-meet",
+            r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><svg x="20" y="15" width="60" height="40" viewBox="0 0 30 20"><rect width="30" height="20" fill="#f2c14e"/><circle cx="15" cy="10" r="6" fill="#c14b2b"/></svg></svg>"##,
+        ),
+        // WPT `svg/render/reftests/nested-svg-overflow-clip.html`: inner
+        // `<svg>` viewports clip overflowing child content by default.
+        Case::square(
+            "nested-svg-overflow-clip",
+            r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><svg width="48" height="48"><rect width="100" height="100" fill="#11aa55"/></svg><rect x="52" y="0" width="48" height="100" fill="#c14b2b"/></svg>"##,
+        ),
+        // SVG `overflow="visible"` opts the nested viewport out of clipping.
+        Case::square(
+            "nested-svg-overflow-visible",
+            r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#c14b2b"/><svg width="48" height="48" overflow="visible"><rect width="100" height="100" fill="#11aa55"/></svg></svg>"##,
+        ),
+        // SVG 1.1 `preserveAspectRatio="none"` non-uniformly maps the
+        // viewBox into the nested viewport.
+        Case::square(
+            "nested-svg-preserve-aspect-ratio-none",
+            r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><svg x="18" y="26" width="64" height="36" viewBox="0 0 20 20" preserveAspectRatio="none"><circle cx="10" cy="10" r="9" fill="#f2c14e"/><rect x="9" y="2" width="2" height="16" fill="#2563eb"/></svg></svg>"##,
+        ),
+        // SVG 1.1 `preserveAspectRatio="xMaxYMid slice"` scales the
+        // viewBox until it covers the viewport, then aligns the right edge.
+        Case::square(
+            "nested-svg-preserve-aspect-ratio-xmax-slice",
+            r##"<svg width="100" height="100"><rect width="100%" height="100%" fill="#13294b"/><svg x="30" y="20" width="40" height="60" viewBox="0 0 20 10" preserveAspectRatio="xMaxYMid slice"><rect width="20" height="10" fill="#f2c14e"/><rect x="0" width="4" height="10" fill="#2563eb"/><rect x="16" width="4" height="10" fill="#c14b2b"/></svg></svg>"##,
         ),
         // SVG paint servers: `<linearGradient>` with user-space coordinates
         // and three `<stop>` entries, sampled per fragment in the shape

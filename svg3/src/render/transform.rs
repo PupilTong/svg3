@@ -33,7 +33,7 @@ impl Mat4 {
         Self(m)
     }
 
-    fn translation(tx: f32, ty: f32, tz: f32) -> Self {
+    pub(crate) fn translation(tx: f32, ty: f32, tz: f32) -> Self {
         let mut m = Self::identity();
         m.0[3] = [tx, ty, tz, 1.0];
         m
@@ -63,7 +63,7 @@ impl Mat4 {
         m
     }
 
-    fn scaling(sx: f32, sy: f32, sz: f32) -> Self {
+    pub(crate) fn scaling(sx: f32, sy: f32, sz: f32) -> Self {
         let mut m = [[0.0_f32; 4]; 4];
         m[0][0] = sx;
         m[1][1] = sy;

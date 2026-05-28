@@ -818,6 +818,34 @@ fn fs_subregion_clip(in: VertexOutput) -> @location(0) vec4<f32> {
     return sample_in1(in.uv);
 }
 
+// ---- Nested <svg> viewport clip ------------------------------------------
+//
+// Normal 2D SVG mode gives every nested <svg> its own viewport and clips
+// overflowing child content by default. `extra.xy` carries the root viewport
+// dimensions, `extra.zw` carries the nested viewport's top-left in the
+// parent user coordinate system, `lighting.xy` carries its size, and
+// `matrix_r0/r1.xyz` carry the inverse parent->root affine transform rows.
+
+@fragment
+fn fs_svg_viewport_clip(in: VertexOutput) -> @location(0) vec4<f32> {
+    let root_p = vec2<f32>(
+        in.uv.x * filter_params.extra.x,
+        in.uv.y * filter_params.extra.y,
+    );
+    let v = vec3<f32>(root_p.x, root_p.y, 1.0);
+    let local = vec2<f32>(
+        dot(filter_params.matrix_r0.xyz, v),
+        dot(filter_params.matrix_r1.xyz, v),
+    );
+    let origin = filter_params.extra.zw;
+    let size = filter_params.lighting.xy;
+    let inside = all(local >= origin) && all(local <= origin + size);
+    if (!inside) {
+        return vec4<f32>(0.0);
+    }
+    return sample_in1(in.uv);
+}
+
 // ---- feTile ---------------------------------------------------------------
 //
 // SVG 1.1 §15.27: tile the input subregion across the filter region. The

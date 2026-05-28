@@ -259,3 +259,52 @@ fn wpt_polyline_odd_trailing_coordinate_passes() {
         "polyline should render using valid pairs before the trailing coordinate"
     );
 }
+
+#[test]
+fn wpt_inner_svg_transform_cases_pass() {
+    // WPT `svg/struct/reftests/inner-svg-transform.svg`: a transform on an
+    // inner `<svg>` applies to the viewport element like an equivalent
+    // wrapping `<g transform="...">`.
+    let mesh = renderable_mesh(
+        r#"<svg width="220" height="180"><svg width="50" height="50" transform="translate(100,50) scale(2)"><rect width="50" height="50" fill="lime"/></svg></svg>"#,
+    );
+    assert_vertex_bounds(&mesh, [100.0, 50.0, 200.0, 150.0]);
+
+    // WPT `svg/struct/reftests/inner-svg-rotate-transform.svg`: rotation is
+    // likewise applied to the inner viewport element, before its child
+    // content is drawn.
+    let mesh = renderable_mesh(
+        r#"<svg width="120" height="120"><svg width="50" height="50" transform="rotate(45)"><rect width="50" height="50" fill="lime"/></svg></svg>"#,
+    );
+    assert_vertex_bounds(&mesh, [-35.35534, 0.0, 35.35534, 70.71068]);
+}
+
+#[test]
+fn wpt_inner_svg_establishes_nested_viewport_for_percentages() {
+    // SVG 1.1 §5.1.2 / §7.10: an inner `<svg>` establishes a new viewport.
+    // Its `x`/`y`/`width`/`height` percentages resolve against the parent
+    // viewport, while descendants' percentages resolve against the inner
+    // viewport.
+    let mesh = renderable_mesh(
+        r#"<svg width="200" height="100"><svg x="25%" y="20%" width="50%" height="50%"><rect width="100%" height="100%" fill="lime"/></svg></svg>"#,
+    );
+    assert_vertex_bounds(&mesh, [50.0, 20.0, 150.0, 70.0]);
+}
+
+#[test]
+fn wpt_inner_svg_viewbox_cases_pass() {
+    // WPT `svg/struct/reftests/inner-svg-transform-and-viewbox.svg`: the
+    // inner `<svg>`'s `viewBox` maps child user coordinates into the nested
+    // viewport after the viewport element's own transform.
+    let mesh = renderable_mesh(
+        r#"<svg width="220" height="120"><svg x="100" y="20" width="50" height="50" viewBox="0 0 40 40"><rect width="40" height="40" fill="lime"/></svg></svg>"#,
+    );
+    assert_vertex_bounds(&mesh, [100.0, 20.0, 150.0, 70.0]);
+
+    // SVG 1.1 §7.8: `preserveAspectRatio="none"` allows non-uniform scaling
+    // from the viewBox into the viewport.
+    let mesh = renderable_mesh(
+        r#"<svg width="120" height="100"><svg x="10" y="20" width="60" height="40" viewBox="0 0 20 20" preserveAspectRatio="none"><rect width="20" height="20" fill="lime"/></svg></svg>"#,
+    );
+    assert_vertex_bounds(&mesh, [10.0, 20.0, 70.0, 60.0]);
+}
