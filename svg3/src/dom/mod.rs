@@ -3,9 +3,7 @@
 //! A [`Document`] is a flat arena of [`Node`]s addressed by [`NodeId`].
 //! Each `Node` carries [`Element`] data (tag kind + raw attributes) plus
 //! its children's ids. Storing nodes in a `Vec` gives stable identifiers
-//! and decouples tree mutation from the borrow checker — both useful for
-//! the planned Stylo cascade (Blitz / `blitz-dom`, the canonical Stylo-over-
-//! custom-DOM reference, uses the same shape).
+//! and decouples tree mutation from the borrow checker.
 
 use std::collections::BTreeMap;
 
