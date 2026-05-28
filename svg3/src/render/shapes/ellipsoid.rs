@@ -153,14 +153,18 @@ pub(crate) fn tessellate_ellipsoid(geo: &EllipsoidGeometry, color: [f32; 4]) -> 
     for lat in 0..LATITUDE_BANDS {
         // θ ∈ [-π/2, π/2] from south pole (z = cz - rz) to north pole
         // (z = cz + rz).
-        let theta = (lat as f32 / (LATITUDE_BANDS - 1) as f32) * std::f32::consts::PI
-            - std::f32::consts::FRAC_PI_2;
+        let lat_t = lat as f32 / (LATITUDE_BANDS - 1) as f32;
+        let theta = lat_t * std::f32::consts::PI - std::f32::consts::FRAC_PI_2;
         let (sin_theta, cos_theta) = theta.sin_cos();
+        // Equirectangular V: south pole `v=0`, north pole `v=1` — matches
+        // `lat_t` directly because that's the linear `θ` parameter.
+        let v = lat_t;
         for long in 0..=LONGITUDE_SEGMENTS {
             // φ ∈ [0, 2π] around the Z axis. The seam at φ = 0 / 2π is
-            // duplicated so the U coordinate (if we ever add one) wraps
-            // cleanly; here it just keeps the index arithmetic uniform.
-            let phi = (long as f32 / LONGITUDE_SEGMENTS as f32) * std::f32::consts::TAU;
+            // duplicated so the U coordinate wraps cleanly: the duplicate
+            // at `long == LONGITUDE_SEGMENTS` carries `u = 1.0`.
+            let long_t = long as f32 / LONGITUDE_SEGMENTS as f32;
+            let phi = long_t * std::f32::consts::TAU;
             let (sin_phi, cos_phi) = phi.sin_cos();
             vertices.push(Vertex {
                 position: [
@@ -173,6 +177,7 @@ pub(crate) fn tessellate_ellipsoid(geo: &EllipsoidGeometry, color: [f32; 4]) -> 
                 params: [0.0; 4],
                 kind: KIND_SOLID,
                 paint_id: 0,
+                uv: [long_t, v],
             });
         }
     }

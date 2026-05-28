@@ -29,11 +29,15 @@ var<uniform> transform: Transform;
 const PAINT_LINEAR_GRADIENT: u32 = 1u;
 const PAINT_RADIAL_GRADIENT: u32 = 2u;
 const PAINT_PATTERN: u32 = 3u;
+const PAINT_SVG_TEXTURE: u32 = 4u;
 const MAX_GRADIENT_STOPS: u32 = 8u;
 const MAX_PATTERN_ITEMS: u32 = 8u;
 
 struct PaintServer {
-    // [kind, stop_count, pattern_item_count, unused]
+    // [kind, layer_or_count, mapping_kind_or_pattern_count, mapping_aux]
+    //  - gradients use [kind, stop_count, 0, 0]
+    //  - pattern uses  [kind, 0, pattern_item_count, 0]
+    //  - svg texture   [kind, layer_index, mapping_kind, mapping_aux]
     header: vec4<u32>,
     // linear: [x1, y1, x2, y2], radial: [cx, cy, r, 0],
     // pattern: [x, y, width, height]
@@ -47,6 +51,15 @@ struct PaintServer {
 @group(0) @binding(1)
 var<storage, read> paints: array<PaintServer>;
 
+// `PAINT_SVG_TEXTURE` paint servers sample this 2D-array texture; the
+// `layer_index` field of the paint server's header picks the layer. When
+// the document references no textures the renderer binds a 1×1 transparent
+// dummy here, so this binding is always present regardless of content.
+@group(1) @binding(0)
+var svg_textures: texture_2d_array<f32>;
+@group(1) @binding(1)
+var svg_texture_sampler: sampler;
+
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) color: vec4<f32>,
@@ -55,6 +68,7 @@ struct VertexOutput {
     @location(3) @interpolate(flat) kind: u32,
     @location(4) world_position: vec3<f32>,
     @location(5) @interpolate(flat) paint_id: u32,
+    @location(6) uv: vec2<f32>,
 }
 
 @vertex
@@ -65,6 +79,7 @@ fn vs_main(
     @location(3) params: vec4<f32>,
     @location(4) kind: u32,
     @location(5) paint_id: u32,
+    @location(6) uv: vec2<f32>,
 ) -> VertexOutput {
     var out: VertexOutput;
     out.clip_position = transform.view_projection * vec4<f32>(position, 1.0);
@@ -74,6 +89,7 @@ fn vs_main(
     out.kind = kind;
     out.world_position = position;
     out.paint_id = paint_id;
+    out.uv = uv;
     return out;
 }
 
@@ -216,6 +232,20 @@ fn evaluate_paint(in: VertexOutput) -> vec4<f32> {
     }
     if (paint.header.x == PAINT_PATTERN) {
         return sample_pattern(paint, p);
+    }
+    if (paint.header.x == PAINT_SVG_TEXTURE) {
+        // UV is in `[0, 1]²` by tessellation; the per-primitive remap
+        // (e.g. cube-cross slot offsets) is baked into the vertex UV at
+        // mesh-build time, so the shader sample is a straight lookup. The
+        // layer index lives in `header.y` (the renderer rewrites the
+        // node-id placeholder to the array layer before buffer upload).
+        return textureSampleLevel(
+            svg_textures,
+            svg_texture_sampler,
+            in.uv,
+            i32(paint.header.y),
+            0.0,
+        );
     }
     return in.color;
 }

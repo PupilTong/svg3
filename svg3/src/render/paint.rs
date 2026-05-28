@@ -19,7 +19,10 @@ use lyon_tessellation::path::{Path, PathEvent};
 
 use crate::render::mesh::{
     PaintServer, MAX_GRADIENT_STOPS, MAX_PATTERN_ITEMS, PAINT_LINEAR_GRADIENT, PAINT_PATTERN,
-    PAINT_RADIAL_GRADIENT,
+    PAINT_RADIAL_GRADIENT, PAINT_SVG_TEXTURE, TEXTURE_MAP_CUBE_CROSS, TEXTURE_MAP_IDENTITY,
+};
+use crate::render::shapes::cube::{
+    resolve_cube_map, CubeMap, CUBE_CROSS_SLOTS, CUBE_FACE_COUNT, CUBE_VERTS_PER_FACE,
 };
 use crate::render::shapes::{self, rect, stroke::FLATTENING_TOLERANCE, Length, Viewport};
 use crate::render::Mesh;
@@ -113,10 +116,45 @@ impl PaintBounds {
     }
 }
 
+/// How a [`Paint::SvgTexture`] paints its surface. Encoded into the
+/// `mapping_kind` field of the paint server's `meta` uniform; `CubeCross`
+/// also drives a mesh-level UV remap because the per-face slot is baked
+/// into the vertex UV at apply time rather than computed in the shader.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TextureMapping {
+    /// Sample the vertex UV as-is — used by every 3D primitive except a
+    /// `<cube cube-map="cross">`.
+    Identity,
+    /// Cube `<cube cube-map="cross">`: each face's `(s, t) ∈ [0, 1]²` is
+    /// remapped into one of the six 4×3 horizontal-cross atlas slots.
+    /// Requires the mesh to be a `tessellate_cube` output: 24 vertices, 4
+    /// per face, in the [`CUBE_FACE_*`](crate::render::shapes::cube)
+    /// declaration order.
+    CubeCross,
+}
+
+impl TextureMapping {
+    fn kind(self) -> u32 {
+        match self {
+            Self::Identity => TEXTURE_MAP_IDENTITY,
+            Self::CubeCross => TEXTURE_MAP_CUBE_CROSS,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) enum Paint {
     Solid([f32; 4]),
     Server(Box<PaintServer>),
+    /// `<svg>` placed in `<defs>` (or anywhere reachable from the document
+    /// root other than the root itself) and referenced as `fill="url(#id)"`
+    /// on a 3D element. The renderer rasterizes the subtree once into a
+    /// texture-array layer and the fragment shader samples the layer at the
+    /// vertex UV. `mapping` selects an optional per-primitive remap.
+    SvgTexture {
+        node_id: NodeId,
+        mapping: TextureMapping,
+    },
 }
 
 impl Paint {
@@ -137,6 +175,43 @@ impl Paint {
                     vertex.paint_id = paint_id;
                 }
             }
+            Self::SvgTexture { node_id, mapping } => {
+                // `meta[1]` carries the defs node's arena index as a
+                // placeholder. The renderer rewrites it to the actual
+                // texture-array layer index after collecting and rasterizing
+                // the referenced subtrees.
+                let mut server = PaintServer::zeroed();
+                server.meta = [PAINT_SVG_TEXTURE, node_id.index() as u32, mapping.kind(), 0];
+                let paint_id = mesh.push_paint_server(server);
+                for vertex in &mut mesh.vertices {
+                    vertex.paint_id = paint_id;
+                }
+                if matches!(mapping, TextureMapping::CubeCross) {
+                    apply_cube_cross_uvs(mesh);
+                }
+            }
+        }
+    }
+}
+
+/// Rewrite the cube's per-face UVs from face-local `[0, 1]²` into the 4×3
+/// horizontal-cross atlas. Assumes the mesh is the unmodified output of
+/// [`crate::render::shapes::cube::tessellate_cube`] — i.e. 24 vertices, 4
+/// per face, in the `CUBE_FACE_*` declaration order. A non-cube mesh that
+/// happens to be 24 vertices long would be misinterpreted, but the paint
+/// resolver only emits `CubeCross` when the consumer element is `<cube>`,
+/// so that mis-pairing can't actually happen at runtime.
+fn apply_cube_cross_uvs(mesh: &mut Mesh) {
+    let expected = CUBE_FACE_COUNT * CUBE_VERTS_PER_FACE as usize;
+    if mesh.vertices.len() != expected {
+        return;
+    }
+    for (face, &(slot_x, slot_y)) in CUBE_CROSS_SLOTS.iter().enumerate() {
+        let base = face * CUBE_VERTS_PER_FACE as usize;
+        for vertex in &mut mesh.vertices[base..base + CUBE_VERTS_PER_FACE as usize] {
+            let s = vertex.uv[0];
+            let t = vertex.uv[1];
+            vertex.uv = [(slot_x as f32 + s) / 4.0, (slot_y as f32 + t) / 3.0];
         }
     }
 }
@@ -164,6 +239,7 @@ impl PaintDefinitions {
         match element.attributes.get("fill").map(String::as_str) {
             Some(value) => self.resolve_paint_value(
                 document,
+                element,
                 value,
                 bounds,
                 viewport,
@@ -189,12 +265,14 @@ impl PaintDefinitions {
         } else {
             1.0
         };
-        self.resolve_paint_value(document, value, bounds, viewport, opacity, None)
+        self.resolve_paint_value(document, element, value, bounds, viewport, opacity, None)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn resolve_paint_value(
         &self,
         document: &Document,
+        consumer: &Element,
         value: &str,
         bounds: PaintBounds,
         viewport: Viewport,
@@ -208,10 +286,15 @@ impl PaintDefinitions {
 
         if let Some(reference) = PaintReference::parse(value) {
             if let Some(definition) = self.definitions(document).get(reference.id) {
-                if let Some(server) =
-                    self.resolve_definition(document, *definition, bounds, viewport, opacity)
-                {
-                    return Some(Paint::Server(Box::new(server)));
+                if let Some(paint) = self.resolve_definition(
+                    document,
+                    *definition,
+                    consumer,
+                    bounds,
+                    viewport,
+                    opacity,
+                ) {
+                    return Some(paint);
                 }
             }
             if reference
@@ -239,29 +322,32 @@ impl PaintDefinitions {
         &self,
         document: &Document,
         definition: PaintDefinition,
+        consumer: &Element,
         bounds: PaintBounds,
         viewport: Viewport,
         opacity: f32,
-    ) -> Option<PaintServer> {
+    ) -> Option<Paint> {
         let node = document.node(definition.node);
         match node.element.kind {
-            ElementKind::LinearGradient => Some(resolve_linear_gradient(
+            ElementKind::LinearGradient => Some(Paint::Server(Box::new(resolve_linear_gradient(
                 document,
                 definition.node,
                 bounds,
                 viewport,
                 opacity,
-            )),
-            ElementKind::RadialGradient => Some(resolve_radial_gradient(
+            )))),
+            ElementKind::RadialGradient => Some(Paint::Server(Box::new(resolve_radial_gradient(
                 document,
                 definition.node,
                 bounds,
                 viewport,
                 opacity,
-            )),
+            )))),
             ElementKind::Pattern => {
                 resolve_pattern(document, definition.node, bounds, viewport, opacity)
+                    .map(|server| Paint::Server(Box::new(server)))
             }
+            ElementKind::Svg => resolve_svg_texture(definition.node, consumer),
             _ => None,
         }
     }
@@ -293,9 +379,47 @@ fn collect_paint_definitions(document: &Document) -> BTreeMap<String, PaintDefin
             }
             continue;
         }
+        // A nested `<svg id="…">` (anywhere other than the document root) is
+        // a texture paint server when referenced via `fill="url(#id)"` on a
+        // 3D primitive. We register it here even in normal 2D mode — there
+        // it's just an unused definition, consistent with an unused
+        // `<linearGradient>`. The root `<svg>` itself is never a definition.
+        if matches!(node.element.kind, ElementKind::Svg) && id != document.root() {
+            if let Some(paint_id) = node.element.attributes.get("id") {
+                definitions
+                    .entry(paint_id.to_owned())
+                    .or_insert(PaintDefinition { node: id });
+            }
+            // Don't descend further — the subtree becomes the texture's own
+            // content, not a sibling paint-server scope.
+            continue;
+        }
         stack.extend(node.children.iter().rev().copied());
     }
     definitions
+}
+
+/// Build a [`Paint::SvgTexture`] for a `<svg>` paint definition referenced
+/// by `consumer`. Reads the consumer's `cube-map` attribute to pick the
+/// per-primitive mapping; non-cube 3D consumers always get
+/// [`TextureMapping::Identity`].
+///
+/// Returns `None` for non-3D consumers — `<svg>`-as-texture is restricted
+/// to 3D primitives in MVP, matching the texture-on-2D scope note in the
+/// plan. The caller then falls through to the SVG paint fallback (the
+/// invalid-fallback colour or `none`).
+fn resolve_svg_texture(node_id: NodeId, consumer: &Element) -> Option<Paint> {
+    let mapping = match consumer.kind {
+        ElementKind::Cube => match resolve_cube_map(consumer) {
+            CubeMap::Same => TextureMapping::Identity,
+            CubeMap::Cross => TextureMapping::CubeCross,
+        },
+        ElementKind::Ellipsoid | ElementKind::Cylinder | ElementKind::Surface => {
+            TextureMapping::Identity
+        }
+        _ => return None,
+    };
+    Some(Paint::SvgTexture { node_id, mapping })
 }
 
 #[derive(Debug, Clone, Copy)]

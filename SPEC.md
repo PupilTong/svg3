@@ -388,6 +388,7 @@ the user coordinate system.
 | `width` | `<length>` | `size` if present, otherwise `0` | Edge length along X. |
 | `height` | `<length>` | `size` if present, otherwise `0` | Edge length along Y. |
 | `depth` | `<length>` | `size` if present, otherwise `0` | Edge length along Z. |
+| `cube-map` | `"same"` \| `"cross"` | `"same"` | Selects how an `<svg>` paint server (§6.1.1) is laid out across the cube's six faces. See §6.1.1 for the per-value mapping. |
 
 A negative value for `'size'`, `'width'`, `'height'`, or `'depth'`
 is an error. The element MUST be rendered as if it had not been
@@ -627,6 +628,46 @@ implementation-defined. Conforming implementations SHOULD apply the
 paint server's two-dimensional paint to the projected surface in a
 manner consistent with that paint server's intent on a comparable
 2D shape; the spec does not further constrain this mapping.
+
+#### 6.1.1 `'svg'` as a paint server
+
+An `'svg'` element that is not the document root MAY be referenced
+by a three-dimensional graphics element's `'fill'` via `url(#…)`. The
+referenced subtree is rasterized once into an intrinsic *content
+rectangle* (its `'viewBox'` if present, otherwise its
+`'width'`/`'height'`) and the resulting raster is sampled across the
+surface using a per-primitive UV mapping:
+
+- `'cube'`: each face's local `(s, t) ∈ [0, 1]²` maps to texture
+  `(u, v)` per the consumer's `'cube-map'` attribute (§5.2):
+  - `"same"` (default) — `(u, v) = (s, t)`; every face shows the
+    whole texture upright.
+  - `"cross"` — `(u, v)` is offset into the face's slot in a 4×3
+    horizontal-cross atlas: `+Y` top, `-X / +Z / +X / -Z` middle
+    row, `-Y` bottom.
+- `'ellipsoid'`: equirectangular — `u = φ / 2π`,
+  `v = (θ + π/2) / π` for latitude `θ ∈ [-π/2, π/2]`, longitude
+  `φ ∈ [0, 2π]`. The longitudinal seam at `φ = 0 / 2π` is exact;
+  the pole pinch is expected.
+- `'cylinder'`: the side wall wraps once (`u = φ / 2π`, `v` from
+  back cap to front cap). The two caps use a polar disk projection:
+  the cap centre maps to texture `(0.5, 0.5)`, the cap rim to the
+  texture edges; the back cap mirrors `x` so the texture reads
+  upright when viewed from behind.
+- `'surface'`: each Bezier patch maps its native parameter
+  `(u, v) ∈ [0, 1]²` directly to the texture. Multi-patch chains
+  tile the texture per patch.
+
+The referenced `'svg'`'s subtree is interpreted in two-dimensional
+mode regardless of the outer document's `'extension'` value; nested
+three-dimensional graphics elements inside the texture have no
+effect. SVG 1.1's transparent-texel semantics apply: a transparent
+pixel in the texture stays transparent on the surface (no implicit
+background).
+
+A two-dimensional graphics element ([SVG11]) that references an
+`'svg'` paint server is not addressed by this edition; the result is
+implementation-defined.
 
 ### 6.2 The `'opacity'` property
 

@@ -2,8 +2,9 @@
 //!
 //! `<cube>` is a three-dimensional graphics element ([SPEC.md](../../SPEC.md)
 //! §5.2). This module turns a parsed `<cube>` [`Element`] into a filled
-//! triangle [`Mesh`] of six rectangular faces (12 triangles, 8 corners) in
-//! the svg3 world coordinate system: +X right, +Y down, +Z toward the viewer
+//! triangle [`Mesh`] of six rectangular faces (12 triangles, 24 vertices —
+//! 4 unique per face so each can carry its own face-local UV) in the svg3
+//! world coordinate system: +X right, +Y down, +Z toward the viewer
 //! ([SPEC.md](../../SPEC.md) §3.1). Unlike the 2D basic shapes, cube
 //! geometry leaves the plane `z = 0`, so the [`Camera`](crate::Camera) is
 //! the natural way to view it; the default orthographic projection collapses
@@ -101,56 +102,179 @@ pub(crate) fn resolve_cube(element: &Element, viewport: Viewport) -> Option<Cube
     })
 }
 
+/// Selects how each face of a `<cube>` samples its texture paint server.
+///
+/// Authored via the `cube-map` attribute (`same` / `cross`); defaults to
+/// `same`. Resolved by [`resolve_cube_map`] and consumed by paint resolution
+/// in [`crate::render::paint`] to populate the
+/// [`crate::render::mesh::PaintServer`] `mapping_kind` / `mapping_aux`
+/// uniform fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CubeMap {
+    /// Every face shows the whole texture, face-local `(s, t)` → `(u, v)`.
+    Same,
+    /// 4×3 horizontal-cross atlas, six faces in distinct slots.
+    Cross,
+}
+
+impl CubeMap {
+    /// Default mapping when the `cube-map` attribute is absent.
+    pub(crate) const fn default() -> Self {
+        Self::Same
+    }
+}
+
+/// Resolve `<cube cube-map="…">` into a [`CubeMap`].
+///
+/// Unknown values fall back to the default per SVG attribute-handling
+/// convention (don't reject the cube — just lose the per-face layout).
+pub(crate) fn resolve_cube_map(element: &Element) -> CubeMap {
+    match element.attributes.get("cube-map").map(|value| value.trim()) {
+        Some(value) if value.eq_ignore_ascii_case("cross") => CubeMap::Cross,
+        _ => CubeMap::default(),
+    }
+}
+
 /// Tessellate a resolved cube into a filled [`Mesh`] of six rectangular faces.
 ///
-/// Produces 8 corner vertices and 36 indices (12 triangles, 2 per face), all
-/// tagged [`KIND_SOLID`] — the fragment shader paints each at full coverage
-/// in the cube's single `fill` colour. Faces are wound counter-clockwise as
-/// seen from outside the cube; future back-face culling can drop the hidden
-/// three with no further change to this tessellator.
+/// Produces **24 vertices** (4 per face) and 36 indices (12 triangles, 2 per
+/// face), all tagged [`KIND_SOLID`] — the fragment shader paints each at full
+/// coverage in the cube's single `fill` colour. Each face carries its own
+/// `(s, t)` UV span in `[0, 1]²` so a texture paint server can sample it
+/// (corners can't be shared because the UV at, say, `(−hx, −hy, +hz)` differs
+/// between the `+Z`, `−X`, and `−Y` faces). Faces are wound counter-clockwise
+/// as seen from outside the cube; future back-face culling can drop the
+/// hidden three with no further change to this tessellator.
 pub(crate) fn tessellate_cube(geo: &CubeGeometry, color: [f32; 4]) -> Mesh {
     let hx = geo.width * 0.5;
     let hy = geo.height * 0.5;
     let hz = geo.depth * 0.5;
 
-    let corner = |sx: f32, sy: f32, sz: f32| Vertex {
-        position: [geo.cx + sx * hx, geo.cy + sy * hy, geo.cz + sz * hz],
-        color,
-        local: [0.0, 0.0],
-        params: [0.0; 4],
-        kind: KIND_SOLID,
-        paint_id: 0,
+    let position = |sx: f32, sy: f32, sz: f32| -> [f32; 3] {
+        [geo.cx + sx * hx, geo.cy + sy * hy, geo.cz + sz * hz]
     };
 
-    // Eight corners. SVG y is down, +Z is toward the viewer, so "top" is the
-    // y < cy half and "front" is the z > cz half.
-    let vertices = vec![
-        corner(-1.0, -1.0, -1.0), // v0: back-left-top
-        corner(1.0, -1.0, -1.0),  // v1: back-right-top
-        corner(1.0, 1.0, -1.0),   // v2: back-right-bottom
-        corner(-1.0, 1.0, -1.0),  // v3: back-left-bottom
-        corner(-1.0, -1.0, 1.0),  // v4: front-left-top
-        corner(1.0, -1.0, 1.0),   // v5: front-right-top
-        corner(1.0, 1.0, 1.0),    // v6: front-right-bottom
-        corner(-1.0, 1.0, 1.0),   // v7: front-left-bottom
-    ];
+    // For each face we list four CCW corners (`+Z` outward etc.) starting
+    // from the bottom-left of the face's own `(s, t)` frame: index 0 →
+    // `(0,0)`, 1 → `(1,0)`, 2 → `(1,1)`, 3 → `(0,1)`. Faces are emitted in
+    // the order documented by the `CUBE_FACE_*` constants.
+    const FACE_UVS: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+    let mut vertices: Vec<Vertex> = Vec::with_capacity(24);
+    let mut indices: Vec<u32> = Vec::with_capacity(36);
+    let mut push_face = |corners: [[f32; 3]; 4]| {
+        let base = vertices.len() as u32;
+        for (corner, uv) in corners.iter().zip(FACE_UVS.iter()) {
+            vertices.push(Vertex {
+                position: *corner,
+                color,
+                local: [0.0, 0.0],
+                params: [0.0; 4],
+                kind: KIND_SOLID,
+                paint_id: 0,
+                uv: *uv,
+            });
+        }
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    };
 
-    // Each face is a quad `(a, b, c, d)` of outward-CCW corners, expanded to
-    // two triangles `(a, b, c)` and `(a, c, d)`. The winding gives each face
-    // an outward normal — verified per face by the cross product of its first
-    // two edges in `outward_facing_winding`.
-    let indices = vec![
-        // Front (+Z): v4, v5, v6, v7
-        4, 5, 6, 4, 6, 7, // Back (-Z): v1, v0, v3, v2
-        1, 0, 3, 1, 3, 2, // Top (-Y, smaller y in SVG): v0, v1, v5, v4
-        0, 1, 5, 0, 5, 4, // Bottom (+Y): v7, v6, v2, v3
-        7, 6, 2, 7, 2, 3, // Left (-X): v0, v4, v7, v3
-        0, 4, 7, 0, 7, 3, // Right (+X): v5, v1, v2, v6
-        5, 1, 2, 5, 2, 6,
-    ];
+    // For each face, the 4 corners are listed in CCW-from-outside order so
+    // the first triangle's cross product points outward, AND they walk the
+    // face's screen-natural (TL → TR → BR → BL) order so the
+    // `FACE_UVS = [(0,0),(1,0),(1,1),(0,1)]` table maps the texture upright
+    // when viewed from the outside-normal direction.
+    //
+    // `+Z` (front), viewer at +Z looking toward -Z; screen-right = +X,
+    // screen-down = +Y (SVG already y-down).
+    push_face([
+        position(-1.0, -1.0, 1.0),
+        position(1.0, -1.0, 1.0),
+        position(1.0, 1.0, 1.0),
+        position(-1.0, 1.0, 1.0),
+    ]);
+    // `-Z` (back), viewer at -Z looking toward +Z; screen-right = -X (the
+    // back of the cube is mirrored from the front), screen-down = +Y.
+    push_face([
+        position(1.0, -1.0, -1.0),
+        position(-1.0, -1.0, -1.0),
+        position(-1.0, 1.0, -1.0),
+        position(1.0, 1.0, -1.0),
+    ]);
+    // `-Y` (top in screen, since SVG y is down), viewer above looking down;
+    // screen-right = +X, screen-down = +Z (forward into the scene).
+    push_face([
+        position(-1.0, -1.0, -1.0),
+        position(1.0, -1.0, -1.0),
+        position(1.0, -1.0, 1.0),
+        position(-1.0, -1.0, 1.0),
+    ]);
+    // `+Y` (bottom in screen), viewer below looking up; screen-right = +X,
+    // screen-down = -Z (back of scene reads as "below" looking up).
+    push_face([
+        position(-1.0, 1.0, 1.0),
+        position(1.0, 1.0, 1.0),
+        position(1.0, 1.0, -1.0),
+        position(-1.0, 1.0, -1.0),
+    ]);
+    // `-X` (left), viewer on the -X side looking toward +X; screen-right =
+    // +Z (front of scene reads to the right from this viewpoint),
+    // screen-down = +Y.
+    push_face([
+        position(-1.0, -1.0, -1.0),
+        position(-1.0, -1.0, 1.0),
+        position(-1.0, 1.0, 1.0),
+        position(-1.0, 1.0, -1.0),
+    ]);
+    // `+X` (right), viewer on the +X side looking toward -X; screen-right =
+    // -Z, screen-down = +Y.
+    push_face([
+        position(1.0, -1.0, 1.0),
+        position(1.0, -1.0, -1.0),
+        position(1.0, 1.0, -1.0),
+        position(1.0, 1.0, 1.0),
+    ]);
 
     Mesh::new(vertices, indices)
 }
+
+/// Face index in the order `tessellate_cube` emits faces. Used by the
+/// paint resolver to pack the cube-cross atlas slot into each face's UV
+/// span before the GPU buffer is built.
+///
+/// Order: `+Z` (front), `-Z` (back), `-Y` (top), `+Y` (bottom),
+/// `-X` (left), `+X` (right).
+pub(crate) const CUBE_FACE_COUNT: usize = 6;
+pub(crate) const CUBE_FACE_PLUS_Z: usize = 0;
+pub(crate) const CUBE_FACE_MINUS_Z: usize = 1;
+pub(crate) const CUBE_FACE_MINUS_Y: usize = 2;
+pub(crate) const CUBE_FACE_PLUS_Y: usize = 3;
+pub(crate) const CUBE_FACE_MINUS_X: usize = 4;
+pub(crate) const CUBE_FACE_PLUS_X: usize = 5;
+
+/// `(slot_x, slot_y)` of each face in the 4×3 horizontal-cross atlas:
+///
+/// ```text
+///   .  +Y  .  .
+///  -X  +Z +X -Z
+///   .  -Y  .  .
+/// ```
+///
+/// Indexed by the `CUBE_FACE_*` constants above.
+pub(crate) const CUBE_CROSS_SLOTS: [(u32, u32); CUBE_FACE_COUNT] = {
+    let mut slots = [(0, 0); CUBE_FACE_COUNT];
+    slots[CUBE_FACE_PLUS_Z] = (1, 1);
+    slots[CUBE_FACE_MINUS_Z] = (3, 1);
+    slots[CUBE_FACE_MINUS_Y] = (1, 0);
+    slots[CUBE_FACE_PLUS_Y] = (1, 2);
+    slots[CUBE_FACE_MINUS_X] = (0, 1);
+    slots[CUBE_FACE_PLUS_X] = (2, 1);
+    slots
+};
+
+/// Per-face vertex range emitted by [`tessellate_cube`]: face `i` owns
+/// `vertices[i * 4 .. (i + 1) * 4]`. Helper for the paint resolver, which
+/// remaps each face's UVs into the cube-cross atlas slot when
+/// `cube-map="cross"`.
+pub(crate) const CUBE_VERTS_PER_FACE: u32 = 4;
 
 /// Parse a named SVG length attribute into a [`Length`], without resolving it
 /// against any basis. Returns `None` for an absent or unparseable value.
@@ -349,7 +473,27 @@ mod tests {
     }
 
     #[test]
-    fn tessellate_cube_has_eight_corners_and_twelve_triangles() {
+    fn resolve_cube_map_defaults_to_same_and_recognises_cross() {
+        assert_eq!(resolve_cube_map(&cube(&[])), CubeMap::Same);
+        assert_eq!(
+            resolve_cube_map(&cube(&[("cube-map", "same")])),
+            CubeMap::Same
+        );
+        assert_eq!(
+            resolve_cube_map(&cube(&[("cube-map", "cross")])),
+            CubeMap::Cross
+        );
+        // Unknown values fall back to the default rather than rejecting the
+        // cube — matches SVG's general "ignore unknown attribute value"
+        // convention.
+        assert_eq!(
+            resolve_cube_map(&cube(&[("cube-map", "unknown")])),
+            CubeMap::Same
+        );
+    }
+
+    #[test]
+    fn tessellate_cube_has_twenty_four_corners_and_twelve_triangles() {
         let geo = CubeGeometry {
             cx: 50.0,
             cy: 50.0,
@@ -359,9 +503,13 @@ mod tests {
             depth: 20.0,
         };
         let mesh = tessellate_cube(&geo, [0.0, 0.0, 1.0, 1.0]);
-        assert_eq!(mesh.vertices.len(), 8);
+        // 4 vertices per face × 6 faces, so the per-face UVs can differ.
+        assert_eq!(mesh.vertices.len(), 24);
         assert_eq!(mesh.indices.len(), 36);
-        assert!(mesh.indices.iter().all(|&i| (i as usize) < 8));
+        assert!(mesh
+            .indices
+            .iter()
+            .all(|&i| (i as usize) < mesh.vertices.len()));
         for v in &mesh.vertices {
             assert_eq!(v.color, [0.0, 0.0, 1.0, 1.0]);
             assert_eq!(v.kind, KIND_SOLID);
@@ -371,6 +519,33 @@ mod tests {
             assert!((v.position[1] - 50.0).abs() - 10.0 < 1e-4);
             assert!(v.position[2].abs() - 10.0 < 1e-4);
         }
+    }
+
+    #[test]
+    fn tessellate_cube_emits_each_face_uv_corner_once() {
+        let geo = CubeGeometry {
+            cx: 0.0,
+            cy: 0.0,
+            cz: 0.0,
+            width: 2.0,
+            height: 2.0,
+            depth: 2.0,
+        };
+        let mesh = tessellate_cube(&geo, [1.0; 4]);
+        // Each face contributes exactly the four UV corners (0,0)/(1,0)/
+        // (1,1)/(0,1); 6 faces × 4 unique UVs = the same multiset of 24.
+        let mut uv_counts = [0u32; 4];
+        for v in &mesh.vertices {
+            let slot = match (v.uv[0], v.uv[1]) {
+                (u, vv) if u == 0.0 && vv == 0.0 => 0,
+                (u, vv) if u == 1.0 && vv == 0.0 => 1,
+                (u, vv) if u == 1.0 && vv == 1.0 => 2,
+                (u, vv) if u == 0.0 && vv == 1.0 => 3,
+                other => panic!("unexpected uv corner {other:?}"),
+            };
+            uv_counts[slot] += 1;
+        }
+        assert_eq!(uv_counts, [6, 6, 6, 6]);
     }
 
     #[test]
@@ -384,7 +559,7 @@ mod tests {
             depth: 8.0,
         };
         let mesh = tessellate_cube(&geo, [1.0; 4]);
-        // The 8 corners are the Cartesian product of half-extent offsets.
+        // The 24 corners are 4 copies of each of the 8 unit-cube corners.
         // The centroid of the corners equals the cube centre.
         let mut sum = [0.0f32; 3];
         for v in &mesh.vertices {
@@ -414,7 +589,7 @@ mod tests {
         };
         let mesh = tessellate_cube(&geo, [1.0; 4]);
         // The 12 triangles come in 6 face-pairs; check one triangle per face.
-        for face in 0..6 {
+        for face in 0..CUBE_FACE_COUNT {
             let i = face * 6;
             let a = mesh.vertices[mesh.indices[i] as usize].position;
             let b = mesh.vertices[mesh.indices[i + 1] as usize].position;

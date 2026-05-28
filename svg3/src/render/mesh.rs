@@ -7,15 +7,17 @@
 //! analytic, anti-aliased coverage for the curved primitives.
 
 /// Vertex buffer layout: object-space position, linear RGBA colour, the
-/// shape-local SDF coordinate, the SDF parameters, the shape-kind tag, and
-/// a paint-server index.
-pub(crate) const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
+/// shape-local SDF coordinate, the SDF parameters, the shape-kind tag, a
+/// paint-server index, and the surface-local UV that texture paint servers
+/// sample at.
+pub(crate) const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 7] = wgpu::vertex_attr_array![
     0 => Float32x3,
     1 => Float32x4,
     2 => Float32x2,
     3 => Float32x4,
     4 => Uint32,
     5 => Uint32,
+    6 => Float32x2,
 ];
 
 /// A single GPU vertex.
@@ -27,7 +29,9 @@ pub(crate) const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 6] = wgpu::vertex_at
 /// Solid triangle geometry tags `kind` as `KIND_SOLID` and leaves
 /// `local`/`params` zeroed — see the `KIND_*` constants in the `shapes`
 /// modules. `paint_id == 0` means "use `color` directly"; non-zero ids index
-/// the mesh's paint-server list.
+/// the mesh's paint-server list. `uv` is the surface-local `(u, v)` that
+/// `PAINT_SVG_TEXTURE` paint servers sample at; 2D shapes carry `[0, 0]`
+/// because their paint kinds never branch into the texture sampler.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Vertex {
@@ -44,6 +48,9 @@ pub struct Vertex {
     pub kind: u32,
     /// Paint-server index; `0` is the inline solid [`Vertex::color`].
     pub paint_id: u32,
+    /// Surface-local `(u, v)` for `PAINT_SVG_TEXTURE` paint servers.
+    /// Unused (and `[0, 0]`) on 2D shapes.
+    pub uv: [f32; 2],
 }
 
 /// Maximum number of `<stop>` children evaluated for one gradient paint.
@@ -57,6 +64,20 @@ pub(crate) const MAX_PATTERN_ITEMS: usize = 8;
 pub(crate) const PAINT_LINEAR_GRADIENT: u32 = 1;
 pub(crate) const PAINT_RADIAL_GRADIENT: u32 = 2;
 pub(crate) const PAINT_PATTERN: u32 = 3;
+/// `<svg>` placed in `<defs>` used as a paint server: the renderer rasterizes
+/// the subtree into an offscreen texture layer and the fragment stage samples
+/// it at the vertex `uv`. `meta = [PAINT_SVG_TEXTURE, layer_index,
+/// mapping_kind, mapping_aux]` — `mapping_kind` selects the per-primitive
+/// remap (e.g. cube-cross), and `mapping_aux` carries optional parameters.
+pub(crate) const PAINT_SVG_TEXTURE: u32 = 4;
+
+/// `mapping_kind` value: identity — sample `uv` as-is. Used by `<cube
+/// cube-map="same">`, `<ellipsoid>`, `<cylinder>`, and `<surface>`.
+pub(crate) const TEXTURE_MAP_IDENTITY: u32 = 0;
+/// `mapping_kind` value: 4×3 horizontal-cross atlas. Each cube face's
+/// face-local `(s, t)` is remapped into one of the six atlas slots — top
+/// row `+Y`, middle row `-X / +Z / +X / -Z`, bottom row `-Y`.
+pub(crate) const TEXTURE_MAP_CUBE_CROSS: u32 = 1;
 
 /// GPU representation of a referenced SVG paint server.
 ///
@@ -146,12 +167,12 @@ mod tests {
     #[test]
     fn vertex_layout_is_tightly_packed() {
         // position(3) + color(4) + local(2) + params(4) + kind(1) +
-        // paint_id(1): fifteen
+        // paint_id(1) + uv(2): seventeen
         // 4-byte fields, no padding — the `vertex_attr_array!` offsets in
         // `VERTEX_ATTRIBUTES` assume exactly this tight `#[repr(C)]` layout.
         assert_eq!(
             std::mem::size_of::<Vertex>(),
-            15 * std::mem::size_of::<f32>()
+            17 * std::mem::size_of::<f32>()
         );
     }
 

@@ -444,16 +444,39 @@ fn bezier3(p: &[[f32; 3]; 4], t: f32) -> [f32; 3] {
 /// tagged [`KIND_SOLID`]. The mesh is the union of the sweep-chain
 /// grid (if present) and every Coons-patch mesh, each triangulated
 /// as a strip of quads.
+///
+/// Surface UVs are the *patch-local* `(u, v)` parameters: each patch (a
+/// single sweep step or one Coons patch) covers `[0, 1]²` of the texture
+/// independently, so chained patches tile the texture across the chain.
 pub(crate) fn tessellate_surface(geo: &SurfaceGeometry, color: [f32; 4]) -> Mesh {
     let mut vertices: Vec<Vertex> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
 
     if let Some(sweep) = &geo.sweep {
+        // The sweep-chain grid stacks one patch after another along the
+        // row axis: each patch contributes `PATCH_SAMPLES - 1` rows
+        // (the seed row plus `K · (PATCH_SAMPLES - 1)` interior rows for
+        // `K` patches). The first row is the chain's seed, then every
+        // subsequent group of `PATCH_SAMPLES - 1` rows is one patch.
+        // Patch-local `v` walks `0 → 1` across each patch's rows; `u`
+        // walks `0 → 1` across the columns.
+        let total_rows = sweep.total_rows as usize;
+        let cols = sweep.cols as usize;
+        let mut row_v: Vec<f32> = Vec::with_capacity(total_rows);
+        row_v.push(0.0);
+        let step = ((PATCH_SAMPLES - 1) as f32).recip();
+        let mut row = 1;
+        while row < total_rows {
+            let local = ((row - 1) % (PATCH_SAMPLES - 1) as usize) + 1;
+            row_v.push(local as f32 * step);
+            row += 1;
+        }
         triangulate_grid(
             &sweep.grid,
             sweep.total_rows,
             sweep.cols,
             color,
+            |row, col| [col as f32 / (cols.max(2) as f32 - 1.0), row_v[row as usize]],
             &mut vertices,
             &mut indices,
         );
@@ -461,11 +484,13 @@ pub(crate) fn tessellate_surface(geo: &SurfaceGeometry, color: [f32; 4]) -> Mesh
 
     for mesh in &geo.coons_meshes {
         let dim = mesh.samples + 1;
+        let scale = mesh.samples.max(1) as f32;
         triangulate_grid(
             &mesh.positions,
             dim,
             dim,
             color,
+            |row, col| [col as f32 / scale, row as f32 / scale],
             &mut vertices,
             &mut indices,
         );
@@ -478,12 +503,14 @@ pub(crate) fn tessellate_surface(geo: &SurfaceGeometry, color: [f32; 4]) -> Mesh
 /// [`KIND_SOLID`] vertices plus two-triangles-per-cell indices to
 /// `vertices`/`indices`. The new triangles index into vertices from
 /// `vertices.len()` as the base, so concatenating multiple grids
-/// works without renumbering.
+/// works without renumbering. `uv_for` returns the per-vertex texture
+/// `(u, v)` for the cell at `(row, col)`.
 fn triangulate_grid(
     grid: &[[f32; 3]],
     rows: u32,
     cols: u32,
     color: [f32; 4],
+    uv_for: impl Fn(u32, u32) -> [f32; 2],
     vertices: &mut Vec<Vertex>,
     indices: &mut Vec<u32>,
 ) {
@@ -491,7 +518,9 @@ fn triangulate_grid(
         return;
     }
     let base = vertices.len() as u32;
-    for &p in grid {
+    for (i, &p) in grid.iter().enumerate() {
+        let row = (i as u32) / cols;
+        let col = (i as u32) % cols;
         vertices.push(Vertex {
             position: p,
             color,
@@ -499,6 +528,7 @@ fn triangulate_grid(
             params: [0.0; 4],
             kind: KIND_SOLID,
             paint_id: 0,
+            uv: uv_for(row, col),
         });
     }
     for row in 0..rows - 1 {

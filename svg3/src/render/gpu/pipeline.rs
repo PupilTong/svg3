@@ -21,14 +21,28 @@ use super::clear::DEPTH_FORMAT;
 /// order resolves through the depth test, while leaving 3D content's
 /// world Z untouched for spatial occlusion per
 /// [SPEC.md](../../../../SPEC.md) §7.3.
+///
+/// The pipeline layout is fixed at *two* bind groups:
+/// - **group(0)**: the transform uniform + the paint-server storage buffer
+///   (shape geometry's per-document data).
+/// - **group(1)**: the SVG-texture array + its sampler. Even when no
+///   `<defs><svg>` is referenced, the renderer binds a 1×1 transparent
+///   layer here so the layout is invariant to document content.
 pub(super) fn build_pipeline(
     device: &wgpu::Device,
     format: wgpu::TextureFormat,
-) -> wgpu::RenderPipeline {
+) -> (wgpu::RenderPipeline, wgpu::BindGroupLayout) {
     let shader = device.create_shader_module(wgpu::include_wgsl!("../shaders/shader.wgsl"));
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+    let shape_layout = build_shape_bind_group_layout(device);
+    let texture_layout = build_shape_texture_bind_group_layout(device);
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("svg3 shape pipeline layout"),
+        bind_group_layouts: &[Some(&shape_layout), Some(&texture_layout)],
+        immediate_size: 0,
+    });
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("svg3 shape pipeline"),
-        layout: None,
+        layout: Some(&pipeline_layout),
         vertex: wgpu::VertexState {
             module: &shader,
             entry_point: Some("vs_main"),
@@ -60,6 +74,66 @@ pub(super) fn build_pipeline(
         }),
         multiview_mask: None,
         cache: None,
+    });
+    (pipeline, texture_layout)
+}
+
+/// `group(0)`: transform uniform + paint-server storage buffer. Carved out
+/// of an explicit layout (rather than the previous
+/// `pipeline.get_bind_group_layout(0)` approach) so the texture binding can
+/// live in `group(1)` with its own layout.
+fn build_shape_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("svg3 shape transform/paint bind group layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ],
+    })
+}
+
+/// `group(1)`: 2D-array texture + sampler the fragment shader uses to
+/// resolve `PAINT_SVG_TEXTURE` paint references. Layered so a single bind
+/// group serves any number of distinct `<defs><svg>` textures.
+fn build_shape_texture_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("svg3 shape texture bind group layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2Array,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
     })
 }
 

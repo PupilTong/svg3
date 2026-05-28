@@ -1450,6 +1450,115 @@ fn cases() -> Vec<Case> {
             c.eye.y -= 30.0;
             c
         }),
+        // ---- SVG textures on 3D primitives ----
+        //
+        // A `<defs><svg id="…">` referenced by a 3D primitive's
+        // `fill="url(#id)"` rasterizes once into a texture layer and the
+        // 3D fragment shader samples it across the surface per the
+        // primitive's UV mapping (SPEC §6.1). These cases exercise the
+        // four primitive UV layouts plus the cube-map atlas and the
+        // shared-texture dedup invariant.
+
+        // `cube` + `cube-map="same"`: every face shows the same asymmetric
+        // composition (top-left yellow + bottom-right red on a navy
+        // ground). Viewed through the perspective camera so each of the
+        // three visible faces is identifiable.
+        Case::square(
+            "cube-textured-same",
+            r##"<svg extension="pupiltong" width="100" height="100"><defs><svg id="tex" viewBox="0 0 100 100"><rect width="100" height="100" fill="#13294b"/><rect width="50" height="50" fill="#f2c14e"/><circle cx="75" cy="75" r="20" fill="#c14b2b"/></svg></defs><rect width="100%" height="100%" fill="#202b3a"/><cube cx="50" cy="50" cz="0" size="40" fill="url(#tex)"/></svg>"##,
+        )
+        .with_camera({
+            let mut c = Camera::facing(100, 100);
+            c.eye.x += 60.0;
+            c
+        }),
+        // `cube` + `cube-map="cross"`: the same texture authored as a 4×3
+        // horizontal-cross atlas (six distinct face contents). The +Z
+        // face slot at row 1 col 1 carries a yellow disc, the +Y bottom
+        // slot at row 2 col 1 is red, so the camera-angled view shows
+        // each face's region separately.
+        Case::square(
+            "cube-textured-cross",
+            r##"<svg extension="pupiltong" width="100" height="100"><defs><svg id="atlas" viewBox="0 0 400 300"><rect width="400" height="300" fill="#202b3a"/><rect x="0" y="100" width="100" height="100" fill="#5e3023"/><rect x="100" y="100" width="100" height="100" fill="#f2c14e"/><rect x="200" y="100" width="100" height="100" fill="#3a7d44"/><rect x="300" y="100" width="100" height="100" fill="#1d3557"/><rect x="100" y="0" width="100" height="100" fill="#c14b2b"/><rect x="100" y="200" width="100" height="100" fill="#7d4cdb"/></svg></defs><rect width="100%" height="100%" fill="#13294b"/><cube cx="50" cy="50" cz="0" size="40" fill="url(#atlas)" cube-map="cross"/></svg>"##,
+        )
+        .with_camera({
+            let mut c = Camera::facing(100, 100);
+            c.eye.x += 60.0;
+            c
+        }),
+        // `<ellipsoid>`: equirectangular UV wrap. The texture's vertical
+        // gradient bands show the longitudinal seam stays clean and the
+        // latitudinal pinch at the poles is bounded.
+        Case::square(
+            "ellipsoid-textured",
+            r##"<svg extension="pupiltong" width="100" height="100"><defs><svg id="tex" viewBox="0 0 100 100"><rect width="100" height="50" fill="#f2c14e"/><rect y="50" width="100" height="50" fill="#c14b2b"/><circle cx="50" cy="50" r="14" fill="#13294b"/></svg></defs><rect width="100%" height="100%" fill="#202b3a"/><ellipsoid cx="50" cy="50" cz="0" r="30" fill="url(#tex)"/></svg>"##,
+        )
+        .with_camera({
+            let mut c = Camera::facing(100, 100);
+            c.eye.x += 40.0;
+            c
+        }),
+        // `<cylinder>`: side wall wrap + cap polar-disk projection. The
+        // texture's left/right colour split reads as a longitudinal seam
+        // around the side wall, and the cap-centre disc appears on the
+        // visible front cap.
+        Case::square(
+            "cylinder-textured",
+            r##"<svg extension="pupiltong" width="100" height="100"><defs><svg id="tex" viewBox="0 0 100 100"><rect width="50" height="100" fill="#3a7d44"/><rect x="50" width="50" height="100" fill="#c14b2b"/><circle cx="50" cy="50" r="22" fill="#f2c14e"/></svg></defs><rect width="100%" height="100%" fill="#13294b"/><cylinder cx="50" cy="50" cz="0" r="24" depth="42" fill="url(#tex)"/></svg>"##,
+        )
+        .with_camera({
+            let mut c = Camera::facing(100, 100);
+            c.eye.x += 60.0;
+            c
+        }),
+        // `<surface>`: a single ruled patch maps the whole texture across
+        // its `(u, v)` parameter. Two parallel cross-sections lift the
+        // sweep into 3D so the perspective camera sees the texture warped
+        // across the patch.
+        Case::square(
+            "surface-textured",
+            r##"<svg extension="pupiltong" width="100" height="100"><defs><svg id="tex" viewBox="0 0 100 100"><rect width="100" height="100" fill="#13294b"/><rect width="50" height="50" fill="#f2c14e"/><rect x="50" y="50" width="50" height="50" fill="#c14b2b"/></svg></defs><rect width="100%" height="100%" fill="#202b3a"/><surface d="M 0 L 1" fill="url(#tex)"><path d="M 20 20 L 80 20 L 80 80 L 20 80"/><path d="M 20 20 L 80 20 L 80 80 L 20 80" transform="translate3d(15, 0, 40)"/></surface></svg>"##,
+        )
+        .with_camera({
+            let mut c = Camera::facing(100, 100);
+            c.eye.x += 60.0;
+            c
+        }),
+        // Transparent texels on the `<svg>` texture stay transparent on
+        // the surface (no implicit background): the dark blue scene
+        // background is visible *through* the disc-shaped opaque region's
+        // surround, and `<cube>` faces only colour where the texture
+        // itself is opaque.
+        Case::square(
+            "texture-transparent-pixels",
+            r##"<svg extension="pupiltong" width="100" height="100"><defs><svg id="tex" viewBox="0 0 100 100"><circle cx="50" cy="50" r="32" fill="#f2c14e"/></svg></defs><rect width="100%" height="100%" fill="#13294b"/><cube cx="50" cy="50" cz="0" size="40" fill="url(#tex)"/></svg>"##,
+        )
+        .with_camera({
+            let mut c = Camera::facing(100, 100);
+            c.eye.x += 60.0;
+            c
+        }),
+        // The same texture referenced by both a `<cube>` and an
+        // `<ellipsoid>` — they share one rasterized layer
+        // (`TextureStore::layer_count == 1` is asserted directly in the
+        // unit suite). Visually, both primitives show the same composition.
+        Case::square(
+            "texture-shared-across-shapes",
+            r##"<svg extension="pupiltong" width="100" height="100"><defs><svg id="tex" viewBox="0 0 100 100"><rect width="100" height="100" fill="#13294b"/><circle cx="50" cy="50" r="34" fill="#f2c14e"/></svg></defs><rect width="100%" height="100%" fill="#202b3a"/><cube cx="32" cy="50" cz="0" size="28" fill="url(#tex)"/><ellipsoid cx="72" cy="50" cz="0" r="16" fill="url(#tex)"/></svg>"##,
+        )
+        .with_camera({
+            let mut c = Camera::facing(100, 100);
+            c.eye.x += 60.0;
+            c
+        }),
+        // No `extension="pupiltong"` on the root: the `<cube>` is gated
+        // off (SPEC §2.2), so neither it nor the texture rasterize fire;
+        // only the background `<rect>` paints.
+        Case::square(
+            "texture-in-non-pupiltong-mode",
+            r##"<svg width="100" height="100"><defs><svg id="tex" viewBox="0 0 100 100"><rect width="100" height="100" fill="#f2c14e"/></svg></defs><rect width="100%" height="100%" fill="#13294b"/><cube cx="50" cy="50" cz="0" size="40" fill="url(#tex)"/></svg>"##,
+        ),
+
         // ---- 3D crab character ----
         //
         // Three progressive cases that build the same character out of
