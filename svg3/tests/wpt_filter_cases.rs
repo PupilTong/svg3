@@ -5,8 +5,8 @@
 //! validate svg3's documented approximation (e.g. `BackgroundImage` ≈
 //! `SourceGraphic` until enable-background capture lands) rather than the
 //! browser-perfect WPT pixel reference; the test comment calls that out
-//! explicitly. The approximations will tighten as the mask /
-//! enable-background subsystems land, without changing the test surface.
+//! explicitly. The approximations will tighten as enable-background capture
+//! lands, without changing the test surface.
 //! The pixel probes intentionally overlap `filter.rs`: this binary preserves
 //! the WPT lineage for each migrated case, and the GPU adapter is shared
 //! across tests via `OnceLock<Mutex<Renderer>>` so they self-skip cleanly on
@@ -944,8 +944,8 @@ fn wpt_svg_svg_in_svg_circular_filter_reference_crash_passes() {
 
 // ---- Genuinely out-of-scope for this milestone -----------------------------
 //
-// These WPT cases require subsystems svg3 does not yet host fully (masks,
-// browser-hosted foreignObject, SMIL, browser-frame).
+// These WPT cases require subsystems svg3 does not yet host fully (advanced
+// mask features, browser-hosted foreignObject, SMIL, browser-frame).
 // Migrating them is tracked as separate work; they remain as ignored
 // placeholders so the gap is visible in `cargo test -- --ignored` output.
 
@@ -1222,10 +1222,8 @@ fn wpt_svg_import_filters_overview_03_b_manual_passes() {
         "radialGradient-filled circle + filter should produce visible output, got {centre:?}"
     );
 }
-/// `<mask>` + filter. svg3 parses `<mask>` as a definition (skipped at
-/// render time) and `mask="url(#m)"` references resolve to no-op masking
-/// (mask = identity). The filter still applies. Mask semantics will tighten
-/// when the mask render pass is wired up.
+/// `<mask>` + filter. A white luminance mask reveals the filtered subtree, so
+/// the colour-matrix output remains visible at the centre.
 #[test]
 fn wpt_svg_import_masking_filter_01_f_manual_passes() {
     let Some(renderer) = renderer() else {
@@ -1237,7 +1235,7 @@ fn wpt_svg_import_masking_filter_01_f_manual_passes() {
     );
     let centre = image.pixel(32, 32);
     // The colour-matrix forces output to pure green (RGBA = 0,1,0,1) on the
-    // filtered subtree. With mask treated as identity, the centre is green.
+    // filtered subtree, and the white mask reveals it.
     assert_green(centre);
 }
 /// `svg/styling/svg-filter-render-*` is a family of WPTs that check browser

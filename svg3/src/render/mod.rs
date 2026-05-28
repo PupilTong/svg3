@@ -7,10 +7,15 @@
 //! `<ellipse>`, `<polygon>`, `<polyline>`, `<line>`, `<path>`), SVG paint
 //! servers (`<linearGradient>`, `<radialGradient>`, `<pattern>`, `<stop>`),
 //! svg3's 3D `<cube>`, `<ellipsoid>`, `<cylinder>`, and `<surface>` primitives
-//! when the root has `extension="pupiltong"`, plus
-//! referenced `<filter>` elements composed from a multi-primitive chain
-//! executed end-to-end on the GPU. [`Renderer::encode_document`] is the
-//! single GPU entry point; both render paths are built on top of it:
+//! when the root has `extension="pupiltong"`, referenced `<filter>` elements
+//! composed from a multi-primitive chain executed end-to-end on the GPU, and
+//! referenced `<clipPath>` / `<mask>` definitions rendered through GPU
+//! alpha/luminance mask passes. `clipPathUnits`, `maskUnits`, and
+//! `maskContentUnits` currently use the default user-space behavior only;
+//! nested filter / clip / mask references inside definitions are flattened
+//! as raw geometry.
+//! [`Renderer::encode_document`] is the single
+//! GPU entry point; both render paths are built on top of it:
 //! [`Renderer::render_to_image`] wraps it with offscreen-texture allocation
 //! and CPU readback to produce an [`Image`]; a windowed caller wraps it with
 //! surface acquisition and present.
@@ -25,8 +30,8 @@
 //!   submodule per element kind.
 //! - [`paint`] — paint server definition / reference resolution
 //!   (`<linearGradient>`, `<radialGradient>`, `<pattern>`).
-//! - [`filters`] — `<filter>` definition resolution into a primitive chain
-//!   plus the `<clipPath>` resolver.
+//! - [`filters`] — `<filter>` definition resolution into a primitive chain,
+//!   plus `<clipPath>` and `<mask>` reference resolution.
 //! - [`scene`] — walks the document and produces a render plan (the painter-
 //!   order mesh / filter operations the GPU executes).
 //! - [`gpu`] — wgpu pipelines and the [`Renderer`] that drives them.

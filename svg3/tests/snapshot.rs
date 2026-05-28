@@ -1185,6 +1185,25 @@ fn cases() -> Vec<Case> {
             "filter-primitive-subregion",
             r##"<svg><rect width="100%" height="100%" fill="#13294b"/><filter id="f" x="0" y="0" width="100" height="100"><feFlood flood-color="#11aa55" x="30" y="30" width="40" height="40"/></filter><rect width="100" height="100" fill="white" filter="url(#f)"/></svg>"##,
         ),
+        // Unfiltered clip-path: the referenced path is rendered into an
+        // alpha mask, so arbitrary supported clip geometry clips the source
+        // even without a filter.
+        Case::square(
+            "clip-path-path-alpha",
+            r##"<svg><defs><clipPath id="wedge"><path d="M 18 18 H 82 L 50 82 Z"/></clipPath></defs><rect width="100%" height="100%" fill="#13294b"/><rect x="12" y="12" width="76" height="76" fill="#f2c14e" clip-path="url(#wedge)"/></svg>"##,
+        ),
+        // SVG masks default to luminance: white mask pixels reveal the source
+        // and black mask pixels hide it.
+        Case::square(
+            "mask-luminance",
+            r##"<svg><defs><mask id="m"><rect x="18" y="18" width="64" height="64" fill="black"/><circle cx="50" cy="50" r="28" fill="white"/></mask></defs><rect width="100%" height="100%" fill="#13294b"/><rect x="18" y="18" width="64" height="64" fill="#c14b2b" mask="url(#m)"/></svg>"##,
+        ),
+        // `mask-type="alpha"` uses alpha directly, so black opaque mask
+        // geometry reveals instead of hiding by luminance.
+        Case::square(
+            "mask-alpha-type",
+            r##"<svg><defs><mask id="m" mask-type="alpha"><rect x="24" y="24" width="52" height="52" fill="black"/></mask></defs><rect width="100%" height="100%" fill="#13294b"/><circle cx="50" cy="50" r="34" fill="#2563eb" mask="url(#m)"/></svg>"##,
+        ),
         // SVG 2 render order: `clip-path` applies BEFORE the filter. The
         // rect is clipped to the inner clip rect, then the color-matrix
         // filter turns the surviving region red — outside the clip stays

@@ -3,10 +3,10 @@
 //! The [`Renderer`] owns and caches the wgpu device, queue, render pipelines
 //! and bind-group layouts. It exposes one unified document encoder,
 //! [`Renderer::encode_document`], which walks a parsed document, tessellates
-//! every supported shape, applies referenced filter chains via offscreen GPU
-//! passes, and composites them into a caller-owned target view through a
-//! caller-owned command encoder. The two render entry points are built on
-//! top of it:
+//! every supported shape, applies referenced clip-paths, masks, and filter
+//! chains via offscreen GPU passes, and composites them into a caller-owned
+//! target view through a caller-owned command encoder. The two render entry
+//! points are built on top of it:
 //!
 //! - [`Renderer::render_to_image`] drives the headless path — it allocates
 //!   the offscreen sRGB texture, clears it, calls `encode_document`, then
@@ -29,10 +29,10 @@ use wgpu::util::DeviceExt;
 
 use crate::dom::Document;
 use crate::render::filters::{
-    FilterImage, FilterPrimitive, FilterPrimitiveKind, Merge, PrimitiveSubregion,
+    FilterImage, FilterPrimitive, FilterPrimitiveKind, MaskMode, Merge, PrimitiveSubregion,
 };
 use crate::render::mesh::PaintServer;
-use crate::render::scene::{build_render_plan, RenderOp, ViewportClip};
+use crate::render::scene::{build_render_plan, MaskRender, RenderOp, ViewportClip};
 use crate::render::{document_viewport, Mesh, RenderConfig, Viewport};
 
 use super::clear::{clear_depth, clear_target, DepthTexture, DEPTH_FORMAT};
@@ -45,11 +45,11 @@ use super::pipeline::{
 };
 use super::readback::{read_back, Image};
 use super::uniforms::{
-    blend_uniform, color_matrix_uniform, component_transfer_uniform, convolve_uniform,
-    displacement_uniform, drop_shadow_alpha_uniform, fe_composite_uniform, flood_uniform,
-    lighting_uniform, morphology_uniform, offset_uniform, resolve_input, resolve_input_uv,
-    subregion_clip_uniform, tile_uniform, turbulence_uniform, viewport_clip_uniform, FilterUniform,
-    ImageUniform, TransformUniform,
+    alpha_mask_uniform, blend_uniform, color_matrix_uniform, component_transfer_uniform,
+    convolve_uniform, displacement_uniform, drop_shadow_alpha_uniform, fe_composite_uniform,
+    flood_uniform, lighting_uniform, morphology_uniform, offset_uniform, resolve_input,
+    resolve_input_uv, subregion_clip_uniform, tile_uniform, turbulence_uniform,
+    viewport_clip_uniform, FilterUniform, ImageUniform, TransformUniform,
 };
 
 /// Texture format the headless renderer draws into. sRGB-encoded so linear
@@ -116,6 +116,7 @@ pub struct Renderer {
     fe_composite_pipeline: wgpu::RenderPipeline,
     merge_step_pipeline: wgpu::RenderPipeline,
     tile_pipeline: wgpu::RenderPipeline,
+    alpha_mask_pipeline: wgpu::RenderPipeline,
     subregion_clip_pipeline: wgpu::RenderPipeline,
     viewport_clip_pipeline: wgpu::RenderPipeline,
     filter_sampler: wgpu::Sampler,
@@ -312,6 +313,15 @@ impl Renderer {
             None,
             None,
         );
+        let alpha_mask_pipeline = build_filter_pipeline(
+            &device,
+            format,
+            &filter_bind_group_layout,
+            "svg3 alpha mask pipeline",
+            "fs_alpha_mask",
+            None,
+            None,
+        );
         let subregion_clip_pipeline = build_filter_pipeline(
             &device,
             format,
@@ -390,6 +400,7 @@ impl Renderer {
             fe_composite_pipeline,
             merge_step_pipeline,
             tile_pipeline,
+            alpha_mask_pipeline,
             subregion_clip_pipeline,
             viewport_clip_pipeline,
             filter_sampler,
@@ -632,9 +643,9 @@ impl Renderer {
     /// into `target`.
     ///
     /// Walks `document` once, tessellates every supported shape, applies any
-    /// referenced filter through offscreen GPU passes (allocated lazily
-    /// against `target_extent`), and composites the result onto `target` in
-    /// painter's order. This is the single GPU path shared by the headless
+    /// referenced clip-path, mask, or filter through offscreen GPU passes
+    /// (allocated lazily against `target_extent`), and composites the result
+    /// onto `target` in painter's order. This is the single GPU path shared by the headless
     /// [`Renderer::render_to_image`] and any windowed caller driving its own
     /// surface.
     ///
@@ -691,7 +702,8 @@ impl Renderer {
                 RenderOp::Filter {
                     mesh,
                     primitives,
-                    clip_uv,
+                    clip,
+                    mask,
                 } => {
                     self.encode_filter_chain(
                         encoder,
@@ -699,7 +711,8 @@ impl Renderer {
                         &depth.view,
                         mesh,
                         primitives,
-                        *clip_uv,
+                        clip.as_ref(),
+                        mask.as_ref(),
                         viewport,
                         view_projection,
                         target_extent,
@@ -749,7 +762,8 @@ impl Renderer {
         target_depth: &wgpu::TextureView,
         mesh: &Mesh,
         primitives: &[FilterPrimitive],
-        clip_uv: Option<[f32; 4]>,
+        clip: Option<&Mesh>,
+        mask: Option<&MaskRender>,
         viewport: Viewport,
         view_projection: Mat4,
         extent: wgpu::Extent3d,
@@ -811,32 +825,10 @@ impl Renderer {
             );
         }
 
-        // SVG 2 render order: clip-path applies BEFORE filter, so we clip
-        // the source texture here, ahead of every primitive pass.
-        if let Some(uv) = clip_uv {
-            let clip_uniform = subregion_clip_uniform(extent, uv);
-            let clip_scratch = self.create_filter_texture(extent, "svg3 clip-path stage");
-            // Stage source into scratch.
-            let passthrough = FilterUniform::passthrough(extent.width, extent.height);
-            self.encode_filter_pass(
-                encoder,
-                &self.color_matrix_pipeline,
-                &source.view,
-                &source.view,
-                &clip_scratch.view,
-                &passthrough,
-                "svg3 clip-path source stage",
-            );
-            // Clip scratch back into source.
-            self.encode_filter_pass(
-                encoder,
-                &self.subregion_clip_pipeline,
-                &clip_scratch.view,
-                &clip_scratch.view,
-                &source.view,
-                &clip_uniform,
-                "svg3 clip-path apply",
-            );
+        // SVG 2 render order: clip-path applies BEFORE filter, so apply the
+        // rendered clip alpha to SourceGraphic ahead of every primitive pass.
+        if let Some(clip_mesh) = clip {
+            self.encode_alpha_effect(encoder, &source.view, clip_mesh, view_projection, extent);
         }
 
         // SourceAlpha = (0, 0, 0, src.a). Derive it through the colour-matrix
@@ -943,9 +935,27 @@ impl Renderer {
         // back to the raw source covers the "filter with no primitives" case,
         // which `scene` already filters out — but the guard keeps this
         // path safe if a caller invokes the renderer differently.
-        let final_view = match prev_index {
+        let chain_view = match prev_index {
             Some(i) => &outputs[i].view,
             None => &source.view,
+        };
+        let masked_output;
+        let final_view = if let Some(mask) = mask {
+            masked_output = Some(self.create_filter_texture(extent, "svg3 mask output"));
+            let masked = masked_output
+                .as_ref()
+                .expect("mask output just initialized");
+            self.encode_masked_output(
+                encoder,
+                chain_view,
+                &masked.view,
+                mask,
+                view_projection,
+                extent,
+            );
+            &masked.view
+        } else {
+            chain_view
         };
         self.encode_composite_pass(
             encoder,
@@ -956,6 +966,7 @@ impl Renderer {
             target_depth,
             extent,
             view_projection,
+            clip.is_some() || mask.is_some(),
         );
     }
 
@@ -1043,6 +1054,7 @@ impl Renderer {
             target_depth,
             extent,
             view_projection,
+            true,
         );
     }
 
@@ -1272,6 +1284,114 @@ impl Renderer {
             &uniform,
             "svg3 subregion clip",
         );
+    }
+
+    fn encode_alpha_effect(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        source: &wgpu::TextureView,
+        mask_mesh: &Mesh,
+        view_projection: Mat4,
+        extent: wgpu::Extent3d,
+    ) {
+        let mask = self.encode_mask_mesh(
+            encoder,
+            mask_mesh,
+            view_projection,
+            extent,
+            "svg3 clip-path",
+        );
+        let scratch = self.create_filter_texture(extent, "svg3 alpha effect scratch");
+        let passthrough = FilterUniform::passthrough(extent.width, extent.height);
+        self.encode_filter_pass(
+            encoder,
+            &self.color_matrix_pipeline,
+            source,
+            source,
+            &scratch.view,
+            &passthrough,
+            "svg3 alpha effect source stage",
+        );
+        let uniform = alpha_mask_uniform(extent, MaskMode::Alpha);
+        self.encode_filter_pass(
+            encoder,
+            &self.alpha_mask_pipeline,
+            &scratch.view,
+            &mask.view,
+            source,
+            &uniform,
+            "svg3 alpha effect apply",
+        );
+    }
+
+    fn encode_masked_output(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        input: &wgpu::TextureView,
+        output: &wgpu::TextureView,
+        mask: &MaskRender,
+        view_projection: Mat4,
+        extent: wgpu::Extent3d,
+    ) {
+        let mask_texture =
+            self.encode_mask_mesh(encoder, &mask.mesh, view_projection, extent, "svg3 mask");
+        let uniform = alpha_mask_uniform(extent, mask.mode);
+        self.encode_filter_pass(
+            encoder,
+            &self.alpha_mask_pipeline,
+            input,
+            &mask_texture.view,
+            output,
+            &uniform,
+            "svg3 mask apply",
+        );
+    }
+
+    fn encode_mask_mesh(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        mesh: &Mesh,
+        view_projection: Mat4,
+        extent: wgpu::Extent3d,
+        label_prefix: &str,
+    ) -> FilterTexture {
+        let target = self.create_filter_texture(extent, label_prefix);
+        let depth = self.create_depth_texture(extent, "svg3 mask depth");
+        clear_depth(encoder, &depth.view, "svg3 mask depth clear");
+
+        if let Some(scene) = self.create_scene(mesh, view_projection) {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("svg3 mask draw"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &target.view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &depth.view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                ..Default::default()
+            });
+            self.draw(&mut pass, &scene);
+        } else {
+            clear_target(
+                encoder,
+                &target.view,
+                wgpu::Color::TRANSPARENT,
+                "svg3 empty mask clear",
+            );
+        }
+
+        target
     }
 
     /// Composite the ordered `<feMergeNode>` inputs of an `<feMerge>` into
@@ -1591,9 +1711,11 @@ impl Renderer {
         destination_depth: &wgpu::TextureView,
         extent: wgpu::Extent3d,
         view_projection: Mat4,
+        discard_zero_alpha: bool,
     ) {
-        let uniform =
+        let mut uniform =
             FilterUniform::composite_with_projection(extent.width, extent.height, view_projection);
+        uniform.flags = u32::from(discard_zero_alpha);
         let bind_group = self.create_composite_bind_group(
             chain_output,
             source_view,
@@ -2132,6 +2254,153 @@ mod tests {
         assert!(
             right_halo[3] > 4 && right_halo[2] > right_halo[0],
             "group blur should carry the blue side outward: {right_halo:?}"
+        );
+    }
+
+    #[test]
+    fn render_to_image_applies_path_clip_path_without_filter() {
+        let document = crate::dom::parse(
+            r##"<svg><defs><clipPath id="right"><path d="M 32 0 H 64 V 64 H 32 Z"/></clipPath></defs><rect width="64" height="64" fill="blue" clip-path="url(#right)"/></svg>"##,
+        )
+        .unwrap();
+        let config = RenderConfig {
+            width: 64,
+            height: 64,
+            ..RenderConfig::default()
+        };
+        let Some(renderer) =
+            skip_or_renderer("render_to_image_applies_path_clip_path_without_filter")
+        else {
+            return;
+        };
+        let image = renderer
+            .render_to_image(&document, config)
+            .expect("clipped render failed");
+
+        assert_eq!(image.pixel(16, 32)[3], 0, "left side should be clipped");
+        let right = image.pixel(48, 32);
+        assert!(
+            right[2] > 180 && right[3] > 200,
+            "right side should remain blue: {right:?}"
+        );
+    }
+
+    #[test]
+    fn render_to_image_applies_ancestor_transform_to_clip_path() {
+        let document = crate::dom::parse(
+            r##"<svg><defs><clipPath id="left"><rect width="16" height="64"/></clipPath></defs><g transform="translate(32 0)"><rect width="32" height="64" fill="blue" clip-path="url(#left)"/></g></svg>"##,
+        )
+        .unwrap();
+        let config = RenderConfig {
+            width: 64,
+            height: 64,
+            ..RenderConfig::default()
+        };
+        let Some(renderer) =
+            skip_or_renderer("render_to_image_applies_ancestor_transform_to_clip_path")
+        else {
+            return;
+        };
+        let image = renderer
+            .render_to_image(&document, config)
+            .expect("transformed clipped render failed");
+
+        assert_eq!(image.pixel(24, 32)[3], 0, "left side should be empty");
+        let clipped = image.pixel(40, 32);
+        assert!(
+            clipped[2] > 180 && clipped[3] > 200,
+            "translated clip should reveal the left half of the translated rect: {clipped:?}"
+        );
+        assert_eq!(
+            image.pixel(56, 32)[3],
+            0,
+            "right half should be clipped by the translated clip"
+        );
+    }
+
+    #[test]
+    fn render_to_image_applies_luminance_mask_without_filter() {
+        let document = crate::dom::parse(
+            r##"<svg><defs><mask id="reveal"><rect x="32" y="0" width="32" height="64" fill="white"/></mask></defs><rect width="64" height="64" fill="red" mask="url(#reveal)"/></svg>"##,
+        )
+        .unwrap();
+        let config = RenderConfig {
+            width: 64,
+            height: 64,
+            ..RenderConfig::default()
+        };
+        let Some(renderer) =
+            skip_or_renderer("render_to_image_applies_luminance_mask_without_filter")
+        else {
+            return;
+        };
+        let image = renderer
+            .render_to_image(&document, config)
+            .expect("masked render failed");
+
+        assert_eq!(image.pixel(16, 32)[3], 0, "left side should be masked");
+        let right = image.pixel(48, 32);
+        assert!(
+            right[0] > 180 && right[3] > 200,
+            "right side should remain red: {right:?}"
+        );
+    }
+
+    #[test]
+    fn render_to_image_applies_ancestor_transform_to_mask() {
+        let document = crate::dom::parse(
+            r##"<svg><defs><mask id="left"><rect width="16" height="64" fill="white"/></mask></defs><g transform="translate(32 0)"><rect width="32" height="64" fill="red" mask="url(#left)"/></g></svg>"##,
+        )
+        .unwrap();
+        let config = RenderConfig {
+            width: 64,
+            height: 64,
+            ..RenderConfig::default()
+        };
+        let Some(renderer) = skip_or_renderer("render_to_image_applies_ancestor_transform_to_mask")
+        else {
+            return;
+        };
+        let image = renderer
+            .render_to_image(&document, config)
+            .expect("transformed masked render failed");
+
+        assert_eq!(image.pixel(24, 32)[3], 0, "left side should be empty");
+        let masked = image.pixel(40, 32);
+        assert!(
+            masked[0] > 180 && masked[3] > 200,
+            "translated mask should reveal the left half of the translated rect: {masked:?}"
+        );
+        assert_eq!(
+            image.pixel(56, 32)[3],
+            0,
+            "right half should be masked by the translated mask"
+        );
+    }
+
+    #[test]
+    fn render_to_image_applies_alpha_mask_type() {
+        let document = crate::dom::parse(
+            r##"<svg><defs><mask id="reveal" mask-type="alpha"><rect x="32" y="0" width="32" height="64" fill="black"/></mask></defs><rect width="64" height="64" fill="red" mask="url(#reveal)"/></svg>"##,
+        )
+        .unwrap();
+        let config = RenderConfig {
+            width: 64,
+            height: 64,
+            ..RenderConfig::default()
+        };
+        let Some(renderer) = skip_or_renderer("render_to_image_applies_alpha_mask_type") else {
+            return;
+        };
+        let image = renderer
+            .render_to_image(&document, config)
+            .expect("alpha masked render failed");
+
+        assert_eq!(image.pixel(16, 32)[3], 0, "left side should be masked");
+        let right = image.pixel(48, 32);
+        assert!(
+            right[0] > 180 && right[3] > 200,
+            "black alpha mask content should reveal in alpha mode: {right:?}"
         );
     }
 

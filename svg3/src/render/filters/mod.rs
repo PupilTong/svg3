@@ -14,13 +14,15 @@
 //! data-URL `<feImage>` sources are represented structurally here; decoding
 //! / uploading stays lazy in the renderer.
 //!
-//! `<clipPath>` definition collection and reference resolution lives in the
-//! [`clip`] submodule, because clip-path runs *before* the filter chain
-//! (SVG 2 render order) and benefits from being a clearly separate concern.
+//! `<clipPath>` and `<mask>` definition collection and reference resolution
+//! live in submodules, because they are renderer-level effects that wrap the
+//! filter chain rather than filter primitives themselves.
 
 mod clip;
+mod mask;
 
 pub(crate) use clip::ClipPathDefinitions;
+pub(crate) use mask::{MaskDefinition, MaskDefinitions, MaskMode};
 
 use std::collections::BTreeMap;
 
