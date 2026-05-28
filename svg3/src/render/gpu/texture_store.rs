@@ -40,11 +40,6 @@ const DUMMY_LAYER_COUNT: u32 = 1;
 /// referenced.
 const DUMMY_TEXTURE_SIDE: u32 = 1;
 
-/// Texture format the rasterizer writes to. sRGB-encoded so the linear
-/// shading colour the shape pipeline produces survives the round-trip
-/// through this offscreen pass before the 3D primitive samples it.
-const TEXTURE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
-
 /// Owns the texture-array binding for one `encode_document` call. Build via
 /// [`TextureStore::empty`] when no textures are referenced (binds a 1×1
 /// dummy), or via [`TextureStore::new`] with a rasterizer callback per
@@ -62,7 +57,13 @@ impl TextureStore {
     /// the document has no `<svg>` texture paint servers; the bind group
     /// still references this view so the pipeline layout doesn't change
     /// based on document content.
-    pub(super) fn empty(device: &wgpu::Device) -> Self {
+    ///
+    /// `format` MUST match the shape pipeline's colour-attachment format:
+    /// the rasterize pass re-uses that pipeline to draw 2D paths into a
+    /// texture-array layer, and wgpu rejects a pass whose colour formats
+    /// differ from the pipeline's. On the headless test renderer that's
+    /// `Rgba8UnormSrgb`; on the macOS swapchain it's `Bgra8UnormSrgb`.
+    pub(super) fn empty(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("svg3 texture array (empty)"),
             size: wgpu::Extent3d {
@@ -73,7 +74,7 @@ impl TextureStore {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: TEXTURE_FORMAT,
+            format,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
             view_formats: &[],
         });
@@ -102,6 +103,7 @@ impl TextureStore {
         encoder: &mut wgpu::CommandEncoder,
         document: &Document,
         node_ids: &[NodeId],
+        format: wgpu::TextureFormat,
         mut rasterize_layer: F,
     ) -> Self
     where
@@ -122,7 +124,7 @@ impl TextureStore {
         }
 
         if unique.is_empty() {
-            return Self::empty(device);
+            return Self::empty(device, format);
         }
 
         // Pick a side length per resolution. For simplicity in MVP, every
@@ -147,7 +149,7 @@ impl TextureStore {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: TEXTURE_FORMAT,
+            format,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
             view_formats: &[],
         });
