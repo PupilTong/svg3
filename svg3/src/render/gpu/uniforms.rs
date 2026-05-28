@@ -17,7 +17,7 @@ use glam::{Mat3, Mat4};
 
 use crate::render::filters::{
     Blend, ColorMatrix, ComponentTransfer, Composite, ConvolveMatrix, DisplacementMap, DropShadow,
-    FilterInput, Flood, ImageRect, LightSource, Lighting, Morphology, Offset, Turbulence,
+    FilterInput, Flood, ImageRect, LightSource, Lighting, MaskMode, Morphology, Offset, Turbulence,
 };
 use crate::render::scene::ViewportClip;
 
@@ -519,6 +519,15 @@ pub(super) fn tile_uniform(extent: wgpu::Extent3d, source_uv: [f32; 4]) -> Filte
     // space (full texture `[0, 0, 1, 1]` when the upstream primitive has no
     // authored subregion). The fragment shader wraps UVs inside this rect.
     uniform.extra = source_uv;
+    uniform
+}
+
+pub(super) fn alpha_mask_uniform(extent: wgpu::Extent3d, mode: MaskMode) -> FilterUniform {
+    let mut uniform = FilterUniform::empty(extent.width, extent.height);
+    uniform.mode = match mode {
+        MaskMode::Alpha => 0,
+        MaskMode::Luminance => 1,
+    };
     uniform
 }
 

@@ -21,7 +21,7 @@ use svgtypes::ViewBox as SvgViewBox;
 
 use crate::render::filters::{
     ClipPathDefinitions, FilterDefinitions, FilterInput, FilterPrimitive, FilterPrimitiveKind,
-    FilterResolution,
+    FilterResolution, MaskDefinition, MaskDefinitions,
 };
 use crate::render::paint::{Paint, PaintBounds, PaintDefinitions};
 use crate::render::shapes;
@@ -44,19 +44,29 @@ pub(crate) enum RenderOp {
         /// Nested viewport clip resolved for the GPU clip pass.
         clip: ViewportClip,
     },
-    /// Draw a mesh into an offscreen target, run the filter primitive chain
-    /// through ping/pong GPU passes, then composite the result into the
+    /// Draw a mesh into an offscreen target, apply any clip-path / mask
+    /// definitions and filter primitives, then composite the result into the
     /// destination target.
     Filter {
-        /// The geometry that produces the filter's source graphic.
+        /// The geometry that produces the effect's source graphic.
         mesh: Mesh,
         /// Ordered list of primitive passes to apply.
         primitives: Vec<FilterPrimitive>,
-        /// Optional UV-space `[x, y, width, height]` clip applied to the
-        /// filter's source texture before primitives run (SVG 2 render
-        /// order: clip-path applies before filter). `None` means no clip.
-        clip_uv: Option<[f32; 4]>,
+        /// Optional clip-path geometry rendered into an alpha mask before
+        /// primitives run (SVG 2 render order: clip-path applies before
+        /// filter). `None` means no clip.
+        clip: Option<Mesh>,
+        /// Optional SVG mask rendered and multiplied into the chain output.
+        mask: Option<MaskRender>,
     },
+}
+
+/// A mask texture the GPU layer should render and apply to an offscreen
+/// effect source.
+#[derive(Debug, Clone)]
+pub(crate) struct MaskRender {
+    pub(crate) mesh: Mesh,
+    pub(crate) mode: crate::render::filters::MaskMode,
 }
 
 /// Per-2D-shape forward Z stride applied to push painter's order through
@@ -185,6 +195,7 @@ struct TraversalFrame {
 struct RenderDefinitions<'a> {
     filters: &'a FilterDefinitions,
     clips: &'a ClipPathDefinitions,
+    masks: &'a MaskDefinitions,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -359,9 +370,11 @@ pub fn build_scene(document: &Document, viewport: Viewport) -> Mesh {
 pub(crate) fn build_render_plan(document: &Document, viewport: Viewport) -> Vec<RenderOp> {
     let filters = FilterDefinitions::collect(document);
     let clips = ClipPathDefinitions::collect(document);
+    let masks = MaskDefinitions::collect(document);
     let definitions = RenderDefinitions {
         filters: &filters,
         clips: &clips,
+        masks: &masks,
     };
     let markers = MarkerDefinitions::default();
     let paints = PaintDefinitions::default();
@@ -467,15 +480,17 @@ fn append_render_ops(
         return;
     }
 
-    // Resolve clip-path before filter (SVG 2 render order). When the
-    // element references a clip-path, the filter's source texture is
-    // clipped to the clip-path's UV rect before primitives run.
-    // TODO: clip geometry is still resolved in viewport space; ancestor
-    // transforms move the source mesh but not the clip region yet.
-    let clip_uv = definitions
+    // Resolve clip-path / mask up front. If either is present, the subtree
+    // must be isolated even when there is no filter chain.
+    let effect_transform = state.transform;
+    let clip = definitions
         .clips
         .resolve(&node.element)
-        .map(|shape| shape.to_uv(context.viewport));
+        .map(|clip_id| definition_subtree_mesh(document, clip_id, context, effect_transform));
+    let mask = definitions
+        .masks
+        .resolve(&node.element)
+        .map(|mask| mask_render(document, mask, context, effect_transform));
 
     match definitions.filters.resolve(&node.element) {
         Some(FilterResolution::Chain(chain)) => {
@@ -509,8 +524,9 @@ fn append_render_ops(
                         | FilterPrimitiveKind::Turbulence(_)
                 )
             });
+            let has_clip_or_mask = clip.is_some() || mask.is_some();
             if !filtered_mesh.is_empty() || generator {
-                if visible {
+                if visible || has_clip_or_mask {
                     flush_mesh(pending_mesh, plan);
                     // SVG `currentColor`: resolve the filtered element's
                     // effective `color` attribute and substitute it into any
@@ -525,7 +541,8 @@ fn append_render_ops(
                     plan.push(RenderOp::Filter {
                         mesh: filtered_mesh,
                         primitives: owned_chain,
-                        clip_uv,
+                        clip,
+                        mask,
                     });
                 } else {
                     pending_mesh.append(filtered_mesh);
@@ -542,7 +559,23 @@ fn append_render_ops(
             state.exit_element(frame);
             return;
         }
-        None => {}
+        None => {
+            if clip.is_some() || mask.is_some() {
+                let mut effect_mesh = Mesh::default();
+                append_entered_subtree_mesh(document, id, context, state, true, &mut effect_mesh);
+                if !effect_mesh.is_empty() {
+                    flush_mesh(pending_mesh, plan);
+                    plan.push(RenderOp::Filter {
+                        mesh: effect_mesh,
+                        primitives: Vec::new(),
+                        clip,
+                        mask,
+                    });
+                }
+                state.exit_element(frame);
+                return;
+            }
+        }
     }
 
     append_element_mesh_biased(document, id, context, state, true, pending_mesh);
@@ -759,6 +792,52 @@ fn viewport_clip(transform: Mat4, rect: Rect, root_viewport: Viewport) -> Option
         rect: [rect.x, rect.y, rect.width, rect.height],
         inverse_rows,
     })
+}
+
+fn mask_render(
+    document: &Document,
+    definition: MaskDefinition,
+    context: &SceneContext<'_>,
+    base_transform: Mat4,
+) -> MaskRender {
+    MaskRender {
+        mesh: definition_subtree_mesh(document, definition.node, context, base_transform),
+        mode: definition.mode,
+    }
+}
+
+fn definition_subtree_mesh(
+    document: &Document,
+    id: NodeId,
+    context: &SceneContext<'_>,
+    base_transform: Mat4,
+) -> Mesh {
+    let twod_index = Cell::new(0);
+    let definition_context = SceneContext {
+        root_viewport: context.root_viewport,
+        viewport: context.viewport,
+        markers: context.markers,
+        paints: context.paints,
+        svg3_extension_enabled: context.svg3_extension_enabled,
+        twod_index: &twod_index,
+    };
+    let mut state = TraversalState {
+        transform: base_transform,
+        inherited_attrs: BTreeMap::new(),
+    };
+    let node = document.node(id);
+    let frame = state.enter_element(&node.element, definition_context.svg3_extension_enabled);
+    let mut mesh = Mesh::default();
+    append_entered_subtree_mesh(
+        document,
+        id,
+        &definition_context,
+        &mut state,
+        true,
+        &mut mesh,
+    );
+    state.exit_element(frame);
+    mesh
 }
 
 fn append_subtree_mesh(
@@ -1379,7 +1458,11 @@ fn is_definition_container(kind: &ElementKind) -> bool {
 fn inherits_to_children(kind: &ElementKind) -> bool {
     matches!(
         kind,
-        ElementKind::Svg | ElementKind::Group | ElementKind::Marker
+        ElementKind::Svg
+            | ElementKind::Group
+            | ElementKind::Marker
+            | ElementKind::ClipPath
+            | ElementKind::Mask
     )
 }
 
@@ -1745,6 +1828,46 @@ mod tests {
             }]
         ));
         assert!(matches!(plan[2], RenderOp::Mesh(_)));
+    }
+
+    #[test]
+    fn render_plan_isolates_clip_path_without_filter() {
+        let document = crate::dom::parse(
+            r##"<svg><defs><clipPath id="c"><path d="M 0 0 H 10 V 10 H 0 Z"/></clipPath></defs><rect width="20" height="20" fill="blue" clip-path="url(#c)"/></svg>"##,
+        )
+        .unwrap();
+        let plan = build_render_plan(&document, vp());
+
+        assert_eq!(plan.len(), 1);
+        let RenderOp::Filter {
+            primitives, clip, ..
+        } = &plan[0]
+        else {
+            panic!("expected clipped element to be isolated");
+        };
+        assert!(primitives.is_empty());
+        assert!(clip.as_ref().is_some_and(|mesh| !mesh.is_empty()));
+    }
+
+    #[test]
+    fn render_plan_isolates_mask_without_filter() {
+        let document = crate::dom::parse(
+            r##"<svg><defs><mask id="m" mask-type="alpha"><rect width="10" height="10" fill="black"/></mask></defs><rect width="20" height="20" fill="blue" mask="url(#m)"/></svg>"##,
+        )
+        .unwrap();
+        let plan = build_render_plan(&document, vp());
+
+        assert_eq!(plan.len(), 1);
+        let RenderOp::Filter {
+            primitives, mask, ..
+        } = &plan[0]
+        else {
+            panic!("expected masked element to be isolated");
+        };
+        assert!(primitives.is_empty());
+        let mask = mask.as_ref().expect("mask should resolve");
+        assert!(!mask.mesh.is_empty());
+        assert_eq!(mask.mode, crate::render::filters::MaskMode::Alpha);
     }
 
     #[test]

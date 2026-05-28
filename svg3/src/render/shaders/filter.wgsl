@@ -106,6 +106,10 @@ fn premultiply(color: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(color.rgb * color.a, color.a);
 }
 
+fn luminance(rgb: vec3<f32>) -> f32 {
+    return dot(rgb, vec3<f32>(0.2125, 0.7154, 0.0721));
+}
+
 fn channel_value(color: vec4<f32>, channel: u32) -> f32 {
     if (channel == 0u) { return color.r; }
     if (channel == 1u) { return color.g; }
@@ -207,7 +211,7 @@ fn fs_composite(in: VertexOutput) -> CompositeOutput {
     // Inside the source silhouette we always pass through (even at
     // `alpha = 0`, e.g. the dark side of an `feSpecularLighting`
     // sphere) so the source geometry's depth still gets written.
-    if (color.a <= 0.0 && src_depth >= 1.0) {
+    if (color.a <= 0.0 && (src_depth >= 1.0 || filter_params.flags == 1u)) {
         discard;
     }
     var depth: f32;
@@ -798,6 +802,26 @@ fn fs_merge_step(in: VertexOutput) -> @location(0) vec4<f32> {
     let below = sample_in2(in.uv);
     let result = above + below * (1.0 - above.a);
     return clamp(result, vec4<f32>(0.0), vec4<f32>(1.0));
+}
+
+// ---- clipPath / mask ------------------------------------------------------
+//
+// The first input is a premultiplied source texture. The second input is a
+// rendered clip-path or mask texture. `mode = 0` uses mask alpha directly
+// (clipPath and `mask-type="alpha"`); `mode = 1` uses luminance * alpha
+// (SVG mask default).
+
+@fragment
+fn fs_alpha_mask(in: VertexOutput) -> @location(0) vec4<f32> {
+    let src = sample_in1(in.uv);
+    let mask = sample_in2(in.uv);
+    var factor: f32;
+    if (filter_params.mode == 1u) {
+        factor = luminance(unpremultiply(mask).rgb) * mask.a;
+    } else {
+        factor = mask.a;
+    }
+    return src * clamp(factor, 0.0, 1.0);
 }
 
 // ---- Primitive subregion clip (SVG 1.1 §15.5) -----------------------------
