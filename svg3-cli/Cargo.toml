@@ -1,0 +1,16 @@
+[package]
+name = "svg3-cli"
+description = "Headless CLI to render svg3/SVG documents to PNG images."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "svg3"
+path = "src/main.rs"
+
+[dependencies]
+svg3.workspace = true
+clap.workspace = true
+png.workspace = true
+anyhow.workspace = true
