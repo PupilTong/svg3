@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["svg3", "app-macos"]
+members = ["svg3", "svg3-cli", "app-macos"]
 
 [workspace.package]
 version = "0.1.0"
@@ -35,6 +35,9 @@ thiserror = "2"
 
 # App / platform
 anyhow = "1"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
 
 # Benchmarking
 # `codspeed-criterion-compat` is a drop-in replacement for `criterion` that

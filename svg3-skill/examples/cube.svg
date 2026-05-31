@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" extension="pupiltong" width="512" height="512">
+  <!-- A textured 3D cube.
+
+       * The root opts into svg3's 3D extension with extension="pupiltong".
+       * The cube's `fill` references a nested <svg> *paint server* (#faces).
+       * cube-map="cross" lays that texture out as a 4x3 horizontal-cross
+         atlas across the six faces: +Y top; -X / +Z / +X / -Z across the
+         middle row; -Y bottom.
+
+       Render it (the document is authored for a 512x512 frame):
+         svg3 cube.svg -o cube.png              # orthographic (parallel) view
+         svg3 cube.svg -o cube.png --camera     # perspective camera -->
+  <defs>
+    <svg id="faces" viewBox="0 0 400 300">
+      <rect x="100" y="0"   width="100" height="100" fill="#ffd9a0"/>
+      <rect x="0"   y="100" width="100" height="100" fill="#f4a259"/>
+      <rect x="100" y="100" width="100" height="100" fill="#ff9f6b"/>
+      <rect x="200" y="100" width="100" height="100" fill="#e76f51"/>
+      <rect x="300" y="100" width="100" height="100" fill="#c1495f"/>
+      <rect x="100" y="200" width="100" height="100" fill="#8a4f7d"/>
+    </svg>
+  </defs>
+
+  <!-- The cube sits at the origin and is rotated about its own centre, then
+       translated to the middle of the 512x512 frame. (svg3 transforms compose
+       left-to-right and rotate about the coordinate origin, like SVG 1.1.) -->
+  <cube cx="0" cy="0" cz="0" size="260" cube-map="cross"
+        transform="translate(256 256) rotateY(35deg) rotateX(-22deg)"
+        fill="url(#faces)"/>
+</svg>

@@ -1,99 +1,136 @@
-# svg3
+<h1 align="center">svg3</h1>
 
-**An extended SVG renderer for 3D models.**
+<p align="center"><b>An extended SVG renderer for 3D models — on the GPU.</b></p>
 
-`svg3` is an opt-in extension to SVG 1.1: it inherits SVG 1.1's `<svg>` root
-and 2D drawing model, and documents enable the 3D extension with
-`extension="pupiltong"` on the root `<svg>`. Without that attribute, the
-renderer behaves as a normal SVG renderer and ignores svg3-only elements and
-3D transform functions. With it, documents can use three-dimensional graphics
-elements (`<cube>`, `<ellipsoid>`, `<cylinder>`, …) plus 3D transform
-functions, rendered on the GPU. Styling currently reads SVG 1.1 presentation
-attributes and inline `style="..."` declarations; a full web-platform CSS
-cascade (the historical [Stylo](https://crates.io/crates/stylo) direction) is
-a paused roadmap item. Scenes are painted with
-[wgpu](https://crates.io/crates/wgpu).
+<p align="center">
+  <a href="https://github.com/PupilTong/svg3/actions/workflows/ci.yml"><img src="https://github.com/PupilTong/svg3/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MPL--2.0-brightgreen.svg" alt="License: MPL-2.0"></a>
+  <img src="https://img.shields.io/badge/rust-nightly-orange.svg" alt="Rust nightly">
+  <img src="https://img.shields.io/badge/GPU-wgpu-blueviolet.svg" alt="wgpu">
+</p>
 
-The project is built from the ground up on the current Rust graphics ecosystem.
-Demos will target multiple platforms; a native macOS desktop app is the first.
+<p align="center">
+  <img src="docs/cube.png" alt="A textured 3D cube rendered by svg3" width="360">
+  &nbsp;
+  <img src="docs/shapes.png" alt="2D gradients and opacity rendered by svg3" width="360">
+</p>
+<p align="center"><sub>Rendered headlessly by the <code>svg3</code> CLI from the documents in <a href="svg3-skill/examples/"><code>svg3-skill/examples/</code></a>.</sub></p>
+
+---
+
+## What is svg3?
+
+`svg3` is an **opt-in extension to SVG 1.1**. A document is ordinary SVG until
+its root `<svg>` carries `extension="pupiltong"`; with that attribute it may
+also use three-dimensional graphics elements (`<cube>`, `<ellipsoid>`,
+`<cylinder>`, `<surface>`) and 3D transform functions, all rasterised on the GPU
+with [wgpu](https://crates.io/crates/wgpu). Without it, the renderer behaves as
+a normal SVG renderer and ignores the 3D features.
 
 The document language is specified in [SPEC.md](SPEC.md) (editor's draft).
+
+> **Status: early scaffolding.** The renderer covers a growing subset of SVG 1.1
+> plus the svg3 3D primitives (details below). A full web-platform CSS cascade
+> (the historical [Stylo](https://crates.io/crates/stylo) direction) is a paused
+> roadmap item; styling currently reads presentation attributes and inline
+> `style="…"`.
+
+## Quickstart — generate an image
+
+The `svg3-cli` crate installs a headless renderer named **`svg3`** that turns a
+document into a PNG:
+
+```sh
+# Render one of the bundled demos (perspective camera for the 3D scene):
+cargo run -p svg3-cli -- svg3-skill/examples/cube.svg -o cube.png --camera
+
+# …or install the command and use it anywhere:
+cargo install --path svg3-cli
+svg3 svg3-skill/examples/shapes.svg -o shapes.png
+```
+
+A minimal 3D document:
+
+```xml
+<svg xmlns="http://www.w3.org/2000/svg" extension="pupiltong" width="512" height="512">
+  <cube cx="0" cy="0" cz="0" size="260"
+        transform="translate(256 256) rotateY(35deg) rotateX(-22deg)" fill="#e8743b"/>
+</svg>
+```
+
+```sh
+svg3 cube.svg -o cube.png        # → a 512×512 PNG
+```
+
+Prefer something interactive? `cargo run -p app-macos` opens a native macOS
+window where you can paste SVG text and watch it render.
+
+## Generate images from your AI coding agent
+
+The [`svg3-skill/`](svg3-skill/) directory is a portable **agent skill**: drop
+it into your coding agent (e.g. Claude Code's skills directory) and it teaches
+the agent to author a document, render it with the `svg3` CLI, view the PNG, and
+iterate — so "make me an image of …" becomes a tight author → render → look
+loop. See [`svg3-skill/SKILL.md`](svg3-skill/SKILL.md).
+
+## Features
+
+**2D (SVG 1.1)**
+
+- Shapes & strokes: `<rect>`, `<circle>`, `<ellipse>`, `<polygon>`,
+  `<polyline>`, `<line>`, `<path>` — fills and strokes with caps, joins, dashes,
+  `pathLength` calibration, opacity, and referenced markers.
+- Paint servers: `<linearGradient>`, `<radialGradient>`, and rectangular-tile
+  `<pattern>`.
+- Filters: a GPU pass per primitive across the full `<fe…>` chain
+  (`feGaussianBlur`, `feColorMatrix`, `feTurbulence`, `feDiffuse`/
+  `feSpecularLighting`, `feDisplacementMap`, `feImage`, `feDropShadow`,
+  `feMorphology`, `feConvolveMatrix`, `feComponentTransfer`, `feFlood`, …).
+- `<clipPath>` and `<mask>` (luminance or alpha) via GPU mask passes.
+- Nested `<svg>` viewports with `viewBox` / `preserveAspectRatio` and overflow
+  clipping.
+
+**3D (svg3, with `extension="pupiltong"`)**
+
+- Primitives: `<cube>`, `<ellipsoid>`, `<cylinder>`, and `<surface>`,
+  tessellated and drawn through a depth-aware pipeline.
+- 3D transforms: `translate3d`, `translateZ`, `scale3d`, `scaleZ`, `rotateX`,
+  `rotateY`, `rotateZ`, `rotate3d`, `matrix3d`.
+- Depth-correct compositing of 2D and 3D content (greater Z occludes lesser Z).
+- A nested `<svg>` as a **texture paint server** on a 3D primitive, wrapped over
+  the faces via `cube-map` (`same` / `cross`) and the per-primitive UV maps.
+
+## The svg3 language
+
+The user coordinate system gains a Z axis (left-handed: +X right, +Y down, +Z
+toward the viewer); SVG 1.1 content lives in the plane `z = 0`. The 3D transform
+functions may be mixed with SVG 1.1 transforms in a single `transform`
+attribute. The viewing transformation (camera) is supplied by the renderer and
+is not addressable from the document. Full details in [SPEC.md](SPEC.md).
 
 ## Pipeline
 
 ```
-svg3 XML   ──►  svg3::dom    ──►  svg3::render ──►  GPU surface
+svg3 XML   ──►  svg3::dom    ──►  svg3::render ──►  PNG / GPU surface
 (text)          (element tree)    (wgpu draw)
 ```
 
-A Stylo-driven `svg3::style` cascade layer is a paused roadmap item; until it
-lands, presentation attributes and inline `style="..."` are read directly in
+A Stylo-driven `svg3::style` cascade is a paused roadmap item; until it lands,
+presentation attributes and inline `style="…"` are read directly in
 `svg3::render`.
 
 ## Workspace
 
 | Crate       | Responsibility                                                       |
 |-------------|----------------------------------------------------------------------|
-| `svg3`      | The library. Two submodules: `dom` (parse SVG/svg3 XML into a mutable element tree, SVG 1.1 root + opt-in 3D extensions) and `render` (turn a parsed document into GPU draw calls with wgpu). A Stylo-backed `style` cascade is a paused roadmap item. |
-| `app-macos` | Native macOS demo: paste SVG text, then render supported shapes in a wgpu window. |
-
-> **Status: early scaffolding.** `app-macos` opens a real Metal-backed Cocoa
-> window, prompts for an SVG string, and renders the currently supported
-> filled/stroked `<rect>` / `<circle>` / `<ellipse>` / `<polygon>` /
-> `<polyline>` / stroked `<line>` / filled/stroked `<path>` 2D geometry
-> plus the svg3 3D `<cube>`, `<ellipsoid>`, `<cylinder>`, and `<surface>`
-> primitives when the root has `extension="pupiltong"`, plus nested plain-SVG
-> `<svg>` viewports in normal 2D mode. Click the window, or press Command+O / Command+I, to edit
-> the SVG input again.
-> `svg3::dom` parses svg3 XML into an element tree with raw attributes
-> (roadmap item 2) — currently outer and nested `<svg>`, `<g>`, `<defs>`, `<rect>`,
-> `<circle>`, `<ellipse>`, `<polygon>`, `<polyline>`, `<line>`, `<path>`,
-> `<filter>`, every supported `<fe…>` primitive (`feGaussianBlur`, `feImage`,
-> `feColorMatrix`, `feTurbulence`, `feSpecularLighting`, `feDiffuseLighting`,
-> `feMorphology`, `feFlood`, `feDropShadow`, `feDisplacementMap`,
-> `feConvolveMatrix`, `feComponentTransfer`) and their child elements
-> (`feFuncR/G/B/A`, `feDistantLight`, `fePointLight`, `feSpotLight`),
-> `<marker>`, `<clipPath>`, `<mask>`, `<linearGradient>`,
-> `<radialGradient>`, `<stop>`, `<pattern>`, `<cube>`, `<ellipsoid>`,
-> `<cylinder>`, and `<surface>` are recognised; the rest of SVG 1.1
-> round-trips as unknown elements. `svg3::render` tessellates fills and
-> strokes for `<rect>`, `<circle>`, `<ellipse>`, `<polygon>`, `<polyline>`,
-> and `<path>`, plus stroke-only `<line>` geometry, including stroke caps,
-> joins, dashes, `pathLength` dash calibration, opacity attributes, and
-> referenced SVG markers and paint servers (`<linearGradient>`,
-> `<radialGradient>`, and rectangular-child `<pattern>` tiles), plus svg3's
-> 3D primitives only for documents whose root has `extension="pupiltong"`,
-> then rasterises them headlessly to an image
-> (roadmap items 3 and 4), using root `<svg width>` / `<svg height>` as the
-> initial percentage viewport. In normal 2D SVG mode, nested `<svg>` elements
-> establish child viewports with `x`/`y`, `width`/`height`, `viewBox`,
-> `preserveAspectRatio`, and default overflow clipping. Filters and
-> `clip-path` inside a clipped nested viewport are currently flattened as raw
-> geometry until nested render-plan composition lands. The svg3 3D `<ellipsoid>` primitive (SPEC §5.3)
-> tessellates the implicit surface to a UV-parameterised mesh, and
-> `<cylinder>` (SPEC §5.5) tessellates cap and side-wall triangles alongside
-> `<cube>`.
-> Headless rendering also applies referenced `<filter>` elements composed
-> of an ordered chain of `<fe…>` primitives, with each primitive
-> implemented as a dedicated GPU fragment-shader pass over offscreen
-> ping/pong textures (no CPU filter fallback). PNG data-URL `<feImage>`
-> primitives are decoded and uploaded lazily when a referenced filter
-> paints. Referenced `<clipPath>` definitions render supported child
-> geometry into an alpha mask before filtering, and referenced `<mask>`
-> definitions render supported child geometry as luminance masks by default
-> or alpha masks with `mask-type="alpha"`. `clipPathUnits`,
-> `maskUnits`, and `maskContentUnits` are currently limited to the
-> default user-space behavior; `objectBoundingBox` mapping is still to come.
-> Nested filter, clip, or mask references inside those definition subtrees
-> are flattened as raw geometry until nested render-plan composition lands.
-> A Stylo-backed CSS cascade is paused — see the roadmap below.
-
-## Toolchain
-
-The Rust toolchain is pinned in [`rust-toolchain.toml`](rust-toolchain.toml)
-(`nightly-2026-04-20`). `rustup` selects it automatically inside this repo.
+| `svg3`      | The library: `dom` (parse svg3/SVG XML into an element tree) and `render` (turn a parsed document into GPU draw calls and a headless image). |
+| `svg3-cli`  | The headless `svg3` command — render a document to a PNG. |
+| `app-macos` | Native macOS demo (`svg3-macos`): paste SVG text and render it in a wgpu window. |
 
 ## Build & run
+
+The Rust toolchain is pinned in [`rust-toolchain.toml`](rust-toolchain.toml)
+(`nightly-2026-04-20`); `rustup` selects it automatically inside this repo.
 
 ```sh
 cargo build --workspace          # first build is slow (wgpu)
@@ -101,21 +138,30 @@ cargo test  --workspace
 cargo fmt --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 
-cargo run -p app-macos                       # paste SVG text into the native macOS demo
-bash scripts/bundle-macos.sh                 # build a .app: target/release/bundle/svg3-macos.app
+cargo run -p svg3-cli -- input.svg -o out.png   # headless render to PNG
+cargo run -p app-macos                          # interactive macOS demo
+bash scripts/bundle-macos.sh                     # build target/release/bundle/svg3-macos.app
 
-cargo bench --workspace                      # criterion benches (codspeed-instrumented)
+cargo bench --workspace                          # criterion benches (codspeed-instrumented)
 ```
 
 ## Roadmap
 
-1. **(done)** winit event loop + wgpu surface — the `app-macos` crate opens a native window, accepts SVG text, and renders supported 2D shapes.
-2. **(done)** SVG/svg3 XML parsing → element tree (`<svg>` root with `<g>`, `<cube>`, `<ellipsoid>`, `<cylinder>`, and `<surface>`; svg3 3D rendering requires root `extension="pupiltong"` per [SPEC.md](SPEC.md)).
-3. **(done)** 2D basic shapes — tessellate fills and strokes for `<rect>`, `<circle>`, `<ellipse>`, `<polygon>`, `<polyline>`, and `<path>`, plus stroke-only `<line>` geometry (with percentage lengths, nested `<svg>` viewports, caps, joins, dashes, `pathLength` dash calibration, opacity attributes, and referenced markers), apply referenced `<filter>` chains composed from any supported filter primitive, apply referenced `<clipPath>` and `<mask>` definitions through GPU mask passes, and render the result headlessly to an image (`svg3::render`).
-4. **(done)** 3D primitive mesh generation. `<cube>` is tessellated to six rectangular faces (12 triangles, 8 corners), `<ellipsoid>` to a UV-parameterised mesh (16 latitude bands × 32 longitude segments) of its implicit surface, and `<cylinder>` to segmented caps and a side wall; all render through a unified depth-aware (`LessEqual`) shape pipeline so per SPEC §7.3 spatial Z resolves occlusion between 2D and 3D content. 2D shapes are biased forward by a tiny per-shape Z stride so coplanar 2D content stays painter-ordered without z-fighting; 3D content keeps its authored world Z. SDF shapes discard transparent fragments so their bounding-quad corners don't write spurious depth. Filtered content participates in depth too — the composite shader samples the filter source's per-pixel depth and writes it as `frag_depth`, so a filtered rect at `z = 0` correctly occludes a 3D primitive behind it and a 3D primitive in front of `z = 0` paints over a later filtered rect. CSS-driven materials are deferred to the paused style milestone.
-5. **(paused)** Stylo CSS cascade — computed styles drive material/transform. Currently deferred; documents are styled via presentation attributes + inline `style="..."` only.
+1. **(done)** winit event loop + wgpu surface — the macOS demo renders pasted SVG.
+2. **(done)** svg3/SVG XML parsing → element tree.
+3. **(done)** 2D shapes, strokes, gradients, patterns, markers, filters,
+   `clipPath`/`mask`, nested viewports, and headless image output.
+4. **(done)** 3D primitive mesh generation and depth-aware 2D/3D compositing,
+   including nested-SVG texture paint servers.
+5. **(paused)** Stylo CSS cascade — computed styles drive material/transform.
 6. Multi-platform native demos (Windows, Linux) + Linux/Windows CI.
 7. Native macOS `.app` bundling.
+
+## Contributing
+
+See [AGENTS.md](AGENTS.md) for toolchain, build/test/lint commands, and
+conventions (this repo collaborates with multiple AI agents through that single
+canonical guide).
 
 ## License
 
