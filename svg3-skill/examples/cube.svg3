@@ -8,8 +8,8 @@
          middle row; -Y bottom.
 
        Render it (the document is authored for a 512x512 frame):
-         svg3 cube.svg -o cube.png              # orthographic (parallel) view
-         svg3 cube.svg -o cube.png --camera     # perspective camera -->
+         svg3 cube.svg3 -o cube.png              # orthographic (parallel) view
+         svg3 cube.svg3 -o cube.png --camera     # perspective camera -->
   <defs>
     <svg id="faces" viewBox="0 0 400 300">
       <rect x="100" y="0"   width="100" height="100" fill="#ffd9a0"/>

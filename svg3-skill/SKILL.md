@@ -38,7 +38,9 @@ Run `svg3 --help` to see every flag.
 - **3D:** add `extension="pupiltong"` to the root `<svg>`, then use the 3D
   elements and 3D transforms (`rotateX/Y/Z`, `translate3d`, `scale3d`, …).
   **Without that attribute the 3D elements draw nothing.** See
-  [`examples/cube.svg`](examples/cube.svg).
+  [`examples/cube.svg3`](examples/cube.svg3).
+- **File extension:** save extended (3D) documents — those with
+  `extension="pupiltong"` — as `.svg3`; keep plain SVG as `.svg`.
 
 Three things that commonly trip people up — keep them in mind while authoring:
 
@@ -61,7 +63,7 @@ the project **README.md** — both at <https://github.com/PupilTong/svg3>.
 ```sh
 svg3 logo.svg                          # → logo.png  (512×512, orthographic)
 svg3 scene.svg -o out.png -W 800 -H 800
-svg3 cube.svg  -o cube.png --camera    # add a perspective camera
+svg3 cube.svg3 -o cube.png --camera    # add a perspective camera
 printf '%s' "$SVG" | svg3 - -o out.png # read the document from stdin
 ```
 
@@ -89,9 +91,9 @@ svg3 doc.svg --check     # prints "<doc>: parsed OK; would render at WxH"
 
 ## Worked examples (bundled with this skill)
 
-- [`examples/cube.svg`](examples/cube.svg) — a textured 3D cube. Its `fill`
+- [`examples/cube.svg3`](examples/cube.svg3) — a textured 3D cube. Its `fill`
   references a nested `<svg>` *paint server* and `cube-map="cross"` wraps that
-  texture across the six faces. `svg3 examples/cube.svg -o cube.png --camera`.
+  texture across the six faces. `svg3 examples/cube.svg3 -o cube.png --camera`.
 - [`examples/shapes.svg`](examples/shapes.svg) — plain 2D: overlapping gradient
   circles with opacity. `svg3 examples/shapes.svg -o shapes.png`.
 

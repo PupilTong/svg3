@@ -42,14 +42,15 @@ document into a PNG:
 
 ```sh
 # Render one of the bundled demos (perspective camera for the 3D scene):
-cargo run -p svg3-cli -- svg3-skill/examples/cube.svg -o cube.png --camera
+cargo run -p svg3-cli -- svg3-skill/examples/cube.svg3 -o cube.png --camera
 
 # …or install the command and use it anywhere:
 cargo install --path svg3-cli
 svg3 svg3-skill/examples/shapes.svg -o shapes.png
 ```
 
-A minimal 3D document:
+A minimal 3D document (documents that opt into the 3D extension use the `.svg3`
+file extension; plain SVG stays `.svg`):
 
 ```xml
 <svg xmlns="http://www.w3.org/2000/svg" extension="pupiltong" width="512" height="512">
@@ -59,7 +60,7 @@ A minimal 3D document:
 ```
 
 ```sh
-svg3 cube.svg -o cube.png        # → a 512×512 PNG
+svg3 cube.svg3 -o cube.png       # → a 512×512 PNG
 ```
 
 Prefer something interactive? `cargo run -p app-macos` opens a native macOS
