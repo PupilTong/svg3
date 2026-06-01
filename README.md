@@ -59,7 +59,7 @@ guide to what the renderer actually supports today.
 - [Limitations & gotchas](#limitations--gotchas)
 - [CLI reference](#cli-reference)
 - [Generate images from your AI coding agent](#generate-images-from-your-ai-coding-agent)
-- [Interactive macOS app](#interactive-macos-app)
+- [Interactive macOS app](#interactive-macos-app) · [Web app](#web-app)
 - [How it works](#how-it-works) · [Workspace](#workspace) · [Build & run](#build--run) · [Roadmap](#roadmap) · [Contributing](#contributing) · [License](#license)
 
 ## Install
@@ -632,6 +632,31 @@ window (`svg3-macos`) where you paste SVG/svg3 text and watch it render live.
 For 3D scenes it gives you an orbiting perspective camera: **drag or arrow keys
 to orbit, scroll to zoom, `R` to reset**.
 
+## Web app
+
+The same experience runs **in the browser, on the GPU** — `svg3` compiles to
+WebAssembly and renders through [WebGPU](https://developer.mozilla.org/docs/Web/API/WebGPU_API).
+Edit an SVG / svg3 document in a textarea and watch it render live; 3D scenes get
+the same orbit camera (drag or arrow keys to orbit, scroll to zoom, `R` to
+reset). All GPU work **and** the canvas drawing happen **off the main thread in
+a Web Worker** (the worker owns a transferred `OffscreenCanvas`), so the UI stays
+responsive.
+
+The front-end (pnpm + [rsbuild](https://rsbuild.rs) + TypeScript) lives in
+[`web/`](web/) and the wasm engine in [`svg3-web/`](svg3-web/); a GitHub Actions
+workflow deploys it to GitHub Pages. It needs a **WebGPU-capable browser**
+(Chrome/Edge 113+, Safari 18+, or Firefox with WebGPU enabled). To run it
+locally:
+
+```sh
+rustup target add wasm32-unknown-unknown
+cargo install wasm-pack
+cd web && pnpm install
+pnpm wasm:dev && pnpm dev      # dev server at http://localhost:3000
+```
+
+See [`web/README.md`](web/README.md) for the full dev / build / deploy flow.
+
 ## How it works
 
 ```
@@ -649,6 +674,8 @@ presentation attributes are read directly in `svg3::render`.
 | `svg3`      | The library: `dom` (parse svg3/SVG XML into an element tree) and `render` (turn a parsed document into GPU draw calls and a headless image). |
 | `svg3-cli`  | The headless `svg3` command — render a document to a PNG. |
 | `app-macos` | Native macOS demo (`svg3-macos`): paste SVG text and render it in a wgpu window. |
+| `svg3-web`  | The browser rendering engine: `svg3` compiled to wasm (WebGPU), exposing `WebRenderer` for the `web/` front-end. |
+| `web/`      | The GitHub Pages app (pnpm + rsbuild + TS): renders in a Web Worker on an `OffscreenCanvas`. Not a cargo crate. |
 
 ## Build & run
 
@@ -676,9 +703,11 @@ cargo bench --workspace                          # criterion benches (codspeed-i
    `clipPath`/`mask`, nested viewports, and headless image output.
 4. **(done)** 3D primitive mesh generation and depth-aware 2D/3D compositing,
    including nested-SVG texture paint servers.
-5. **(paused)** Stylo CSS cascade — computed styles drive material/transform.
-6. Multi-platform native demos (Windows, Linux) + Linux/Windows CI.
-7. Native macOS `.app` bundling.
+5. **(done)** Browser app — `svg3` compiled to WebAssembly, rendering on WebGPU
+   in a Web Worker, deployed to GitHub Pages (`svg3-web` + `web/`).
+6. **(paused)** Stylo CSS cascade — computed styles drive material/transform.
+7. Multi-platform native demos (Windows, Linux) + Linux/Windows CI.
+8. Native macOS `.app` bundling.
 
 ## Contributing
 

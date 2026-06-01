@@ -1,0 +1,14 @@
+# WebAssembly build configuration for the `svg3-web` crate.
+#
+# `getrandom` is pulled in transitively (wgpu → naga/ahash) and needs an
+# explicit backend on `wasm32-unknown-unknown`. The `wasm_js` / `js` Cargo
+# features — enabled by svg3-web's wasm-only `getrandom` dependencies — select
+# the browser backend; this cfg is the matching backend selector, required by
+# getrandom 0.3.0–0.3.1 and a harmless no-op on 0.3.4. Scoped to the wasm
+# target so host builds (svg3-cli, app-macos) are untouched.
+#
+# NOTE: a `RUSTFLAGS` / `CARGO_ENCODED_RUSTFLAGS` environment variable OVERRIDES
+# (does not merge with) this block — wasm builds (incl. CI) must not also set
+# their own RUSTFLAGS, or this cfg is silently dropped.
+[target.wasm32-unknown-unknown]
+rustflags = ['--cfg', 'getrandom_backend="wasm_js"']

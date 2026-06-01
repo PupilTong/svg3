@@ -1,0 +1,40 @@
+[package]
+name = "svg3-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# `cdylib` is the wasm artifact wasm-bindgen consumes; `rlib` keeps the crate
+# usable as a normal library (e.g. for `cargo test --target wasm32`).
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# The cross-platform renderer, compiled for wasm32 here. The crate body is
+# gated behind `#![cfg(target_arch = "wasm32")]`, so on a host target these
+# dependencies are built but unreferenced — host `cargo clippy --workspace`
+# stays green without special-casing this crate's APIs.
+svg3.workspace = true
+wgpu.workspace = true
+glam.workspace = true
+log.workspace = true
+
+# Browser glue — only meaningful on wasm32, so gated to that target. Keeping
+# web-sys / wasm-bindgen under the cfg target table means a host build never
+# compiles them at all.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen.workspace = true
+wasm-bindgen-futures.workspace = true
+# `futures-channel` bridges wgpu's `map_async` callback to an awaitable future
+# for the GPU→CPU readback (no blocking `device.poll(Wait)` on the web).
+futures-channel.workspace = true
+console_error_panic_hook.workspace = true
+console_log.workspace = true
+
+# `getrandom` is transitive (wgpu → naga/ahash). On wasm32-unknown-unknown it
+# needs an explicit browser backend: getrandom 0.3 via the `wasm_js` feature,
+# getrandom 0.2 via `js`. Both majors are present in the lockfile, and two
+# majors can't share one [workspace.dependencies] key, so they're declared
+# here (renamed) purely to switch the features on. See ../.cargo/config.toml.
+getrandom_v03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+getrandom_v02 = { package = "getrandom", version = "0.2", features = ["js"] }

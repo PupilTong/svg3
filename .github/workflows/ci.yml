@@ -44,7 +44,17 @@ jobs:
         run: cargo fmt --check
 
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        # `svg3-web` is a wasm-only crate (gated behind `#![cfg(target_arch =
+        # "wasm32")]`); it builds to an empty lib on the host, so exclude it
+        # from the host lint and check it for wasm32 separately below.
+        run: cargo clippy --workspace --exclude svg3-web --all-targets --all-features -- -D warnings
+
+      - name: Clippy svg3-web (wasm32)
+        # Validates the browser renderer (and, transitively, that svg3's WGSL
+        # shaders compile for the web) on every PR.
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo clippy -p svg3-web --target wasm32-unknown-unknown -- -D warnings
 
       - name: Test & generate coverage
         # `cargo llvm-cov` runs the tests under instrumentation and emits
@@ -52,7 +62,7 @@ jobs:
         # coverage runs. The headless `svg3::render` render test exercises
         # the Metal GPU here. `app-macos` is excluded from coverage — its
         # windowed event loop is not unit-testable.
-        run: cargo llvm-cov --workspace --exclude app-macos --all-features --lcov --output-path lcov.info
+        run: cargo llvm-cov --workspace --exclude app-macos --exclude svg3-web --all-features --lcov --output-path lcov.info
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@e79a6962e0d4c0c17b229090214935d2e33f8354 # v6.0.1
@@ -95,7 +105,7 @@ jobs:
           tool: cargo-codspeed
 
       - name: Build benchmarks
-        run: cargo codspeed build --workspace --exclude app-macos
+        run: cargo codspeed build --workspace --exclude app-macos --exclude svg3-web
 
       - name: Run benchmarks (CodSpeed simulation)
         uses: CodSpeedHQ/action@3194d9a39c4d46684cb44bf7207fc56626aad8fd # v4.15.1
