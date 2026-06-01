@@ -12,9 +12,12 @@ description: >-
 # svg3-render — generate images with the `svg3` CLI
 
 `svg3` is a headless renderer: it turns an svg3/SVG document (text) into a PNG.
-svg3 is SVG 1.1 plus an opt-in 3D extension, so the same tool renders ordinary
-2D SVG *and* three-dimensional `<cube>` / `<ellipsoid>` / `<cylinder>` /
-`<surface>` scenes on the GPU.
+svg3 is SVG 1.1 **plus an opt-in 3D extension**, so the same tool renders
+ordinary 2D SVG *and* three-dimensional `<cube>` / `<ellipsoid>` / `<cylinder>`
+/ `<surface>` scenes on the GPU.
+
+**The 3D extension is specific to svg3 — it is not standard SVG, so do not rely
+on outside knowledge for it. This skill teaches it below; follow it exactly.**
 
 The loop is always: **author a document → render it with `svg3` → view the PNG
 → iterate.**
@@ -32,31 +35,98 @@ Run `svg3 --help` to see every flag.
 
 ## 2. Author the document
 
-- The root element is always `<svg>`.
-- **2D:** plain SVG 1.1 — `<rect>`, `<circle>`, `<path>`, gradients, opacity,
-  filters, clip/mask, nested `<svg>`. See [`examples/shapes.svg`](examples/shapes.svg).
-- **3D:** add `extension="pupiltong"` to the root `<svg>`, then use the 3D
-  elements and 3D transforms (`rotateX/Y/Z`, `translate3d`, `scale3d`, …).
-  **Without that attribute the 3D elements draw nothing.** See
-  [`examples/cube.svg3`](examples/cube.svg3).
-- **File extension:** save extended (3D) documents — those with
-  `extension="pupiltong"` — as `.svg3`; keep plain SVG as `.svg`.
+The root element is always `<svg>` with a pixel `width`/`height`. Build content
+inside it. **Pixels map 1:1 to user units** (the root `viewBox` is not applied),
+so author for the exact size you will render — a 512×512 render shows user space
+`0..512 × 0..512`, origin top-left, +X right, +Y down.
 
-Three things that commonly trip people up — keep them in mind while authoring:
+### 2a. Plain 2D SVG
 
-- **Pixels map 1:1 to user units.** The output is `--width × --height` pixels
-  and the document's coordinate grid lands straight on them (no `viewBox`
-  scaling yet). Author content for the size you'll render — e.g. a 512×512
-  render shows user space `0..512 × 0..512`.
-- **Transforms rotate about the origin** (just like SVG 1.1). To spin a shape
-  about its own centre, place it at the origin and translate it into position:
-  `transform="translate(256 256) rotateY(35deg) rotateX(-22deg)"`.
-- **The background is transparent.** In 2D, add a backdrop `<rect>` if you want
-  one. In a 3D (`pupiltong`) scene, prefer leaving it transparent — a
-  full-frame 2D backdrop and 3D primitives don't depth-compose cleanly yet.
+Standard SVG 1.1: `<rect>`, `<circle>`, `<ellipse>`, `<line>`, `<polyline>`,
+`<polygon>`, `<path>`, grouped with `<g>`, plus gradients, patterns, markers,
+filters, `<clipPath>`/`<mask>`, and nested `<svg>` viewports. Shapes paint in
+document order (later on top). See [`examples/shapes.svg`](examples/shapes.svg).
 
-For the full language read **SPEC.md**; for the currently-supported subset read
-the project **README.md** — both at <https://github.com/PupilTong/svg3>.
+```xml
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512">
+  <rect width="512" height="512" fill="#0a1020"/>
+  <circle cx="256" cy="256" r="150" fill="#ff7a59" opacity="0.9"/>
+  <path d="M 96 380 C 180 280 332 280 416 380" fill="none"
+        stroke="#7ad7f0" stroke-width="10" stroke-linecap="round"/>
+</svg>
+```
+
+### 2b. The svg3 3D extension
+
+To use 3D, add **`extension="pupiltong"`** to the root `<svg>`. **Without that
+attribute the 3D elements draw nothing** — this is the single most common
+mistake. Save 3D documents as `.svg3` (plain SVG stays `.svg`). See
+[`examples/cube.svg3`](examples/cube.svg3).
+
+**The coordinate system gains a Z axis: +X right, +Y down, +Z toward the
+viewer** (left-handed). 2D content stays in the plane `z = 0`. Greater Z is
+closer to the camera and occludes lesser Z.
+
+**The four primitives** are centered at `(cx, cy, cz)` and painted with `fill`
+and `opacity` (no `stroke`). Copy-pasteable, render-ready bodies — drop any of
+these inside a `<svg extension="pupiltong" width="512" height="512">` root:
+
+```xml
+<!-- CUBE. `size` = all edges; or set width/height/depth independently. -->
+<cube cx="256" cy="256" cz="0" size="220" fill="#f2c14e"/>
+
+<!-- ELLIPSOID (sphere when rx=ry=rz). `r` sets all three radii. -->
+<ellipsoid cx="256" cy="256" cz="0" r="140" fill="#10b981"/>
+
+<!-- CYLINDER, axis along Z. `depth` = length, `r` = cap radius. -->
+<cylinder cx="256" cy="256" cz="0" r="120" depth="180" fill="#c14b2b"/>
+
+<!-- SURFACE: child <path> cross-sections linked by Bezier patches.
+     "M 0 L 1" rules a flat strip between path 0 and path 1. -->
+<surface d="M 0 L 1" fill="#ec4899">
+  <path d="M 160 200 L 352 200"/>
+  <path d="M 160 200 L 352 200" transform="translate(0, 120)"/>
+</surface>
+```
+
+3D primitive attributes at a glance:
+
+| Element | Attributes |
+|---|---|
+| `<cube>` | `cx cy cz`, `size` **or** `width`/`height`/`depth`, `cube-map` (`same`\|`cross`) |
+| `<ellipsoid>` | `cx cy cz`, `r` **or** `rx`/`ry`/`rz` |
+| `<cylinder>` | `cx cy cz`, `r` **or** `rx`/`ry`, `depth` |
+| `<surface>` | `d` (index chain: `M i`, `L j`, `Q i j`, `C i j k`, `Z`, `P t r b l`) + child `<path>` curves |
+
+### 2c. Transforms — and the rotate-about-origin gotcha
+
+Position and orient with the `transform` attribute. svg3 adds 3D functions to
+the SVG 1.1 set, mixable in one attribute and composed left-to-right:
+
+- 3D: `rotateX(a)`, `rotateY(a)`, `rotateZ(a)`, `rotate3d(x,y,z,a)`,
+  `translate3d(tx,ty,tz)`, `translateZ(tz)`, `scale3d(...)`, `scaleZ(s)`,
+  `matrix3d(...)`. Angles take `deg` (default), `rad`, `grad`, `turn`.
+- 2D (still available): `translate`, `scale`, `rotate`, `skewX`, `skewY`, `matrix`.
+
+**Gotcha: transforms rotate about the origin `(0,0,0)`, not the shape's center.**
+To spin a primitive in place, build it at the origin (`cx=cy=cz=0`) and *then*
+translate it into the frame:
+
+```xml
+<!-- Build at origin → rotate → move to the center of a 512² frame: -->
+<cube cx="0" cy="0" cz="0" size="220"
+      transform="translate(256 256) rotateY(35deg) rotateX(-22deg)"
+      fill="#e8743b"/>
+```
+
+### 2d. Texturing a primitive with a nested `<svg>`
+
+A primitive's `fill` can reference a nested `<svg>` (by `id`) as a paint server;
+its rasterized content wraps over the surface as a texture. For a cube, set
+`cube-map="cross"` and lay the texture out as a 4×3 horizontal cross (`+Y` top;
+`-X / +Z / +X / -Z` middle row; `-Y` bottom), or `cube-map="same"` to show the
+whole texture on every face. Ellipsoid wraps equirectangularly; cylinder wraps
+the side wall + polar-disk caps. See [`examples/cube.svg3`](examples/cube.svg3).
 
 ## 3. Render
 
@@ -67,10 +137,10 @@ svg3 cube.svg3 -o cube.png --camera    # add a perspective camera
 printf '%s' "$SVG" | svg3 - -o out.png # read the document from stdin
 ```
 
-`--camera` views the scene through a perspective camera that frames the
-`width × height` region, so centre 3D content at `(width/2, height/2)`. Without
-it, 3D still renders — just in **orthographic** (parallel) projection, with no
-perspective foreshortening.
+`--camera` views the scene through a **perspective** camera that frames the
+`width × height` region, so **center 3D content at `(width/2, height/2)`**.
+Without it, 3D still renders — just in **orthographic** (parallel) projection,
+with no perspective foreshortening. Plain 2D documents render head-on either way.
 
 ## 4. View the result, then iterate
 
@@ -78,6 +148,39 @@ perspective foreshortening.
 Claude Code, the Read tool renders images). A zero exit code only means a file
 was written — it does not tell you the picture is correct. Then edit the
 document, re-render, and repeat until it looks right.
+
+## Constraints & gotchas (read before authoring)
+
+These trip people up because svg3 supports a *subset* of SVG and a non-standard
+3D layer. Author within them from the start:
+
+- **Opt into 3D:** 3D elements/transforms do nothing without
+  `extension="pupiltong"` on the root.
+- **Colors are hex or a small named set only.** Use `#rgb` / `#rrggbb`, or:
+  `black white red green blue yellow cyan/aqua magenta/fuchsia gray/grey silver
+  maroon navy orange purple lime teal`. **`rgb()`, `hsl()`, `#rrggbbaa`, and
+  other CSS color names (e.g. `skyblue`, `crimson`) are NOT supported** — an
+  unknown `fill` falls back to black. Convert any other color to hex.
+- **Style via attributes, not CSS.** Write `fill="#ff0000"`, never
+  `style="fill:#ff0000"`. The `style` attribute is ignored except on `<stop>`
+  and nested-`<svg>` `overflow`.
+- **For transparency**, use `opacity` / `fill-opacity` / `stroke-opacity` (or
+  `stop-opacity` on gradient stops), not an alpha hex.
+- **Pixels are 1:1** and the root `viewBox` is ignored — author for the exact
+  `-W`/`-H`. (`viewBox` works on *nested* `<svg>`.)
+- **3D primitives take only `fill` + `opacity`** — no `stroke`, `clip-path`,
+  `mask`, or `filter` on them.
+- **Background is transparent.** In 2D, add a backdrop `<rect>` if you want one.
+  In a 3D scene prefer leaving it transparent — a full-frame 2D backdrop and 3D
+  primitives don't depth-compose cleanly.
+- **Not supported:** `<text>`, `<image>`, `<use>`, `<tspan>`, `<symbol>` (they
+  render empty). No raster images except via `feImage` PNG data URLs. Gradients
+  have no focal point / `gradientTransform` / `spreadMethod`; patterns tile only
+  solid `<rect>` children.
+
+For the full formal language read **SPEC.md**; for the complete supported-feature
+reference read the project **README.md** — both at
+<https://github.com/PupilTong/svg3>.
 
 ## Validate without a GPU
 
