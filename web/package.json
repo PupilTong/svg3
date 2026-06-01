@@ -1,0 +1,19 @@
+{
+  "name": "svg3-web-app",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "packageManager": "pnpm@10.33.0",
+  "description": "Browser front-end for svg3: render extended-SVG 3D documents on the GPU (WebGPU) in a Web Worker.",
+  "scripts": {
+    "wasm:dev": "wasm-pack build ../svg3-web --target web --out-dir ../web/src/wasm --dev",
+    "wasm:build": "wasm-pack build ../svg3-web --target web --out-dir ../web/src/wasm --release",
+    "dev": "rsbuild dev",
+    "build": "rsbuild build",
+    "preview": "rsbuild preview"
+  },
+  "devDependencies": {
+    "@rsbuild/core": "^1.5.0",
+    "typescript": "^5.7.3"
+  }
+}

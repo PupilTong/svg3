@@ -87,12 +87,17 @@ fn vs_fullscreen(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
 
 // ---- Helpers ---------------------------------------------------------------
 
+// Explicit LOD 0 (`textureSampleLevel`) rather than `textureSample`: these
+// filter inputs are never mipmapped, and an implicit-derivative `textureSample`
+// is illegal in non-uniform control flow (these helpers are called from the
+// convolve edge-mode branch), which browser WGSL validators reject. LOD 0 is
+// identical for a single-level texture, so native output is unchanged.
 fn sample_in1(uv: vec2<f32>) -> vec4<f32> {
-    return textureSample(source_texture, source_sampler, uv);
+    return textureSampleLevel(source_texture, source_sampler, uv, 0.0);
 }
 
 fn sample_in2(uv: vec2<f32>) -> vec4<f32> {
-    return textureSample(source_texture2, source_sampler, uv);
+    return textureSampleLevel(source_texture2, source_sampler, uv, 0.0);
 }
 
 fn unpremultiply(color: vec4<f32>) -> vec4<f32> {

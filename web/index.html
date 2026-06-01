@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>svg3 · web</title>
+    <meta
+      name="description"
+      content="Render extended-SVG 3D documents in the browser on the GPU (WebGPU) — rendering happens off the main thread in a Web Worker."
+    />
+  </head>
+  <body>
+    <div id="app">
+      <header class="topbar">
+        <div class="brand">
+          <h1>svg3<span class="brand__dot">·</span><span class="brand__web">web</span></h1>
+          <p>extended SVG → 3D, rendered on the GPU in your browser</p>
+        </div>
+        <div class="badges">
+          <span id="gpu-badge" class="badge badge--pending">checking WebGPU…</span>
+          <a
+            class="badge badge--link"
+            href="https://github.com/PupilTong/svg3"
+            target="_blank"
+            rel="noreferrer"
+            >GitHub ↗</a
+          >
+        </div>
+      </header>
+
+      <main class="workspace">
+        <section class="editor">
+          <label class="panel-label" for="source">
+            Document <span>SVG / svg3 — edits render live</span>
+          </label>
+          <textarea
+            id="source"
+            spellcheck="false"
+            autocomplete="off"
+            autocapitalize="off"
+            wrap="off"
+          ></textarea>
+        </section>
+
+        <section class="stage">
+          <div class="canvas-wrap">
+            <canvas id="canvas"></canvas>
+            <div id="overlay" class="overlay" hidden>
+              <div class="overlay__card">
+                <h2 id="overlay-title">WebGPU required</h2>
+                <p id="overlay-body"></p>
+              </div>
+            </div>
+          </div>
+          <div class="hud">
+            <span id="status" class="status">starting…</span>
+            <span class="spacer"></span>
+            <span id="camera" class="camera"></span>
+            <button id="reset" class="btn" type="button" title="Reframe head-on (R)">
+              Reset view
+            </button>
+          </div>
+          <p class="hint">
+            drag or arrow keys orbit · scroll to zoom · <kbd>R</kbd> resets — 3D
+            needs <code>extension="pupiltong"</code> on the root
+          </p>
+        </section>
+      </main>
+    </div>
+  </body>
+</html>

@@ -1,0 +1,8 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Generated wasm-pack package (built by `pnpm wasm:build` from ../svg3-web)
+src/wasm/

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["svg3", "svg3-cli", "app-macos"]
+members = ["svg3", "svg3-cli", "app-macos", "svg3-web"]
 
 [workspace.package]
 version = "0.1.0"
@@ -16,6 +16,16 @@ wgpu = "29"
 winit = "0.30"            # 0.30 stable; 0.31 is beta — avoid
 pollster = "0.4"
 bytemuck = "1"
+
+# Web / wasm (svg3-web). Only the svg3-web crate consumes these, and only when
+# built for wasm32; declared here to keep the repo's "versions live once in
+# [workspace.dependencies]" convention. (getrandom's two majors can't share a
+# single key, so they're declared locally in svg3-web — see that Cargo.toml.)
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+futures-channel = "0.3"
+console_error_panic_hook = "0.1"
+console_log = "1"
 
 # Math
 glam = "0.32"

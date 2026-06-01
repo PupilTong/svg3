@@ -134,8 +134,18 @@ fn sd_round_box(p: vec2<f32>, b: vec2<f32>, r: vec2<f32>) -> f32 {
 // user units per device pixel) an unclamped ramp would extend beyond the
 // quad and be clipped where there are no fragments. Clamping narrows the
 // ramp instead, keeping the whole anti-aliased edge inside the quad.
-fn coverage(dist: f32, local: vec2<f32>) -> f32 {
-    let aa = min(max(fwidth(local.x), fwidth(local.y)) * 0.5, SDF_PAD);
+// `fwidth(local)` measures user units per device pixel. WGSL requires
+// derivative builtins (`fwidth`/`dpdx`/`dpdy`) to be evaluated in *uniform*
+// control flow, so `fs_main` calls this up front — before any discard or
+// kind-dependent branch — and threads the result into `coverage`. (Native
+// naga is lenient about this; browser WGSL validators enforce it.)
+fn edge_aa(local: vec2<f32>) -> f32 {
+    return min(max(fwidth(local.x), fwidth(local.y)) * 0.5, SDF_PAD);
+}
+
+// Anti-aliased coverage in `[0, 1]` from a signed distance and the precomputed
+// edge half-width `aa` (see `edge_aa`).
+fn coverage(dist: f32, aa: f32) -> f32 {
     return 1.0 - smoothstep(-aa, aa, dist);
 }
 
@@ -252,6 +262,10 @@ fn evaluate_paint(in: VertexOutput) -> vec4<f32> {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    // Evaluate the screen-space derivative up front: `fwidth` is only valid in
+    // uniform control flow, and everything below may discard or branch on
+    // non-uniform values (`paint_color.a`, `in.kind`, `dist`).
+    let aa = edge_aa(in.local);
     let paint_color = evaluate_paint(in);
     // Fully transparent paint should not occupy the shared depth buffer.
     // Otherwise an invisible 2D shape with `fill-opacity="0"` would still
@@ -284,5 +298,5 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Straight (non-premultiplied) alpha: fold coverage into alpha only — the
     // pipeline's `ALPHA_BLENDING` multiplies rgb by alpha itself.
-    return vec4<f32>(paint_color.rgb, paint_color.a * coverage(dist, in.local));
+    return vec4<f32>(paint_color.rgb, paint_color.a * coverage(dist, aa));
 }
