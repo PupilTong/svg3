@@ -208,6 +208,14 @@ Each is centred at `(cx, cy, cz)` and painted with `fill` and `opacity` (no
 </surface>
 ```
 
+> **To make them look 3D, shade them with a `filter`.** The renderer does no
+> lighting on 3D primitives, so a bare `<ellipsoid fill="#10b981"/>` is a flat
+> disc, not a sphere. Blur the silhouette's `SourceAlpha` into
+> `feDiffuseLighting` / `feSpecularLighting` and the primitive reads as rounded
+> ceramic — the filter shades its projected silhouette. Use a **solid `fill`**;
+> a gradient `fill` maps through the UV and shows the wrap seam (ellipsoid) or
+> per-patch stripes (surface). See [Filters](#filters).
+
 See [3D primitives](#3d-primitives) for every attribute.
 
 ### 4. Transforms — and the one gotcha
@@ -464,9 +472,12 @@ also the mechanism behind [3D textures](#an-svg-as-a-3d-texture).
 
 Require `extension="pupiltong"` on the root. Painted with `fill` (a color or an
 [`<svg>` texture](#an-svg-as-a-3d-texture)) and `opacity`; `stroke` and the
-stroke properties do not apply. All accept `transform` (see
-[3D transforms](#3d-transform-functions)). A negative dimension is an error
-(nothing renders); a zero dimension disables just that element.
+stroke properties do not apply. They are **flat-filled — there is no scene
+lighting**, so a `filter` is how you shade them: it acts on the primitive's
+projected silhouette (`clip-path` / `mask`, by contrast, are not defined on 3D
+elements). All accept `transform` (see [3D transforms](#3d-transform-functions)).
+A negative dimension is an error (nothing renders); a zero dimension disables
+just that element.
 
 **`<cube>`** — axis-aligned box.
 
@@ -508,7 +519,11 @@ mini-language:
 | `Z` | close back to the start path |
 | `P t r b l` | a Coons patch bounded by four cubic-Bezier paths (top/right/bottom/left) |
 
-All referenced paths must flatten to the same number of samples. The simplest
+All referenced paths must flatten to the same number of samples. To build a
+smooth tube or lathed shape (a spout, a vase), reuse **one** canonical
+cross-section `d` and vary only each child's `transform` (`scale`/rotate/
+`translate3d`) — children flatten in *local* space before their transform, so
+every cross-section keeps the same sample count automatically. The simplest
 surface rules one flat strip between two parallel lines:
 
 ```xml
@@ -585,8 +600,10 @@ A consolidated list of what to expect — most are mentioned in context above.
 - **Lengths** are unitless / `px` / `%` only.
 - **Gradients** lack focal points, `gradientTransform`, `spreadMethod`, and
   `href` inheritance; **patterns** tile only solid `<rect>` children.
-- **3D primitives** take `fill` + `opacity` only — no `stroke`, and `clip-path`
-  / `mask` / `filter` are not defined on them.
+- **3D primitives are flat-filled** (no scene lighting) and take no `stroke`;
+  `clip-path` / `mask` are not defined on them. A **`filter` does apply** — and
+  is the way to shade them into looking round (see
+  [the 3D extension](#the-3d-extension)).
 - **No `<text>`, `<image>`, `<use>`, `<tspan>`, or `<symbol>`** — these parse but
   render as empty. (Raster images are only reachable via `feImage` data URLs.)
 - **Full-frame 2D backdrops + 3D** don't always depth-compose cleanly; prefer a
