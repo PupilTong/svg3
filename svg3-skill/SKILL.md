@@ -128,6 +128,71 @@ its rasterized content wraps over the surface as a texture. For a cube, set
 whole texture on every face. Ellipsoid wraps equirectangularly; cylinder wraps
 the side wall + polar-disk caps. See [`examples/cube.svg3`](examples/cube.svg3).
 
+### 2e. Shade a 3D primitive with a lighting filter
+
+**The engine does no lighting on 3D primitives**, so a solid-`fill` `<ellipsoid>`
+is just a flat disc. To fake rounded shading, apply an SVG **lighting filter**:
+blur the silhouette's `SourceAlpha` into a height field, light it with
+`feDiffuseLighting` (+ optional `feSpecularLighting`), and composite over the
+fill. It shades the primitive's *projected silhouette*, so the same filter works
+on every primitive (and on 2D shapes). Drop this `gloss` filter in `<defs>` and
+reference it with `filter="url(#gloss)"`:
+
+```xml
+<filter id="gloss">
+  <feGaussianBlur in="SourceAlpha" stdDeviation="8" result="bump"/>
+  <feDiffuseLighting in="bump" surfaceScale="10" diffuseConstant="0.95"
+                     lighting-color="#fff4dc" result="diff">
+    <feDistantLight azimuth="135" elevation="58"/>
+  </feDiffuseLighting>
+  <feComposite in="diff" in2="SourceGraphic" operator="arithmetic"
+               k1="1" k2="0" k3="0" k4="0" result="shaded"/>
+  <feSpecularLighting in="bump" surfaceScale="10" specularConstant="0.6"
+                      specularExponent="26" lighting-color="#ffffff" result="spec">
+    <feDistantLight azimuth="135" elevation="58"/>
+  </feSpecularLighting>
+  <feComposite in="spec" in2="SourceGraphic" operator="in" result="spec-in"/>
+  <feComposite in="spec-in" in2="shaded" operator="arithmetic"
+               k1="0" k2="1" k3="1" k4="0"/>
+</filter>
+...
+<ellipsoid cx="256" cy="256" cz="0" r="140" fill="#5fa98a" filter="url(#gloss)"/>
+```
+
+Pair the filter with a **solid `fill`** (not a gradient — see the gotchas).
+Because each filtered element composites as its own layer in document order,
+build an overlapping 3D scene **back-to-front** (e.g. a teapot's handle and
+spout *before* the body; the lid and knob *after*).
+
+### 2f. Tubes & lathed shapes from one `<surface>`
+
+A `<surface>` lofts its child `<path>` cross-sections, and **each child flattens
+in its own local coordinates _before_ its `transform` applies.** So the reliable
+way to build a smooth tube, spout, handle, or vase is to **reuse one canonical
+cross-section `d`** (e.g. a circle) for every ring and vary only each ring's
+`transform` — `scale` for radius, rotations to orient, `translate3d` to place.
+Every ring then flattens to the *same* sample count, satisfying surface's "all
+cross-sections must share a sample count" rule for free (varying the radius
+inside the `d` instead would change the count and silently void the surface).
+
+To stand a circle perpendicular to a centreline whose tangent points at angle β
+in the XY plane, orient it `rotateZ(β+90) rotateX(90)`:
+
+```xml
+<!-- a tapering tube: 3 rings of one unit circle, lofted M 0 L 1 L 2 -->
+<surface d="M 0 L 1 L 2" fill="#5fa98a" filter="url(#gloss)">
+  <path d="M 40 0 C 40 22.1 22.1 40 0 40 C -22.1 40 -40 22.1 -40 0 C -40 -22.1 -22.1 -40 0 -40 C 22.1 -40 40 -22.1 40 0 Z"
+        transform="translate3d(180,360,0) rotateZ(70) rotateX(90) scale(1.0)"/>
+  <path d="M 40 0 C 40 22.1 22.1 40 0 40 C -22.1 40 -40 22.1 -40 0 C -40 -22.1 -22.1 -40 0 -40 C 22.1 -40 40 -22.1 40 0 Z"
+        transform="translate3d(250,300,0) rotateZ(55) rotateX(90) scale(0.7)"/>
+  <path d="M 40 0 C 40 22.1 22.1 40 0 40 C -22.1 40 -40 22.1 -40 0 C -40 -22.1 -22.1 -40 0 -40 C 22.1 -40 40 -22.1 40 0 Z"
+        transform="translate3d(300,250,0) rotateZ(40) rotateX(90) scale(0.4)"/>
+</surface>
+```
+
+See [`examples/teapot.svg3`](examples/teapot.svg3) — its spout and handle are
+tubes built exactly this way, on a filter-shaded `<ellipsoid>` body.
+
 ## 3. Render
 
 ```sh
@@ -168,8 +233,15 @@ These trip people up because svg3 supports a *subset* of SVG and a non-standard
   `stop-opacity` on gradient stops), not an alpha hex.
 - **Pixels are 1:1** and the root `viewBox` is ignored — author for the exact
   `-W`/`-H`. (`viewBox` works on *nested* `<svg>`.)
-- **3D primitives take only `fill` + `opacity`** — no `stroke`, `clip-path`,
-  `mask`, or `filter` on them.
+- **3D primitives are flat-filled — there is no scene lighting.** A bare
+  `<ellipsoid fill="#5fa98a"/>` renders as a flat disc, not a sphere. To make 3D
+  shapes look round you **must** shade them — apply a lighting `filter` (§2e).
+  `stroke`, `clip-path`, and `mask` still do nothing on 3D primitives.
+- **Don't use a gradient/texture `fill` to *shade* a 3D primitive.** The paint
+  maps through the primitive's UV, so a gradient reveals the seam of an
+  ellipsoid's equirectangular wrap and *tiles per-patch* on a `<surface>`
+  (stripes along a tube). For rounded form use a **solid `fill` + a lighting
+  filter** (§2e); reserve textures (§2d) for surface *imagery*.
 - **Background is transparent.** In 2D, add a backdrop `<rect>` if you want one.
   In a 3D scene prefer leaving it transparent — a full-frame 2D backdrop and 3D
   primitives don't depth-compose cleanly.
@@ -197,6 +269,10 @@ svg3 doc.svg --check     # prints "<doc>: parsed OK; would render at WxH"
 - [`examples/cube.svg3`](examples/cube.svg3) — a textured 3D cube. Its `fill`
   references a nested `<svg>` *paint server* and `cube-map="cross"` wraps that
   texture across the six faces. `svg3 examples/cube.svg3 -o cube.png --camera`.
+- [`examples/teapot.svg3`](examples/teapot.svg3) — a ceramic teapot: `<ellipsoid>`
+  body/lid/knob plus `<surface>` tube spout & handle (§2f), all shaded by one
+  `gloss` lighting filter (§2e) over solid fills, on a pushed-back backdrop.
+  `svg3 examples/teapot.svg3 -o teapot.png`.
 - [`examples/shapes.svg`](examples/shapes.svg) — plain 2D: overlapping gradient
   circles with opacity. `svg3 examples/shapes.svg -o shapes.png`.
 

@@ -1,0 +1,101 @@
+<svg xmlns="http://www.w3.org/2000/svg" extension="pupiltong" width="512" height="512">
+  <!-- A 3D teapot, svg3 style.
+       * Body / lid / knob are <ellipsoid>s.
+       * Spout and handle are <surface> tubes: one canonical circle (local
+         radius 40) is repeated as each cross-section <path>; each ring is
+         scaled (s = ring radius / 40), stood perpendicular to the centreline
+         (rotateZ(beta+90) rotateX(90)) and placed at (cx,cy), then lofted
+         with a ruled M..L chain. Child paths flatten in LOCAL space *before*
+         their transform, so every ring shares the same sample count.
+       * Shading is faked with the crab's gloss filter (blur SourceAlpha ->
+         diffuse + specular light), so flat-filled silhouettes read as
+         rounded ceramic.
+       Render: svg3 teapot.svg3 -o teapot.png  (orthographic) -->
+  <defs>
+    <!-- Ceramic gloss: soft diffuse base + tight specular highlight. -->
+    <filter id="gloss">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="8" result="bump"/>
+      <feDiffuseLighting in="bump" surfaceScale="10" diffuseConstant="0.95"
+                         lighting-color="#fff4dc" result="diff">
+        <feDistantLight azimuth="135" elevation="58"/>
+      </feDiffuseLighting>
+      <feComposite in="diff" in2="SourceGraphic" operator="arithmetic"
+                   k1="1" k2="0" k3="0" k4="0" result="shaded"/>
+      <feSpecularLighting in="bump" surfaceScale="10" specularConstant="0.6"
+                          specularExponent="26" lighting-color="#ffffff"
+                          result="spec">
+        <feDistantLight azimuth="135" elevation="58"/>
+      </feSpecularLighting>
+      <feComposite in="spec" in2="SourceGraphic" operator="in"
+                   result="spec-in"/>
+      <feComposite in="spec-in" in2="shaded" operator="arithmetic"
+                   k1="0" k2="1" k3="1" k4="0"/>
+    </filter>
+
+    <!-- Soft studio backdrop. -->
+    <linearGradient id="g-bg" x1="0" y1="0" x2="0" y2="512"
+                    gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#eef3f1"/>
+      <stop offset="1" stop-color="#cbd7d2"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Backdrop, pushed well behind the pot so it does not depth-fight the
+       3D primitives (which span z = -145..145). -->
+  <rect x="-20" y="-20" width="552" height="552" fill="url(#g-bg)"
+        transform="translate3d(0,0,-300)"/>
+
+  <!-- Contact shadow, tucked under the rounded base. -->
+  <ellipse cx="260" cy="424" rx="150" ry="20" fill="#163029" opacity="0.18"/>
+
+  <!-- ================= HANDLE (drawn first: behind the body) =================
+       A smooth C-tube on the viewer's left; its top/bottom ends tuck inside
+       the body silhouette, the middle bulges out as the grip. -->
+  <surface d="M 0 L 1 L 2 L 3 L 4 L 5" fill="#5fa98a" filter="url(#gloss)">
+    <path d="M 40 0 C 40 22.091 22.091 40 0 40 C -22.091 40 -40 22.091 -40 0 C -40 -22.091 -22.091 -40 0 -40 C 22.091 -40 40 -22.091 40 0 Z"
+          transform="translate3d(150,235,0) rotateZ(252.8) rotateX(90) scale(0.475)"/>
+    <path d="M 40 0 C 40 22.091 22.091 40 0 40 C -22.091 40 -40 22.091 -40 0 C -40 -22.091 -22.091 -40 0 -40 C 22.091 -40 40 -22.091 40 0 Z"
+          transform="translate3d(108,248,0) rotateZ(236.5) rotateX(90) scale(0.425)"/>
+    <path d="M 40 0 C 40 22.091 22.091 40 0 40 C -22.091 40 -40 22.091 -40 0 C -40 -22.091 -22.091 -40 0 -40 C 22.091 -40 40 -22.091 40 0 Z"
+          transform="translate3d(82,280,0) rotateZ(203.2) rotateX(90) scale(0.4)"/>
+    <path d="M 40 0 C 40 22.091 22.091 40 0 40 C -22.091 40 -40 22.091 -40 0 C -40 -22.091 -22.091 -40 0 -40 C 22.091 -40 40 -22.091 40 0 Z"
+          transform="translate3d(78,318,0) rotateZ(167.1) rotateX(90) scale(0.4)"/>
+    <path d="M 40 0 C 40 22.091 22.091 40 0 40 C -22.091 40 -40 22.091 -40 0 C -40 -22.091 -22.091 -40 0 -40 C 22.091 -40 40 -22.091 40 0 Z"
+          transform="translate3d(98,350,0) rotateZ(136.8) rotateX(90) scale(0.425)"/>
+    <path d="M 40 0 C 40 22.091 22.091 40 0 40 C -22.091 40 -40 22.091 -40 0 C -40 -22.091 -22.091 -40 0 -40 C 22.091 -40 40 -22.091 40 0 Z"
+          transform="translate3d(145,368,0) rotateZ(111.0) rotateX(90) scale(0.475)"/>
+  </surface>
+
+  <!-- ================= SPOUT (drawn second: behind the body) =================
+       A tapering tube. Its fat base sits low in the body's right bulge and
+       sweeps up-right; the body (drawn next) hides the base so it looks
+       grown-in rather than stuck-on. -->
+  <surface d="M 0 L 1 L 2 L 3 L 4 L 5" fill="#5fa98a" filter="url(#gloss)">
+    <path d="M 40 0 C 40 22.091 22.091 40 0 40 C -22.091 40 -40 22.091 -40 0 C -40 -22.091 -22.091 -40 0 -40 C 22.091 -40 40 -22.091 40 0 Z"
+          transform="translate3d(335,318,0) rotateZ(81.5) rotateX(90) scale(0.75)"/>
+    <path d="M 40 0 C 40 22.091 22.091 40 0 40 C -22.091 40 -40 22.091 -40 0 C -40 -22.091 -22.091 -40 0 -40 C 22.091 -40 40 -22.091 40 0 Z"
+          transform="translate3d(375,312,0) rotateZ(74.1) rotateX(90) scale(0.75)"/>
+    <path d="M 40 0 C 40 22.091 22.091 40 0 40 C -22.091 40 -40 22.091 -40 0 C -40 -22.091 -22.091 -40 0 -40 C 22.091 -40 40 -22.091 40 0 Z"
+          transform="translate3d(412,296,0) rotateZ(57.1) rotateX(90) scale(0.65)"/>
+    <path d="M 40 0 C 40 22.091 22.091 40 0 40 C -22.091 40 -40 22.091 -40 0 C -40 -22.091 -22.091 -40 0 -40 C 22.091 -40 40 -22.091 40 0 Z"
+          transform="translate3d(440,270,0) rotateZ(41.6) rotateX(90) scale(0.525)"/>
+    <path d="M 40 0 C 40 22.091 22.091 40 0 40 C -22.091 40 -40 22.091 -40 0 C -40 -22.091 -22.091 -40 0 -40 C 22.091 -40 40 -22.091 40 0 Z"
+          transform="translate3d(460,242,0) rotateZ(33.7) rotateX(90) scale(0.4)"/>
+    <path d="M 40 0 C 40 22.091 22.091 40 0 40 C -22.091 40 -40 22.091 -40 0 C -40 -22.091 -22.091 -40 0 -40 C 22.091 -40 40 -22.091 40 0 Z"
+          transform="translate3d(476,216,0) rotateZ(31.6) rotateX(90) scale(0.25)"/>
+  </surface>
+
+  <!-- ================= BODY ================= -->
+  <ellipsoid cx="256" cy="302" cz="0" rx="145" ry="112" rz="145"
+             fill="#5fa98a" filter="url(#gloss)"/>
+
+  <!-- ================= LID (dome) + KNOB ================= -->
+  <ellipsoid cx="256" cy="180" cz="0" rx="86" ry="42" rz="86"
+             fill="#5fa98a" filter="url(#gloss)"/>
+  <ellipsoid cx="256" cy="132" cz="0" rx="22" ry="20" rz="22"
+             fill="#5fa98a" filter="url(#gloss)"/>
+
+  <!-- Spout opening: a dark foreshortened ellipse at the tip. -->
+  <ellipse cx="475" cy="217" rx="10" ry="4" fill="#173a2d" opacity="0.9"
+           transform="rotate(31.6 475 217)"/>
+</svg>

@@ -26,6 +26,7 @@ use std::path::{Path, PathBuf};
 
 mod common;
 mod crab_cases;
+mod teapot_case;
 
 use common::{png_data_uri, quadrant_png_data_uri, solid_png_data_uri};
 use svg3::dom::parse;
@@ -1604,6 +1605,19 @@ fn cases() -> Vec<Case> {
             crab_cases::CRAB_2D_REFERENCE_SVG,
             crab_cases::CRAB_2D_REFERENCE_WIDTH,
             crab_cases::CRAB_2D_REFERENCE_HEIGHT,
+        ),
+
+        // ---- 3D teapot ----
+        //
+        // Ellipsoid body/lid/knob + two `<surface>` tube spout/handle, shaded
+        // by one `gloss` filter over solid fills (no scene lighting). The
+        // regression evidence for filter-shaded 3D primitives and reused-
+        // cross-section surface tubes; fixture in `tests/teapot_case.rs`.
+        Case::sized(
+            "teapot",
+            teapot_case::TEAPOT_SVG,
+            teapot_case::TEAPOT_SIZE,
+            teapot_case::TEAPOT_SIZE,
         ),
     ]
 }
